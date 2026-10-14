@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "voicestream"
+version = "0.1.0"
+description = "Always-on meeting voice stream: captures mic + system audio, transcribes live, extracts action items with Claude, pushes them to your tools, and dispatches agents to do the work while you're still in the meeting."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+  "numpy>=1.26",
+  "pydantic>=2.6",
+  "httpx>=0.27",
+  "anthropic>=0.70",
+  "websockets>=13",
+]
+
+[project.optional-dependencies]
+# Live capture: microphone (all OSes) + system-audio loopback (Windows / Linux).
+audio = ["sounddevice>=0.4.6", "soundcard>=0.4.3"]
+# Free, offline transcription.
+local = ["faster-whisper>=1.0"]
+# Periodic screenshots of what's being shared.
+screen = ["mss>=9.0", "pillow>=10.0"]
+# Live web dashboard (transcript, action items, approve/run buttons).
+dashboard = ["starlette>=0.37", "uvicorn>=0.29"]
+# Agents that actually do tasks mid-meeting.
+agents = ["claude-agent-sdk>=0.2.167"]
+all = ["voicestream[audio,local,screen,dashboard,agents]"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "starlette>=0.37", "uvicorn>=0.29", "pillow>=10.0"]
+
+[project.scripts]
+voicestream = "voicestream.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voicestream"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q"
