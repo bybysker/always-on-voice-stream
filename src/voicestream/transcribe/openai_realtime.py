@@ -206,7 +206,7 @@ class OpenAIRealtimeTranscriber(Transcriber):
                     except Exception as exc:
                         status = getattr(getattr(exc, "response", None), "status_code", None)
                         if status in (401, 403):
-                            raise TranscriptionError(f"OpenAI realtime auth failed (HTTP {status})") from exc
+                            raise TranscriptionError(f"OpenAI realtime auth failed (HTTP {status})", fatal=True) from exc
                         log.warning("%s: realtime connect failed (%r); retrying in %.0fs", source, exc, delay)
                         await asyncio.sleep(delay)
                         delay = min(delay * 2, 30.0)

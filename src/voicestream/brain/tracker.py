@@ -147,9 +147,10 @@ class ItemTracker:
         if result.meeting_title and not self.meeting.title:
             self.meeting.title = result.meeting_title.strip()[:120]
             self._publish("meeting.updated", title=self.meeting.title)
+        me = {self.user_name.strip().lower(), *_FIRST_PERSON, *_ASSISTANT}
         for p in result.participants:
             p = p.strip()
-            if p and p.lower() not in {x.lower() for x in self.meeting.participants} and p.lower() not in _FIRST_PERSON:
+            if p and p.lower() not in {x.lower() for x in self.meeting.participants} and p.lower() not in me:
                 self.meeting.participants.append(p[:80])
 
         for upd in result.updates:

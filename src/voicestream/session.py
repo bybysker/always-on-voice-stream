@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .agents.runner import AgentRunner, Engine
-from .audio import AudioSource, Clock, build_source
+from .audio import AudioSource, CaptureSetupError, Clock, build_source
 from .brain.extractor import Extractor
 from .brain.llm import LLM, ClaudeLLM, LLMUnavailable
 from .brain.summarizer import rerender, summarize
@@ -37,7 +37,7 @@ from .events import EventBus
 from .models import AudioFrame, Event, ItemKind, Meeting, ScreenNote, TranscriptSegment, utcnow
 from .sinks.base import Sink, build_sinks
 from .storage import SessionStore
-from .transcribe import Transcriber, build_transcriber
+from .transcribe import Transcriber, TranscriptionError, build_transcriber
 from .transcribe.echo import EchoFilter
 
 log = logging.getLogger(__name__)
@@ -252,7 +252,6 @@ class Assistant:
         self.finished_meetings: list[MeetingSession] = []
         self._merge_q: asyncio.Queue[TranscriptSegment | None] = asyncio.Queue()
         self._stop = asyncio.Event()
-        self._end_requested = asyncio.Event()
         self._background: set[asyncio.Task[Any]] = set()
         self._meeting_lock = asyncio.Lock()
         self.echo = EchoFilter(cfg.echo)
@@ -368,10 +367,57 @@ class Assistant:
     def stop(self) -> None:
         self._stop.set()
 
+    async def replay_transcript(self, segments: list[TranscriptSegment], speed: float = 0.0) -> Path | None:
+        """Run one meeting from an existing transcript (no audio): extraction, notes, pushes, agents.
+
+        ``speed`` > 0 replays in (scaled) real time so the live extraction loop and
+        dashboard behave as in a real meeting; 0 feeds everything at once.
+        """
+        self.bus.publish(
+            "assistant.started",
+            sources=["transcript import"],
+            backend="import",
+            extraction="claude" if self.llm else "heuristic",
+            agents=self.cfg.agents.mode,
+            always_on=False,
+        )
+        session = await self._ensure_meeting(0.0)
+        session.t0 = 0.0
+        prev = 0.0
+        for seg in sorted(segments, key=lambda s: s.t_start):
+            if self._stop.is_set():
+                break
+            if speed > 0:
+                await asyncio.sleep(max(0.0, (seg.t_end - prev) / speed))
+                prev = seg.t_end
+            session.last_speech = self.clock.now()
+            session.add_segment(seg)
+            if speed <= 0:
+                await asyncio.sleep(0)
+        path = await self.end_meeting("replayed")
+        if self._background:
+            await asyncio.wait(self._background, timeout=self.cfg.agents.timeout_s + 60)
+        if self.llm:
+            await self.llm.aclose()
+        for sink in self.sinks:
+            with contextlib.suppress(Exception):
+                await sink.aclose()
+        self.bus.publish("assistant.stopped", cost=self.costs.snapshot())
+        return path
+
     async def _tee(self, src: AudioSource) -> AsyncIterator[AudioFrame]:
+        zero_s, warned = 0.0, False
         async for frame in src.frames():
             if self.current is not None and self.cfg.capture.store_audio:
                 self.current.store.write_audio(frame)
+            if src.name == "mic" and src.live and not warned:
+                # a denied macOS microphone permission yields exact digital silence, not an error
+                zero_s = zero_s + frame.duration if not frame.samples.any() else 0.0
+                if zero_s >= 10.0:
+                    warned = True
+                    msg = "microphone delivers only digital silence — check the OS microphone permission for this terminal"
+                    log.warning(msg)
+                    self.bus.publish("source.error", source=src.name, error=msg)
             yield frame
 
     async def _pipe(self, src: AudioSource) -> None:
@@ -389,7 +435,11 @@ class Assistant:
             except Exception as exc:
                 log.error("%s: capture/transcription failed: %s", src.name, exc)
                 self.bus.publish("source.error", source=src.name, error=str(exc))
-                if not src.live or self._stop.is_set():
+                # recordings, missing devices/packages and bad credentials won't fix themselves
+                fatal = isinstance(exc, (CaptureSetupError, ImportError)) or (
+                    isinstance(exc, TranscriptionError) and exc.fatal
+                )
+                if not src.live or fatal or self._stop.is_set():
                     raise
                 if time.monotonic() - started > 60:
                     retry = 2.0

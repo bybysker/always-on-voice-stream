@@ -18,12 +18,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Live capture: microphone (all OSes) + system-audio loopback (Windows / Linux).
-audio = ["sounddevice>=0.4.6", "soundcard>=0.4.3"]
+# Live capture: microphone (all OSes) + system audio (WASAPI/PulseAudio loopback,
+# macOS 14.2+ Core Audio tap). Linux also needs PortAudio: apt install libportaudio2.
+audio = [
+  "sounddevice>=0.5.6",
+  "SoundCard>=0.4.6; sys_platform != 'darwin'",
+  "catap>=0.6; sys_platform == 'darwin'",
+]
+# Optional WebRTC VAD (vad.engine = "webrtc"); the original webrtcvad breaks on setuptools>=82.
+vad = ["webrtcvad-wheels>=2.0.14"]
 # Free, offline transcription.
 local = ["faster-whisper>=1.0"]
 # Periodic screenshots of what's being shared.
-screen = ["mss>=9.0", "pillow>=10.0"]
+screen = ["mss>=10.2", "pillow>=10.0"]
 # Live web dashboard (transcript, action items, approve/run buttons).
 dashboard = ["starlette>=0.37", "uvicorn>=0.29"]
 # Agents that actually do tasks mid-meeting.

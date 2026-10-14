@@ -59,7 +59,8 @@ async def summarize(
             )
             tracker.apply(
                 ExtractionResult(
-                    new_items=[wire_new_to_item(i) for i in wire.missing_items],
+                    # found after the fact: never a live voice command that may auto-run an agent
+                    new_items=[wire_new_to_item(i).model_copy(update={"explicit_request": False}) for i in wire.missing_items],
                     updates=[wire_update_to_update(u) for u in wire.updates],
                     participants=wire.participants,
                 ),

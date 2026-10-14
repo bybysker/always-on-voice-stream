@@ -1,0 +1,124 @@
+# voicestream configuration. Every setting is optional; the values shown are the defaults
+# unless marked "example". API keys go in .env (see `voicestream init`), never here.
+
+user_name = "Me"            # example: "Alex" — your name; owner of things you commit to
+# data_dir = "~/.voicestream"  # sessions/, notes/, TODO.md, daily spend
+# timezone = "Europe/Paris"
+
+[capture]
+sources = ["mic", "system"]   # mic = you, system = everyone else (computer audio)
+store_audio = false           # also keep raw WAV per source in the session folder
+
+[capture.mic]
+# device = "MacBook Pro Microphone"   # name substring or index; see `voicestream devices`
+label = "Me"
+
+[capture.system]
+method = "auto"   # auto | soundcard (Win/Linux loopback) | device (macOS BlackHole) | ffmpeg
+# device = "BlackHole 2ch"                       # macOS, after installing BlackHole
+# ffmpeg_input = "-f pulse -i alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"   # Linux example
+label = "Others"
+
+[vad]
+margin_db = 12.0       # how far above background noise counts as speech; lower = more sensitive
+hangover_s = 0.7       # silence that ends an utterance
+max_utterance_s = 25.0
+
+[transcription]
+backend = "openai"     # openai (REST, cheapest) | openai-realtime (streaming) | deepgram | local (free, offline)
+# language = "en"
+
+[transcription.openai]
+model = "gpt-transcribe"   # $0.0045/min; gpt-4o-mini-transcribe is $0.003 but shuts down 2027-02-26
+# prompt = "Weekly product sync with Ashley, Sam and Sarah."
+
+[transcription.openai_realtime]
+model = "gpt-transcribe"   # or gpt-live-transcribe for word-by-word captions ($0.017/min)
+
+[transcription.deepgram]
+model = "nova-3"
+
+[transcription.local]
+model = "small"            # tiny | base | small | medium | large-v3
+device = "cpu"
+compute_type = "int8"
+
+[echo]
+enabled = true             # drop the mic's copy of what your speakers play (no headphones)
+
+[brain]
+provider = "anthropic"     # anthropic | heuristic (offline, no key, much weaker)
+model = "claude-haiku-5-5"          # live extraction every ~90 s (≈ $0.10–0.50/day)
+summary_model = "claude-sonnet-5-5" # end-of-meeting consolidation + notes
+extract_interval_s = 90
+wake_phrases = ["hey claude", "okay claude", "ok claude", "hey assistant"]
+commands_from = ["mic"]    # only YOU can give the assistant voice commands
+# attendees = ["Ashley", "Sam", "Sarah"]
+# vocabulary = ["Acme", "Monday.com", "OKR"]   # names/jargon: helps transcription and extraction
+
+[screen]
+enabled = false            # describe what's on screen (shared slides) every interval_s when it changes
+interval_s = 20
+model = "claude-haiku-5-5"
+
+[dispatch]
+mode = "end"               # end (push once, deduplicated) | immediate | manual
+min_confidence = 0.6
+stable_s = 45              # immediate mode: wait until an item stops changing
+
+[agents]
+mode = "suggest"           # off | suggest (you approve) | commands (auto-run "Hey Claude, …") | auto
+engine = "agent-sdk"       # agent-sdk (web + files, needs voicestream[agents]) | api (one call, cheapest)
+model = "claude-opus-5-5"
+max_concurrent = 2
+max_turns = 40
+max_budget_usd = 1.0       # per task
+timeout_s = 900
+allow_bash = false         # only with a working sandbox (bubblewrap on Linux)
+
+[budget]
+daily_usd = 2.0            # transcription + Claude; extraction falls back to offline when reached
+agents_daily_usd = 5.0
+
+[dashboard]
+enabled = true
+host = "127.0.0.1"
+port = 8765
+open_browser = false
+
+[always_on]
+idle_split_minutes = 10    # silence that ends a meeting (summary + push); 0 = one long session
+
+# ----------------------------------------------------------------------------- sinks
+# Where action items (and notes) go. Each sink: enabled, kinds, owners ("all" | "mine"),
+# min_confidence, notes. Tokens are read from the env vars named below.
+
+[sinks.markdown]           # always-available local TODO.md + notes/ folder
+enabled = true
+
+# [sinks.notion]
+# enabled = true
+# tasks_database_id = "…"          # share the database with your integration first
+# notes_parent_page_id = "…"       # meeting notes become child pages here
+
+# [sinks.monday]
+# enabled = true
+# board_id = "1234567890"
+
+# [sinks.linear]
+# enabled = true
+# team_key = "ENG"
+
+# [sinks.github]
+# enabled = true
+# repo = "acme/roadmap"
+
+# [sinks.todoist]
+# enabled = true                   # personal list: only your own items by default
+
+# [sinks.slack]
+# enabled = true                   # posts a digest of each meeting
+
+# [sinks.webhook]
+# enabled = true
+# url = "https://hooks.zapier.com/hooks/catch/…"   # Zapier / Make / n8n / your server

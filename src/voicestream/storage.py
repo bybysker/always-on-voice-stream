@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -134,7 +133,3 @@ def list_sessions(root: Path) -> list[Path]:
     if not base.is_dir():
         return []
     return sorted((d for d in base.iterdir() if (d / "meeting.json").is_file()), reverse=True)
-
-
-def load_meeting_json(path: Path) -> dict[str, object]:
-    return json.loads(path.read_text(encoding="utf-8"))

@@ -39,9 +39,11 @@ class TranscribeResult:
 
 
 class TranscriptionError(RuntimeError):
-    def __init__(self, message: str, *, retryable: bool = False):
+    def __init__(self, message: str, *, retryable: bool = False, fatal: bool = False):
         super().__init__(message)
         self.retryable = retryable
+        self.fatal = fatal
+        """Retrying can't help (bad credentials, missing package): stop the pipeline."""
 
 
 class Transcriber(ABC):
@@ -115,6 +117,8 @@ class ChunkTranscriber(Transcriber):
             try:
                 return await self.transcribe_utterance(utt, prompt)
             except TranscriptionError as exc:
+                if exc.fatal:
+                    raise
                 if not exc.retryable or attempt == self.max_retries:
                     log.error("%s transcription failed (%.1fs audio): %s", self.backend, utt.duration, exc)
                     return None

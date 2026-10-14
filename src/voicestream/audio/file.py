@@ -48,6 +48,7 @@ class WavFileSource(AudioSource):
             dtype = {1: np.uint8, 2: np.int16, 4: np.int32}[width]
             resampler = StreamResampler(rate, SAMPLE_RATE)
             block = max(1, int(rate * self.block_s))
+            t_origin = self.clock.now()  # align with live sources on the meeting clock
             t_out = 0.0
             loop = asyncio.get_running_loop()
             t_wall0 = loop.time()
@@ -60,7 +61,7 @@ class WavFileSource(AudioSource):
                     data = data.reshape(-1, channels)
                 out = float_to_int16(resampler.process(to_mono_float(data)))
                 if out.size:
-                    yield AudioFrame(source=self.name, samples=out, t_start=t_out)
+                    yield AudioFrame(source=self.name, samples=out, t_start=t_origin + t_out)
                     t_out += out.size / SAMPLE_RATE
                 if self.speed > 0:
                     delay = t_wall0 + t_out / self.speed - loop.time()

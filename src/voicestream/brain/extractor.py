@@ -179,6 +179,7 @@ class Extractor:
             # allow references to earlier lines too (updates often cite them)
             for i in range(max(0, pending[0][0] - 200), pending[0][0]):
                 refs[i] = self.meeting.segments[i].id
+            self._enforce_command_sources(result)
             added, updated = self.tracker.apply(result, refs)
             self.processed_upto = upto
             self._screens_upto += len(screens)
@@ -194,6 +195,17 @@ class Extractor:
                     updated=[i.id for i in updated],
                 )
             return added, updated
+
+    def _enforce_command_sources(self, result: ExtractionResult) -> None:
+        """Only speech from ``brain.commands_from`` (your mic) may count as a direct request to the
+        assistant — whatever the model says — so other participants can't trigger auto-run agents."""
+        segs = self.meeting.segments
+        for item in result.new_items:
+            if not item.explicit_request:
+                continue
+            sources = {segs[r].source for r in item.segment_refs if 0 <= r < len(segs)}
+            if not sources & set(self.bc.commands_from):
+                item.explicit_request = False
 
     def _build_block(self, pending: list[tuple[int, TranscriptSegment]], screens: list[ScreenNote]) -> str:
         events: list[tuple[float, str]] = [(s.t_start, render_segment(i, s)) for i, s in pending]

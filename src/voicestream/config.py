@@ -27,11 +27,12 @@ class MicConfig(_Section):
 
 
 class SystemAudioConfig(_Section):
-    method: Literal["auto", "soundcard", "device", "ffmpeg"] = "auto"
+    method: Literal["auto", "soundcard", "tap", "device", "ffmpeg"] = "auto"
     """How to capture what other participants say:
 
-    * ``auto``      – soundcard loopback on Windows/Linux, ``device`` on macOS.
+    * ``auto``      – soundcard loopback on Windows/Linux; tap (else a BlackHole device) on macOS.
     * ``soundcard`` – WASAPI loopback (Windows) / PulseAudio-PipeWire monitor (Linux).
+    * ``tap``       – macOS 14.2+ Core Audio process tap (``catap``), no virtual device needed.
     * ``device``    – a named input device, e.g. ``BlackHole 2ch`` on macOS.
     * ``ffmpeg``    – an ffmpeg input spec in ``ffmpeg_input`` (works everywhere).
     """

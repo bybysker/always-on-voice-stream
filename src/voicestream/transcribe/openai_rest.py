@@ -91,7 +91,7 @@ class OpenAITranscriber(ChunkTranscriber):
         retryable = resp.status_code in (408, 409, 429) or resp.status_code >= 500
         detail = resp.text[:300]
         if resp.status_code in (401, 403):
-            log.error("OpenAI rejected the API key (%s)", resp.status_code)
+            raise TranscriptionError(f"OpenAI rejected the API key (HTTP {resp.status_code}): {detail}", fatal=True)
         raise TranscriptionError(f"HTTP {resp.status_code}: {detail}", retryable=retryable)
 
     async def aclose(self) -> None:

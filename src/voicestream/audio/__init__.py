@@ -42,10 +42,22 @@ def _system_source(cfg: Config, clock: Clock) -> AudioSource:
     if method == "auto":
         if sc.ffmpeg_input:
             method = "ffmpeg"
-        elif sys.platform == "darwin" or sc.device is not None:
+        elif sc.device is not None:
             method = "device"
+        elif sys.platform == "darwin":
+            from .mactap import available
+
+            method = "tap" if available() else "device"
         else:
             method = "soundcard"
+    if method == "tap":
+        from .mactap import TapSource, available
+
+        if not available():
+            raise CaptureSetupError(
+                "capture.system.method = 'tap' needs macOS 14.2+ and the catap package (pip install catap)"
+            )
+        return TapSource("system", clock=clock)
     if method == "ffmpeg":
         from .ffmpeg import FFmpegSource
         from .mic import default_system_ffmpeg_input
