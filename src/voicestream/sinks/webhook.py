@@ -48,7 +48,7 @@ from .http import HttpSinkMixin
 
 log = logging.getLogger(__name__)
 
-MEETING_FIELDS = {"id", "title", "started_at", "ended_at", "participants", "tldr"}
+MEETING_FIELDS = {"id", "title", "started_at", "ended_at", "participants", "tldr", "language"}
 
 
 class WebhookConfig(SinkConfig):
