@@ -1,17 +1,22 @@
 # voicestream
 
 **An always-on executive assistant for your meetings.** It listens to your microphone *and* your
-computer's audio (so it hears everyone on the call), transcribes everything live, and has Claude
-turn it into action items, decisions and notes. Those go straight into the tools you already use,
-like Notion, Monday, Linear, GitHub, Todoist, Slack, or anything with a webhook. When someone says
-"we need a competitive analysis by Friday", an agent can start on it while you're still in the
-meeting.
+computer's audio (so it hears everyone on the call), transcribes everything live in French or
+English, and has Claude turn it into action items, decisions and notes.
+
+- Your tasks become **Google Calendar** reminders, **Apple Reminders** and **HubSpot** tasks.
+- The notes become a **Google Doc** and a recap in **Gmail**, plus a ready-to-send follow-up
+  draft for the other attendees.
+- Anything else on your Mac (an app like Promethee) is reachable through **Shortcuts**, a URL
+  scheme or a command.
+- When someone says "il nous faut une analyse concurrentielle d'ici vendredi", a Claude agent
+  can start on it while you're still in the meeting.
 
 ```
- your mic ──┐                                       ┌─ live extraction (Claude Haiku) ─┬─ Notion / Monday / Linear / GitHub / Todoist / Slack / webhook
-            ├─ VAD ─ speech-to-text ─ echo filter ──┤                                  ├─ agents that do the work (Claude Opus, sandboxed)
- system  ───┘   (only speech is sent)               └─ transcript.md · notes.md · TODO.md (local, always)
- audio
+ your mic ──┐                                        ┌─ live extraction (Claude Haiku) ─┬─ Google Calendar · Apple Reminders · HubSpot · Shortcuts/apps
+            ├─ VAD ─ speech-to-text ─ echo filter ───┤   (French/English, auto)         ├─ Google Docs · Gmail recap + follow-up draft
+ system  ───┘   (only speech is sent)                │                                  └─ agents that do the work (Claude, sandboxed on your Mac)
+ audio                                               └─ transcript.md · notes.md · TODO.md (local, always)
 ```
 
 It costs **about $1–2 per day for 8 hours of meetings**: roughly $1.40 for speech-to-text and
@@ -37,23 +42,37 @@ and has its own budget.
 
 ## Quick start
 
+These steps assume a Mac with macOS 14.2 or later.
+
 ```bash
-pip install "voicestream[all] @ git+https://github.com/bybysker/always-on-voice-stream"
-#   or, from a clone:  pip install -e ".[all]"
-#   minimal install: pip install -e ".[audio,dashboard]"
+brew install python@3.12 ffmpeg
+python3.12 -m pip install "voicestream[all] @ git+https://github.com/bybysker/always-on-voice-stream"
+#   or, from a clone:  python3.12 -m pip install -e ".[all]"
 
 voicestream init            # writes ~/.voicestream/voicestream.toml and ~/.voicestream/.env
-$EDITOR ~/.voicestream/.env # ANTHROPIC_API_KEY=…  OPENAI_API_KEY=…
-voicestream doctor          # checks keys, microphone, system audio, sinks, budget
+open -e ~/.voicestream/.env # ANTHROPIC_API_KEY=…  OPENAI_API_KEY=…
+voicestream doctor          # checks keys, microphone, system audio, your tools, budget
 voicestream run             # start listening (Ctrl+C to stop)
 ```
 
-Set `user_name` in `voicestream.toml` to your own name. The assistant then knows that "I'll send
-the deck" in your microphone means *you* own that task.
+In `~/.voicestream/voicestream.toml`, set `user_name` to your own name. The assistant then
+knows that "je m'en occupe" in your microphone means *you* own that task. Then switch on the
+tools you want under [Sending items to your tools](#sending-items-to-your-tools). The
+[example for a Mac + Google + HubSpot setup](#example-mac--google--hubspot--reminders) is a
+good start.
+
+The first run asks for three macOS permissions. Grant them to the terminal app you run
+voicestream from:
+
+| Permission | Why | Where to fix it if you said no |
+|---|---|---|
+| **Microphone** | Your voice | System Settings → Privacy & Security → Microphone |
+| **System Audio Recording** | The other participants | Privacy & Security → Screen & System Audio Recording. Restart the terminal afterwards. |
+| **Automation → Reminders** | Only if you enable Apple Reminders | Privacy & Security → Automation |
 
 The terminal shows the live transcript and every item as it's captured. A dashboard URL is
-printed too (`http://127.0.0.1:8765/?token=…`). The dashboard is where you approve agents and push
-or edit items.
+printed too (`http://127.0.0.1:8765/?token=…`). The dashboard is where you approve agents and
+push or edit items.
 
 `voicestream run` is meant to stay on all day. After 10 minutes of silence
 (`always_on.idle_split_minutes`) the current meeting is closed: final extraction, summary, push.
@@ -98,25 +117,35 @@ files:
 
 | OS | How | Setup |
 |---|---|---|
+| **macOS 14.2+** | A Core Audio tap of the system output (`catap`, installed with `[audio]`) | Grant **System Audio Recording** to your terminal on the first run, then restart the terminal. |
+| macOS before 14.2 | A virtual loopback device | Run `brew install blackhole-2ch`. In Audio MIDI Setup, create a Multi-Output Device with your speakers first, then BlackHole, and select it as the output. Set `capture.system.device = "BlackHole 2ch"`. |
 | **Windows** | WASAPI loopback of your default output (`soundcard`) | Nothing. Install with `[audio]`. |
-| **Linux** | PulseAudio/PipeWire monitor of your output (`soundcard`, or ffmpeg) | Nothing in most cases. Otherwise set `capture.system.method = "ffmpeg"` with `ffmpeg_input = "-f pulse -i $(pactl get-default-sink).monitor"`. |
-| **macOS** | A virtual loopback device | See the steps below. |
+| **Linux** | PulseAudio/PipeWire monitor of your output (`soundcard`, or ffmpeg) | Nothing in most cases. Otherwise set `capture.system.method = "ffmpeg"`. |
 
-On macOS:
+If a permission is missing, macOS hands over silence instead of an error. voicestream notices a
+microphone that only ever delivers digital silence and tells you to check the permission.
+`voicestream devices` lists every input and prints the instructions for your OS.
 
-1. Run `brew install blackhole-2ch`.
-2. In **Audio MIDI Setup**, click **+**, then **Create Multi-Output Device**. Tick your
-   speakers or headphones **and** BlackHole.
-3. Select the Multi-Output Device as your sound output.
-4. Set `capture.system.device = "BlackHole 2ch"` in `voicestream.toml`.
-5. Allow your terminal to use the microphone in **System Settings → Privacy & Security**.
+Wear headphones if you can. The echo filter handles speaker bleed, but clean channels give
+better transcripts.
 
-`voicestream devices` lists every input, marks the ones that look like loopback devices, and
-prints the instructions for your OS. ffmpeg works everywhere as a fallback:
-`--source "ffmpeg:-f avfoundation -i :BlackHole 2ch@system"`.
+### Languages
 
-Wear headphones if you can. The echo filter handles speaker bleed, but clean channels give better
-transcripts.
+`brain.language = "auto"` (the default) writes titles, notes and emails in the language each
+meeting is held in, so mixed French/English days just work. Set `"fr"` or `"en"` to force one
+language. The transcriber detects the language itself; set `transcription.language` only if
+every meeting is in the same language.
+
+Deadlines are understood in both languages:
+
+- "d'ici vendredi"
+- "fin de la semaine prochaine"
+- "dans quinze jours"
+- "le 1er décembre"
+- "by Friday"
+- "end of next week"
+
+Say "**Dis Claude, …**" or "**Hey Claude, …**" to talk to the assistant directly.
 
 ## Speech-to-text backends
 
@@ -153,7 +182,152 @@ Every sink has these filters:
 Items that were already pushed stay in sync. Later edits, completion and dismissal are propagated
 where the tool's API allows.
 
-<!-- SINKS-TABLE -->
+### Your tools
+
+| Sink | What happens | Setup |
+|---|---|---|
+| `google` | Your tasks become Google Calendar reminders at 09:00 on their due date. Each meeting gets a Google Doc in a "Meeting notes" folder. Gmail sends a recap to you and saves a follow-up **draft** for the attendees; drafts are never sent. | [Google bridge](#google-calendar-docs-and-gmail) |
+| `reminders` | Your tasks go into an Apple Reminders list ("Meetings"), with due date and alert. | `enabled = true`, then allow Automation once. |
+| `hubspot` | The meeting is logged on the contacts and companies that were in it. Your follow-ups become HubSpot tasks. | [HubSpot key](#hubspot) |
+| `shortcuts` | Runs a macOS Shortcut per task or meeting, with the data as JSON. Use it for any app with Shortcuts actions, such as Promethee. | [Apps on your Mac](#promethee-and-other-apps-on-your-mac) |
+| `command` | Runs a command or opens a URL scheme per task, e.g. `open "promethee://add?title={title_url}"`. | [Apps on your Mac](#promethee-and-other-apps-on-your-mac) |
+| `markdown` | Keeps `~/.voicestream/TODO.md` and `notes/` locally. Works with Obsidian or any editor. | On by default |
+
+Also available, off unless you configure them: `webhook` (Zapier, Make, n8n or any local app),
+`slack`, `notion`, `monday`, `linear`, `github` and `todoist`.
+
+### Google Calendar, Docs and Gmail
+
+Google is reached through a small Apps Script "bridge" that runs as you on your own account. You
+paste it once. There is no Google Cloud project, no OAuth client and no token that expires.
+
+1. Go to <https://script.google.com>, click **New project** and name it "voicestream bridge".
+2. Copy the script to your clipboard, then select everything in the editor, paste, and save
+   (⌘S):
+
+   ```bash
+   python3 -c "from voicestream.sinks.google import BRIDGE_SOURCE as p; print(p.read_text())" | pbcopy
+   ```
+
+3. Make a secret:
+
+   ```bash
+   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+   ```
+
+4. In the editor, open **Project Settings** (⚙) and find **Script Properties**. Click **Add
+   script property**, enter `SECRET` with the secret as its value, then **Save script
+   properties**.
+5. Click **Deploy** → **New deployment**, then **Select type** (⚙) → **Web app**. Set
+   **Execute as: Me** and **Who has access: Anyone**, then click **Deploy**.
+6. Click **Authorize access** and pick your account. On the warning screen, click **Advanced**
+   → **Go to voicestream bridge (unsafe)** → **Allow**. The warning appears because it's your own
+   unpublished script.
+7. Add the Web app URL (it ends in `/exec`) and the secret to `~/.voicestream/.env`:
+
+   ```
+   VOICESTREAM_GOOGLE_URL=https://script.google.com/macros/s/…/exec
+   VOICESTREAM_GOOGLE_SECRET=…
+   ```
+
+8. Enable `[sinks.google]` (see the example below) and run `voicestream doctor`. It pings the
+   bridge and shows your account.
+
+How the bridge stays safe:
+
+- The secret travels only to `script.google.com`.
+- The bridge only edits calendar events and Docs it created itself.
+- The recap goes only to your own address.
+- Follow-ups are drafts.
+
+To update the bridge later, paste the new code, then use **Deploy** → **Manage deployments** →
+✎ → **New version** → **Deploy**. The URL stays the same.
+
+### HubSpot
+
+1. In HubSpot, create a key: **Settings** → **Integrations** → **Service keys** (or a private
+   app).
+2. Give it these scopes:
+   - `crm.objects.contacts.write`
+   - `crm.objects.contacts.read`
+   - `crm.objects.companies.read`
+   - `crm.objects.owners.read`
+3. Add `HUBSPOT_TOKEN=…` to `~/.voicestream/.env`.
+
+Participants are matched to HubSpot contacts and companies by name, accents ignored. A record is
+associated only when the match is unique, and contacts are never created.
+
+### Promethee and other apps on your Mac
+
+First find out what the app exposes:
+
+| Check | Command or place |
+|---|---|
+| Shortcuts actions | Search for the app's name in the Shortcuts action search |
+| A URL scheme | `plutil -p /Applications/Promethee.app/Contents/Info.plist \| grep -A4 CFBundleURLSchemes` |
+| AppleScript support | `sdef /Applications/Promethee.app` |
+
+**With Shortcuts** (recommended):
+
+1. Create a shortcut, e.g. "Promethee – nouvelle tâche".
+2. Add these actions:
+   - *Get Dictionary from Shortcut Input*
+   - *Get Dictionary Value* `item`, then `title` (also available: `detail`, `owner`, `due_date`)
+   - the Promethee action
+   - optionally *Stop and Output* the new object's id
+3. Test it:
+
+   ```bash
+   shortcuts run "Promethee – nouvelle tâche" --input-path sample.json
+   ```
+
+4. Set `item_shortcut` in `[sinks.shortcuts]`.
+
+**With a URL scheme or a command-line tool**, use `[sinks.command]`. Placeholders such as
+`{title}`, `{title_url}`, `{due}`, `{owner}`, `{detail}` and `{json_path}` are filled in per
+argument, and no shell is ever used, so meeting text can't inject commands.
+
+### Example: Mac + Google + HubSpot + Reminders
+
+```toml
+user_name = "Alex"                 # your first name, as people say it in meetings
+timezone = "Europe/Amsterdam"
+
+[brain]
+language = "auto"                  # French or English, per meeting
+attendees = ["Sarah", "Sam"]       # people you meet often (helps spelling and owners)
+
+[agents]
+mode = "commands"                  # "Dis Claude, …" runs immediately; other tasks wait for your OK
+
+[sinks.google]
+enabled = true                     # Calendar reminders for your tasks + Doc + Gmail recap/draft
+
+[sinks.reminders]
+enabled = true
+list_name = "Réunions"
+
+[sinks.hubspot]
+enabled = true
+
+[sinks.shortcuts]
+enabled = true
+item_shortcut = "Promethee – nouvelle tâche"
+
+[sinks.markdown]
+enabled = true
+```
+
+By default `google`, `reminders` and `hubspot` only take items **you** own (`owners = "mine"`).
+Your calendar and CRM stay yours; the other participants' tasks are listed in the notes and the
+follow-up draft.
+
+### Claude as a destination
+
+Tasks an AI can do now get a **Run agent** button in the dashboard, or `run A3` in the
+terminal. Examples: research, a competitive analysis, a draft email or proposal, a slide outline,
+a script. The agent runs Claude on your Mac in a private folder and reports back into the notes,
+usually before the meeting ends. See the next section.
 
 ## Agents that do the work mid-meeting
 

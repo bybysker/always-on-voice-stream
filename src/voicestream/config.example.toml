@@ -3,7 +3,7 @@
 
 user_name = "Me"            # example: "Alex" — your name; owner of things you commit to
 # data_dir = "~/.voicestream"  # sessions/, notes/, TODO.md, daily spend
-# timezone = "Europe/Paris"
+# timezone = "Europe/Amsterdam"  # default: your Mac's time zone
 
 [capture]
 sources = ["mic", "system"]   # mic = you, system = everyone else (computer audio)
@@ -14,7 +14,7 @@ store_audio = false           # also keep raw WAV per source in the session fold
 label = "Me"
 
 [capture.system]
-method = "auto"   # auto | soundcard (Win/Linux loopback) | device (macOS BlackHole) | ffmpeg
+method = "auto"   # auto | tap (macOS 14.2+) | device (BlackHole) | soundcard (Win/Linux) | ffmpeg
 # device = "BlackHole 2ch"                       # macOS, after installing BlackHole
 # ffmpeg_input = "-f pulse -i alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"   # Linux example
 label = "Others"
@@ -26,7 +26,7 @@ max_utterance_s = 25.0
 
 [transcription]
 backend = "openai"     # openai (REST, cheapest) | openai-realtime (streaming) | deepgram | local (free, offline)
-# language = "en"
+# language = "fr"      # leave unset to auto-detect (mixed French/English days)
 
 [transcription.openai]
 model = "gpt-transcribe"   # $0.0045/min; gpt-4o-mini-transcribe is $0.003 but shuts down 2027-02-26
@@ -48,10 +48,11 @@ enabled = true             # drop the mic's copy of what your speakers play (no 
 
 [brain]
 provider = "anthropic"     # anthropic | heuristic (offline, no key, much weaker)
+language = "auto"          # notes/tasks/emails in each meeting's language; or "fr" / "en"
 model = "claude-haiku-5-5"          # live extraction every ~90 s (≈ $0.10–0.50/day)
 summary_model = "claude-sonnet-5-5" # end-of-meeting consolidation + notes
 extract_interval_s = 90
-wake_phrases = ["hey claude", "okay claude", "ok claude", "hey assistant"]
+wake_phrases = ["hey claude", "okay claude", "ok claude", "hey assistant", "dis claude", "hé claude"]
 commands_from = ["mic"]    # only YOU can give the assistant voice commands
 # attendees = ["Ashley", "Sam", "Sarah"]
 # vocabulary = ["Acme", "Monday.com", "OKR"]   # names/jargon: helps transcription and extraction
@@ -67,7 +68,7 @@ min_confidence = 0.6
 stable_s = 45              # immediate mode: wait until an item stops changing
 
 [agents]
-mode = "suggest"           # off | suggest (you approve) | commands (auto-run "Hey Claude, …") | auto
+mode = "suggest"           # off | suggest (you approve) | commands (auto-run "Dis Claude, …") | auto
 engine = "agent-sdk"       # agent-sdk (web + files, needs voicestream[agents]) | api (one call, cheapest)
 model = "claude-opus-5-5"
 max_concurrent = 2
@@ -91,34 +92,35 @@ idle_split_minutes = 10    # silence that ends a meeting (summary + push); 0 = o
 
 # ----------------------------------------------------------------------------- sinks
 # Where action items (and notes) go. Each sink: enabled, kinds, owners ("all" | "mine"),
-# min_confidence, notes. Tokens are read from the env vars named below.
+# min_confidence, notes. Secrets are read from the env vars named below (.env file).
+# Setup steps for each: README → "Sending items to your tools".
 
-[sinks.markdown]           # always-available local TODO.md + notes/ folder
+[sinks.markdown]           # always-available local TODO.md + notes/ folder (Obsidian-friendly)
 enabled = true
 
-# [sinks.notion]
+# [sinks.google]           # Calendar reminders + a Google Doc per meeting + Gmail recap & follow-up draft
+# enabled = true           # needs VOICESTREAM_GOOGLE_URL + VOICESTREAM_GOOGLE_SECRET (Apps Script bridge)
+# docs_folder = "Meeting notes"
+# event_time = "09:00"
+# followup_draft = true    # a draft only — never sent automatically
+
+# [sinks.reminders]        # Apple Reminders (macOS)
 # enabled = true
-# tasks_database_id = "…"          # share the database with your integration first
-# notes_parent_page_id = "…"       # meeting notes become child pages here
+# list_name = "Réunions"
 
-# [sinks.monday]
+# [sinks.hubspot]          # meeting logged on matched contacts/companies + your tasks (HUBSPOT_TOKEN)
 # enabled = true
-# board_id = "1234567890"
 
-# [sinks.linear]
+# [sinks.shortcuts]        # any app with Shortcuts actions, e.g. Promethee
 # enabled = true
-# team_key = "ENG"
+# item_shortcut = "Promethee – nouvelle tâche"
 
-# [sinks.github]
+# [sinks.command]          # a CLI or URL scheme per task (no shell; placeholders per argument)
 # enabled = true
-# repo = "acme/roadmap"
+# item_command = 'open "promethee://add?title={title_url}"'
 
-# [sinks.todoist]
-# enabled = true                   # personal list: only your own items by default
-
-# [sinks.slack]
-# enabled = true                   # posts a digest of each meeting
-
-# [sinks.webhook]
+# [sinks.webhook]          # Zapier / Make / n8n / a local app's HTTP API
 # enabled = true
-# url = "https://hooks.zapier.com/hooks/catch/…"   # Zapier / Make / n8n / your server
+# url = "http://127.0.0.1:9999/tasks"
+
+# Also available: slack, notion, monday, linear, github, todoist (see README).
