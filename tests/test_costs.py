@@ -35,7 +35,7 @@ def test_llm_cost_uses_per_model_prices_including_cache(cfg: Config) -> None:
     u = TokenUsage("claude-haiku-5-5", input_tokens=1_000_000, output_tokens=1_000_000,
                    cache_read_tokens=1_000_000, cache_write_tokens=1_000_000)
     assert m.llm_cost(u) == pytest.approx(0.10 + 0.50 + 0.01 + 0.125)
-    assert m.llm_cost(TokenUsage("claude-sonnet-5-5", input_tokens=500_000, cache_read_tokens=2_000_000)) == pytest.approx(1.0 + 0.2)
+    assert m.llm_cost(TokenUsage("claude-sonnet-5-5", input_tokens=500_000, output_tokens=100_000)) == pytest.approx(1.0 + 1.0)
     assert m.llm_cost(TokenUsage("claude-opus-5-5", output_tokens=100_000, cache_write_tokens=200_000)) == pytest.approx(2.0 + 1.0)
 
 
@@ -46,6 +46,26 @@ def test_unknown_suffix_falls_back_to_family_price(cfg: Config) -> None:
     assert m.model_price("claude-fable-5-1-preview") == cfg.pricing.llm_per_mtok["claude-fable-5-1"]
     assert m.model_price("gpt-5") is None
     assert m.llm_cost(TokenUsage("gpt-5", input_tokens=10**9)) == 0.0
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: the family-prefix fallback ignores the major version, so claude-haiku-4-5 ($1/$5 per MTok) is billed "
+    "at Haiku 5.5 rates ($0.10/$0.50) and the daily budget trips ~10x late",
+)
+def test_fallback_price_never_crosses_major_versions(cfg: Config) -> None:
+    m = CostMeter(cfg, persist=False)
+    assert m.model_price("claude-haiku-4-5") != cfg.pricing.llm_per_mtok["claude-haiku-5-5"]
+    assert m.model_price("claude-opus-4-1-20250805") != cfg.pricing.llm_per_mtok["claude-opus-5-5"]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: config.py prices Sonnet 5.5 cache reads at $0.10/MTok; the published rate is $0.20 "
+    "(claude-api model table, cached 2026-10-06)",
+)
+def test_default_sonnet_cache_read_price(cfg: Config) -> None:
+    assert cfg.pricing.llm_per_mtok["claude-sonnet-5-5"].cache_read == pytest.approx(0.20)
 
 
 def test_pricing_overrides_from_config(cfg: Config) -> None:

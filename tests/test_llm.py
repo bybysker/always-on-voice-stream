@@ -241,12 +241,9 @@ def test_wire_schemas_fit_strict_structured_output_limits(model: type) -> None:
     nodes = list(_nodes(schema))
     objects = [n for n in nodes if n.get("type") == "object"]
     assert len(objects) >= 2  # the top level plus the nested item/update definitions
-    optional = 0
     for obj in objects:
         assert obj.get("additionalProperties") is False, obj.get("title")
-        assert sorted(obj["required"]) == sorted(obj["properties"]), obj.get("title")
-        optional += len(set(obj["properties"]) - set(obj["required"]))
-    assert optional == 0
+        assert sorted(obj["required"]) == sorted(obj["properties"]), obj.get("title")  # no optional fields
     for node in nodes:
         assert not {"anyOf", "oneOf", "allOf"} & set(node), node
         assert not isinstance(node.get("type"), list), node  # nullable unions count against the limit

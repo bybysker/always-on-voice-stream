@@ -58,6 +58,11 @@ class CreateOnlySink(MemorySink):
     supports_notes: ClassVar[bool] = False
 
 
+def _named(name: str, app: Config, **cfg: Any) -> MemorySink:
+    """Another MemorySink under its own name (sinks are keyed by name on the item)."""
+    return type(f"{name.title()}Sink", (MemorySink,), {"name": name})(app, **cfg)
+
+
 class Clock:
     def __init__(self) -> None:
         self.t = 1000.0
@@ -169,8 +174,8 @@ async def test_global_and_per_sink_confidence_thresholds(cfg: Config, meeting: M
     meeting.items["A2"] = _action("A2", confidence=0.6)
     meeting.items["A3"] = _action("A3", confidence=0.45)
     default = MemorySink(cfg)
-    strict = type("StrictSink", (MemorySink,), {"name": "strict"})(cfg, min_confidence=0.9)
-    lenient = type("LenientSink", (MemorySink,), {"name": "lenient"})(cfg, min_confidence=0.4)
+    strict = _named("strict", cfg, min_confidence=0.9)
+    lenient = _named("lenient", cfg, min_confidence=0.4)
     d, _, _ = _dispatcher(cfg, meeting, default, strict, lenient)
     await d.finalize(None)
     assert default.created_ids == ["A1", "A2"]
@@ -182,7 +187,7 @@ async def test_mine_only_sink(cfg: Config, meeting: Meeting) -> None:
     for id, owner in (("A1", "Alex"), ("A2", "me"), ("A3", "Alex Chen"), ("A4", "Sam"), ("A5", None), ("A6", "Alexandra")):
         meeting.items[id] = _action(id, owner=owner)
     mine = MemorySink(cfg, owners="mine")
-    everyone = type("TeamSink", (MemorySink,), {"name": "team"})(cfg)
+    everyone = _named("team", cfg)
     d, _, _ = _dispatcher(cfg, meeting, mine, everyone)
     await d.finalize(None)
     assert mine.created_ids == ["A1", "A2", "A3"]
@@ -216,6 +221,34 @@ async def test_edits_after_a_push_are_propagated_once(cfg: Config, meeting: Meet
     assert create_only.updated == []
     assert await d.sync(require_stable=False) == 0  # nothing new
     assert _events(bus, "item.pushed")[-1]["action"] == "update"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: _push records pushed_revision = item.revision after awaiting the sink, so an edit made while the "
+    "push was in flight is marked as pushed and never synced",
+)
+async def test_an_edit_made_while_a_push_is_in_flight_is_synced_afterwards(cfg: Config, meeting: Meeting) -> None:
+    meeting.items["A1"] = _action("A1")
+    sink = MemorySink(cfg)
+    in_flight, answered = asyncio.Event(), asyncio.Event()
+
+    async def slow_push(item: Item, m: Meeting) -> str:
+        ref = await MemorySink.push_item(sink, item, m)  # records the item as sent
+        in_flight.set()
+        await answered.wait()  # the external API takes its time
+        return ref
+
+    sink.push_item = slow_push  # type: ignore[method-assign]
+    d, _, _ = _dispatcher(cfg, meeting, sink)
+    push = asyncio.ensure_future(d.sync(require_stable=False))
+    await in_flight.wait()
+    _edit(meeting.items["A1"], owner="Sam")  # the extractor refines the item meanwhile
+    answered.set()
+    await push
+    await d.sync(require_stable=False)
+    assert sink.created[0].owner is None
+    assert [i.owner for i, _ in sink.updated] == ["Sam"]
 
 
 async def test_dismissal_after_a_push_is_propagated(cfg: Config, meeting: Meeting) -> None:
@@ -342,9 +375,9 @@ async def test_push_now_retries_an_item_that_hit_the_cap(cfg: Config, meeting: M
 
 async def test_notes_go_only_to_sinks_that_want_them(cfg: Config, meeting: Meeting) -> None:
     yes = MemorySink(cfg)
-    opted_out = type("QuietSink", (MemorySink,), {"name": "quiet"})(cfg, notes=False)
+    opted_out = _named("quiet", cfg, notes=False)
     unsupported = CreateOnlySink(cfg)
-    broken = type("BrokenSink", (MemorySink,), {"name": "broken"})(cfg)
+    broken = _named("broken", cfg)
     broken.fail = [RuntimeError("500 from server")]
     d, bus, _ = _dispatcher(cfg, meeting, yes, opted_out, unsupported, broken)
     await d.finalize("# Notes")

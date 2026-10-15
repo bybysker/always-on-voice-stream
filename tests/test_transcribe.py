@@ -22,7 +22,7 @@ import websockets
 
 from helpers import bursts, noise, speechlike
 from voicestream.audio.base import float_to_int16
-from voicestream.config import Config, OpenAIRealtimeConfig, OpenAITranscribeConfig
+from voicestream.config import Config, DeepgramConfig, OpenAIRealtimeConfig, OpenAITranscribeConfig
 from voicestream.models import SAMPLE_RATE, AudioFrame, Utterance
 from voicestream.transcribe import build_transcriber, keywords_for
 from voicestream.transcribe.base import (
@@ -33,6 +33,7 @@ from voicestream.transcribe.base import (
     clean_transcript,
     is_hallucination,
 )
+from voicestream.transcribe.deepgram import DeepgramTranscriber
 from voicestream.transcribe.openai_realtime import RATE, OpenAIRealtimeTranscriber
 from voicestream.transcribe.openai_rest import OpenAITranscriber
 
@@ -162,7 +163,7 @@ async def test_retries_are_capped_then_the_utterance_is_skipped(slept: list[floa
 
 
 async def test_network_errors_and_timeouts_are_retried(slept: list[float]) -> None:
-    t = _Scripted([OSError("reset"), asyncio.TimeoutError(), "made it"])
+    t = _Scripted([OSError("reset"), TimeoutError(), "made it"])
     segs = [s async for s in t.stream("mic", "Me", _frames(bursts(1)))]
     assert [s.text for s in segs] == ["made it"]
 
@@ -195,6 +196,7 @@ async def test_fatal_error_stops_the_stream() -> None:
 async def test_hallucinations_are_dropped_but_real_speech_is_kept() -> None:
     long_burst = np.concatenate([noise(1.0), speechlike(2.5, seed=3), noise(1.5)])
     short_burst = np.concatenate([noise(1.0), speechlike(0.9, seed=4), noise(3.0)])
+
     async def run(texts: list[str], sig: np.ndarray) -> list[str]:
         t = FakeTranscriber(texts)
         return [s.text async for s in t.stream("mic", "Me", _frames(sig))]
@@ -379,6 +381,16 @@ async def test_rest_prompt_is_capped_and_omitted_when_empty() -> None:
     assert "prompt" not in api.fields(1) and "languages[]" not in api.fields(1) and "keywords[]" not in api.fields(1)
 
 
+async def test_rest_keyword_lists_are_capped() -> None:
+    api = _Api({"text": "a"}, {"text": "b"})
+    words = [f"term{i}" for i in range(150)]
+    await _rest(api, keywords=words).transcribe_utterance(_utt(), None)
+    assert api.fields()["keywords[]"] == words[:100]
+    old_style = _rest(api, model="gpt-4o-mini-transcribe", keywords=words)
+    await old_style.transcribe_utterance(_utt(), old_style.build_prompt(""))
+    assert api.fields()["prompt"] == ["Vocabulary: " + ", ".join(words[:50]) + "."]
+
+
 async def test_rest_missing_text_is_empty() -> None:
     res = await _rest(_Api({"usage": {"seconds": 1}})).transcribe_utterance(_utt(), None)
     assert res.text == "" and res.language is None
@@ -430,13 +442,25 @@ async def test_rest_stream_stops_on_a_rejected_key() -> None:
     assert err.value.fatal and len(api.requests) == 1
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: a 200 whose body isn't JSON (captive portal, proxy page) raises JSONDecodeError, which "
+    "_transcribe_with_retry doesn't catch, so one bad reply ends the whole stream",
+)
+async def test_rest_non_json_reply_does_not_end_the_stream(slept: list[float]) -> None:
+    api = _Api(httpx.Response(200, text="<html>Sign in to the Wi-Fi</html>"), {"text": "Recovered."}, {"text": "Recovered."})
+    segs = [s async for s in _rest(api).stream("mic", "Me", _frames(bursts(2)))]
+    assert segs and segs[-1].text == "Recovered."
+    assert segs[-1].t_start == pytest.approx(_onset(1) - PRE_ROLL_S, abs=0.05)
+
+
 def test_rest_requires_an_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(TranscriptionError, match="OPENAI_API_KEY"):
         OpenAITranscriber()
 
 
-async def test_rest_closes_only_its_own_client(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_rest_closes_only_its_own_client() -> None:
     shared = httpx.AsyncClient(transport=httpx.MockTransport(_Api()))
     await OpenAITranscriber(api_key="k", client=shared).aclose()
     assert not shared.is_closed
@@ -577,15 +601,18 @@ async def test_realtime_session_audio_and_results() -> None:
 
 def test_realtime_session_update_for_older_models_and_system_audio() -> None:
     t = OpenAIRealtimeTranscriber(
-        OpenAIRealtimeConfig(model="gpt-4o-mini-transcribe", noise_reduction="none", delay="low"),
+        OpenAIRealtimeConfig(model="gpt-4o-mini-transcribe", noise_reduction="none"),
         api_key="k", language="de", keywords=["Notion"],
     )
     audio_in = t.session_update()["session"]["audio"]["input"]
-    assert audio_in["transcription"] == {"model": "gpt-4o-mini-transcribe", "language": "de", "delay": "low"}
+    assert audio_in["transcription"] == {"model": "gpt-4o-mini-transcribe", "language": "de"}  # no keywords field
     assert audio_in["noise_reduction"] is None
-    live = OpenAIRealtimeTranscriber(OpenAIRealtimeConfig(model="gpt-live-transcribe", noise_reduction="far_field"), api_key="k")
+    live = OpenAIRealtimeTranscriber(
+        OpenAIRealtimeConfig(model="gpt-live-transcribe", noise_reduction="far_field", delay="low"),
+        api_key="k", keywords=[f"term{i}" for i in range(150)],
+    )
     live_in = live.session_update()["session"]["audio"]["input"]
-    assert live_in["transcription"] == {"model": "gpt-live-transcribe"}
+    assert live_in["transcription"] == {"model": "gpt-live-transcribe", "keywords": [f"term{i}" for i in range(100)], "delay": "low"}
     assert live_in["noise_reduction"] == {"type": "far_field"}
 
 
@@ -704,3 +731,61 @@ def test_realtime_requires_an_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(TranscriptionError, match="OPENAI_API_KEY"):
         OpenAIRealtimeTranscriber()
+
+
+# ============================================================================ Deepgram
+
+
+class _DeepgramSocket:
+    """In-memory Deepgram connection: answers each Finalize with one final result covering the audio
+    since the previous one; ``dies_after_finalize`` makes the first audio sent after a Finalize fail."""
+
+    def __init__(self, n: int, dies_after_finalize: bool) -> None:
+        self.n = n
+        self.dies_after_finalize = dies_after_finalize
+        self.finalized = False
+        self.received = self.answered = 0.0
+        self.inbox: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def send(self, payload: bytes | str) -> None:
+        if isinstance(payload, bytes):
+            if self.dies_after_finalize and self.finalized:
+                raise ConnectionResetError("socket is dead")  # the receiver hasn't noticed yet
+            self.received += len(payload) / 2 / SAMPLE_RATE
+        elif json.loads(payload)["type"] == "Finalize":
+            self.finalized = True
+            self.inbox.put_nowait(json.dumps({
+                "type": "Results", "start": self.answered, "duration": self.received - self.answered, "is_final": True,
+                "from_finalize": True, "channel": {"alternatives": [{"transcript": f"utterance on socket {self.n}"}]},
+            }))
+            self.answered = self.received
+
+    async def close(self) -> None:
+        self.inbox.put_nowait(None)
+
+    def __aiter__(self) -> _DeepgramSocket:
+        return self
+
+    async def __anext__(self) -> str:
+        raw = await self.inbox.get()
+        if raw is None:
+            raise StopAsyncIteration
+        return raw
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: when the first chunk of an utterance fails to send, the reconnect skips the chunk-less utterance and "
+    "leaves its stream_start on the dead socket's timeline, so its results match no utterance and it is lost",
+)
+async def test_deepgram_utterance_whose_first_chunk_hits_a_dead_socket_is_kept() -> None:
+    sockets: list[_DeepgramSocket] = []
+
+    async def connect(url: str, **kw: Any) -> _DeepgramSocket:
+        sockets.append(_DeepgramSocket(len(sockets) + 1, dies_after_finalize=not sockets))
+        return sockets[-1]
+
+    t = DeepgramTranscriber(DeepgramConfig(), api_key="k", connect=connect, result_timeout_s=0.5)
+    segs = [s async for s in t.stream("mic", "Me", _frames(bursts(2)))]
+    assert len(sockets) == 2
+    assert [s.text for s in segs] == ["utterance on socket 1", "utterance on socket 2"]

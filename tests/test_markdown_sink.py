@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +15,7 @@ from voicestream.models import AgentRun, AgentStatus, Item, ItemKind, ItemStatus
 from voicestream.sinks.base import build_sinks
 from voicestream.sinks.markdown import MarkdownConfig, MarkdownSink
 
-STARTED = datetime(2026, 10, 14, 13, 30, 12, tzinfo=timezone.utc)
+STARTED = datetime(2026, 10, 14, 13, 30, 12, tzinfo=UTC)
 
 
 def _sink(cfg: Config, **kw: Any) -> MarkdownSink:

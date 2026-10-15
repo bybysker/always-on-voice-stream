@@ -3,6 +3,8 @@ not turn their words into "Me" lines (and so into the user's commitments)."""
 
 from __future__ import annotations
 
+import pytest
+
 from helpers import seg
 from voicestream.config import EchoConfig
 from voicestream.transcribe.echo import EchoFilter, containment, words
@@ -108,3 +110,16 @@ def test_other_sources_are_not_filtered() -> None:
     f.add(seg(ASK, "system", t=10.0), now=100.0)
     other = seg(ASK, "phone", t=10.0)
     assert f.add(other, now=100.1) == [other]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: words() only matches [a-z0-9'], so accents split French words into fragments ('très' -> 'tr', 's') "
+    "and a short French reply is dropped as an echo of any long line that contains them",
+)
+def test_short_french_reply_is_not_mistaken_for_an_echo() -> None:
+    f = EchoFilter()
+    f.add(seg("C'est très bien expliqué dans le document que tu as partagé hier.", "system", t=10.0), now=100.0)
+    mine = seg("Très bien.", "mic", t=11.0)  # the user agreeing, like "Sounds good." above
+    f.add(mine, now=100.5)
+    assert f.flush() == [mine]

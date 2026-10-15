@@ -444,7 +444,11 @@ def full_meeting() -> Meeting:
         Item(id="Q1", kind=ItemKind.QUESTION, title="Who pays for travel?"),
     ]
     m.items = {i.id: i for i in items}
-    m.notes_ref = {"notion": "https://www.notion.so/Weekly-sync-abc", "markdown": "file:///tmp/notes.md"}
+    m.notes_ref = {
+        "notion": "https://www.notion.so/Weekly-sync-abc",
+        "markdown": "file:///tmp/notes.md",
+        "webhook": "https://hooks.zapier.com#20261014-140000",  # the webhook's fallback ref: not a page
+    }
     return m
 
 
@@ -473,7 +477,8 @@ async def test_slack_digest(cfg: Config, slack_url: str) -> None:
     assert actions[3] == "• ~Book the venue~"
     assert decisions == ["*Decisions (1)*", "• Ship pricing on Monday"]
     assert "Ignored" not in json.dumps(msg)  # dismissed
-    assert blocks[-1]["elements"][0]["text"] == "Full notes: <https://www.notion.so/Weekly-sync-abc|Notion>"  # no file:// links
+    # no file:// links, nor the webhook's ref
+    assert blocks[-1]["elements"][0]["text"] == "Full notes: <https://www.notion.so/Weekly-sync-abc|Notion>"
 
 
 async def test_slack_escapes_mrkdwn(cfg: Config, slack_url: str) -> None:
@@ -505,6 +510,17 @@ def test_slack_digest_stays_within_block_kit_limits(cfg: Config) -> None:
     assert "50-block limit" in blocks[-2]["elements"][0]["text"]
     assert "notion.so" in blocks[-1]["elements"][0]["text"]  # the notes link survives the cut
     assert len(msg["text"]) <= 3000
+
+
+async def test_slack_posts_each_digest_once(cfg: Config, slack_url: str) -> None:
+    sink = slack(cfg)
+    api = FakeApi(sink, "ok")
+    m = full_meeting()
+
+    m.notes_ref["slack"] = await sink.push_notes(m, "")
+    assert await sink.push_notes(m, "") == f"slack:{m.id}"  # e.g. a later `voicestream push`
+
+    assert len(api.calls) == 1
 
 
 async def test_slack_skips_meetings_with_nothing_to_report(cfg: Config, slack_url: str, meeting: Meeting) -> None:
@@ -595,6 +611,7 @@ async def test_slack_429_honours_retry_after(cfg: Config, slack_url: str, no_sle
 
 
 async def test_slack_check_validates_the_url_without_posting(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
     sink = slack(cfg)
     api = FakeApi(sink)
 
@@ -803,14 +820,32 @@ async def test_todoist_other_400s_are_not_retried(cfg: Config, meeting: Meeting,
 
 async def test_todoist_update_fields(cfg: Config, meeting: Meeting, td_token: str) -> None:
     sink = todoist(cfg)
-    api = FakeApi(sink, TASK)
+    api = FakeApi(sink, TASK, TASK)
     item = action(title="Send the final deck", priority="low", due_date=None, due_text="tomorrow")
 
     await sink.update_item(item, meeting, f"{TASK_URL}6X7rM8997g3RQmvh")
+    item.due_date = "2026-10-15"
+    await sink.update_item(item, meeting, f"{TASK_URL}6X7rM8997g3RQmvh")
 
-    assert [(c.method, str(c.url)) for c in api.calls] == [("POST", f"{TD_API}/tasks/6X7rM8997g3RQmvh")]
-    body = api.body()
-    assert (body["content"], body["priority"], body["due_string"]) == ("Send the final deck", 2, "tomorrow")
+    assert [(c.method, str(c.url)) for c in api.calls] == [("POST", f"{TD_API}/tasks/6X7rM8997g3RQmvh")] * 2
+    first, resolved = api.body(0), api.body(1)
+    assert (first["content"], first["priority"]) == ("Send the final deck", 2)
+    # re-parsed on a later day, "tomorrow" would move the task: phrases only go up on create
+    assert not {"due_string", "due_lang", "due_date"} & set(first)
+    assert resolved["due_date"] == "2026-10-15" and "due_string" not in resolved
+
+
+async def test_todoist_due_phrase_uses_the_meeting_language(cfg: Config, meeting: Meeting, td_token: str) -> None:
+    assert cfg.transcription.language is None  # auto-detect, the default
+    sink = todoist(cfg)
+    api = FakeApi(sink, TASK, TASK)
+
+    await sink.push_item(action(due_date=None, due_text="vendredi prochain"), meeting)
+    meeting.language = "fr"
+    await sink.push_item(action(id="A2", due_date=None, due_text="vendredi prochain"), meeting)
+
+    assert "due_lang" not in api.body(0)
+    assert (api.body(1)["due_string"], api.body(1)["due_lang"]) == ("vendredi prochain", "fr")
 
 
 async def test_todoist_never_clears_a_due_date(cfg: Config, meeting: Meeting, td_token: str) -> None:

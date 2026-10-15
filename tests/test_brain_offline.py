@@ -5,6 +5,7 @@ Dates are resolved against ``helpers.WEDNESDAY`` (2026-10-14).
 
 from __future__ import annotations
 
+import re
 from datetime import date
 
 import pytest
@@ -181,6 +182,51 @@ def test_follow_up_keeps_its_verb() -> None:
     assert it.title.lower().startswith("follow up with legal")
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: 'action item'/'follow-up'/'todo' also match inside their plurals, so the title starts with the stray 's'",
+)
+@pytest.mark.parametrize("text", ["The action items are: Sam sends the deck.", "Follow-ups: Sarah books the venue."])
+def test_plural_item_markers_leave_no_stray_s(text: str) -> None:
+    assert [i.title for i in _extract(seg(text)) if re.match(r"S\b", i.title)] == []
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: _DUE's 'on this|next <word>' alternatives take the object for a deadline ('on this feature'), strip it "
+    "from the task and drop the commitment as too short",
+)
+@pytest.mark.parametrize(
+    ("text", "title", "due"),
+    [("I'll work on this feature tomorrow.", "Work on this feature", "tomorrow"),
+     ("I'll comment on this doc by Friday.", "Comment on this doc", "by Friday")],
+)
+def test_on_this_object_is_not_a_deadline(text: str, title: str, due: str) -> None:
+    (it,) = _extract(seg(text))
+    assert (it.title, it.owner, it.due_text) == (title, "Alex", due)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: _NAMED_REQUEST is compiled with re.I, so its capitalised-name pattern matches any first word and "
+    "fillers ('So', 'Okay') become owners",
+)
+@pytest.mark.parametrize("text", ["So can you send me the file?", "Okay, could you share the deck with Acme?"])
+def test_leading_filler_is_not_an_owner(text: str) -> None:
+    (it,) = _extract(seg(text, "system"))
+    assert it.owner == "Alex"  # someone else asking "can you" asks the user
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: 'Let me know…' and 'Let me share my screen' become actions; _SKIP_TASKS only drops a bare 'know' "
+    "and the French 'partager mon écran'",
+)
+@pytest.mark.parametrize("text", ["Let me know if you have any questions.", "Let me share my screen."])
+def test_more_meeting_chatter_is_not_an_action(text: str) -> None:
+    assert _extract(seg(text)) == []
+
+
 def test_wake_phrase_from_mic_is_a_delegated_command() -> None:
     (it,) = _extract(seg("Hey Claude, draft a one-page summary of the Globex proposal."))
     assert it.owner == "Assistant" and it.delegate and it.explicit_request
@@ -336,6 +382,19 @@ def test_updates_change_fields_and_bump_revision() -> None:
     assert again == [] and item.revision == 2  # no-op updates don't bump
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: an update whose new due_text doesn't resolve keeps the old due_date, so sinks (which prefer "
+    "due_date) keep showing the old deadline",
+)
+def test_unresolvable_new_deadline_clears_the_old_date() -> None:
+    t = _tracker()
+    t.apply(ExtractionResult(new_items=[_new("Send the deck", due_text="by Friday")]))
+    t.apply(ExtractionResult(updates=[ItemUpdate(id="A1", due_text="sometime after the offsite")]))
+    item = t.meeting.items["A1"]
+    assert (item.due_text, item.due_date) == ("sometime after the offsite", None)
+
+
 def test_dismiss_update() -> None:
     t = _tracker()
     t.apply(ExtractionResult(new_items=[_new("Send the deck")]))
@@ -398,11 +457,16 @@ def test_edit_normalizes_and_ignores_unknown_fields() -> None:
     assert t.edit("A99", title="x") is None
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: edit() treats None/'' as 'keep', so the dashboard cannot clear an owner or deadline")
-def test_edit_can_clear_owner_and_deadline() -> None:
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: edit() treats None/'' as 'keep', so clearing the owner or due field in the dashboard (which sends '') "
+    "or via the API (null) silently does nothing",
+)
+@pytest.mark.parametrize("cleared", ["", None])
+def test_edit_can_clear_owner_and_deadline(cleared: str | None) -> None:
     t = _tracker()
     t.apply(ExtractionResult(new_items=[_new("Send the deck", owner="Sam", due_text="by Friday")]))
-    item = t.edit("A1", owner=None, due_text=None, due_date=None)
+    item = t.edit("A1", owner=cleared, due_text=cleared, due_date=cleared)
     assert item is not None and (item.owner, item.due_text, item.due_date) == (None, None, None)
 
 

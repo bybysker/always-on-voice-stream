@@ -4,9 +4,10 @@ Claude → Markdown sink, plus meeting splitting, echo suppression, agents and t
 from __future__ import annotations
 
 import asyncio
+import itertools
 import typing
 from collections.abc import AsyncIterator, Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -45,22 +46,22 @@ def _blank(annotation: Any) -> Any:
     return {str: "", bool: False, float: 0.0, int: 0}[annotation]
 
 
-def _reply(schema: type[BaseModel], **fields: Any) -> Callable[[dict[str, Any]], BaseModel]:
-    """A ScriptedLLM answer; required fields not given get their 'absent' wire value ('' / [] / first literal)."""
+M = typing.TypeVar("M", bound=BaseModel)
 
-    def answer(call: dict[str, Any]) -> BaseModel:
-        blanks = {name: _blank(f.annotation) for name, f in schema.model_fields.items() if f.is_required()}
-        return schema.model_validate(blanks | fields)
 
-    return answer
+def _wire(schema: type[M], **fields: Any) -> M:
+    """A wire answer; required fields not given get their 'absent' value ('' / [] / first literal), so
+    the scripted replies keep validating as the schemas grow."""
+    blanks = {name: _blank(f.annotation) for name, f in schema.model_fields.items() if f.is_required()}
+    return schema.model_validate(blanks | fields)
 
 
 def _new(kind: str, title: str, refs: list[int], **kw: Any) -> WireNewItem:
-    return _reply(WireNewItem, kind=kind, title=title, segment_refs=refs, priority="none", **kw)({})  # type: ignore[return-value]
+    return _wire(WireNewItem, kind=kind, title=title, segment_refs=refs, priority="none", **kw)
 
 
 def _update(id: str, **kw: Any) -> WireUpdate:
-    return _reply(WireUpdate, id=id, status="unchanged", delegate="unchanged", **kw)({})  # type: ignore[return-value]
+    return _wire(WireUpdate, id=id, status="unchanged", delegate="unchanged", **kw)
 
 
 class IdleSource(AudioSource):
@@ -153,7 +154,7 @@ async def test_recording_to_notes_todos_and_costs(cfg: Config, tmp_path: Path) -
         "Sure. I'll also draft the launch email.",
         "Great, that's everything for today.",
     ]
-    extraction = _reply(
+    extraction = _wire(
         WireExtraction,
         new_items=[
             _new("action", "Send revised pricing deck to Acme", [0], owner="Sam", due_text="by Friday",
@@ -163,7 +164,7 @@ async def test_recording_to_notes_todos_and_costs(cfg: Config, tmp_path: Path) -
         ],
         participants=["Sam"],
     )
-    summary = _reply(
+    summary = _wire(
         WireSummary,
         title="Acme pricing sync", tldr="Sam sends Acme the revised pricing; Alex drafts the launch email.",
         notes_markdown="## Summary\n\n- Acme asked twice for revised pricing.",
@@ -225,7 +226,8 @@ async def test_recording_to_notes_todos_and_costs(cfg: Config, tmp_path: Path) -
     assert started["extraction"] == "claude" and started["backend"] == cfg.transcription.backend
 
     cost = h.events("assistant.stopped")[0].data["cost"]["session"]
-    assert cost["llm_usd"] == pytest.approx((1000 * 0.10 + 100 * 0.50 + 1000 * 2.0 + 100 * 10.0) / 1e6)
+    prices = [cfg.pricing.llm_per_mtok[m] for m in (cfg.brain.model, cfg.brain.summary_model)]
+    assert cost["llm_usd"] == pytest.approx(sum(1000 * p.input + 100 * p.output for p in prices) / 1e6)  # ScriptedLLM usage
     assert set(cost["tokens"]) == {cfg.brain.model, cfg.brain.summary_model}
     assert cost["stt_minutes"] == pytest.approx(sum(u.duration for u in h.transcribers["mic"].calls) / 60)
     assert cost["stt_minutes"] == pytest.approx(9.0 / 60, abs=0.01)  # three 3-second utterances, no silence
@@ -316,8 +318,9 @@ async def test_always_on_splits_meetings_after_silence(cfg: Config) -> None:
 
 @pytest.mark.xfail(strict=True, reason="BUG: Meeting.id has 1-second resolution, so back-to-back meetings share TODO.md refs")
 async def test_back_to_back_meetings_keep_separate_todo_lines(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
-    fixed = datetime(2026, 10, 14, 15, 30, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(models, "utcnow", lambda: fixed)  # both meetings start within the same second
+    second, ticks = datetime(2026, 10, 14, 15, 30, 0, tzinfo=UTC), itertools.count()
+    # both meetings start within the same second (each call is a microsecond later)
+    monkeypatch.setattr(models, "utcnow", lambda: second + timedelta(microseconds=next(ticks)))
     cfg.always_on.idle_split_minutes = 10
     h = Harness(cfg, [IdleSource("mic")])
     run = asyncio.ensure_future(h.a.run())
@@ -388,7 +391,7 @@ async def test_control_api_and_agent_results_in_notes(cfg: Config) -> None:
     assert f"- `{session.store.dir / 'agents'}" in section and "pricing.md`" in section
     assert "Book the venue" not in notes  # dismissed
     todo = h.todo()
-    a1_line = next(ln for ln in todo.splitlines() if ln.endswith(f"/A1 -->"))
+    a1_line = next(ln for ln in todo.splitlines() if ln.endswith("/A1 -->"))
     assert "🤖 done" in a1_line and "Send the recap email" in todo and "Book the venue" not in todo
     assert h.costs.session.agents_usd == pytest.approx(0.25)
 
@@ -436,7 +439,7 @@ async def test_late_agent_results_land_in_the_renamed_session_folder(cfg: Config
         run.cancel()
     (session,) = h.a.finished_meetings
     assert session.store.dir.name.endswith("-pricing-sync")
-    run_ = session.meeting.items["A1"].agent
-    assert run_ is not None and run_.status == AgentStatus.DONE
-    assert run_.result_files and all(Path(f).is_file() and session.store.dir in Path(f).parents for f in run_.result_files)
+    agent = session.meeting.items["A1"].agent
+    assert agent is not None and agent.status == AgentStatus.DONE
+    assert agent.result_files and all(Path(f).is_file() and session.store.dir in Path(f).parents for f in agent.result_files)
     assert "Globex is about 20% cheaper" in (session.store.dir / "notes.md").read_text(encoding="utf-8")

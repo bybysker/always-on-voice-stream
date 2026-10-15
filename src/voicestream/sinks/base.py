@@ -91,6 +91,11 @@ REGISTRY: dict[str, str] = {
     "slack": "voicestream.sinks.slack:SlackSink",
     "webhook": "voicestream.sinks.webhook:WebhookSink",
     "todoist": "voicestream.sinks.todoist:TodoistSink",
+    "google": "voicestream.sinks.google:GoogleSink",
+    "reminders": "voicestream.sinks.reminders:RemindersSink",
+    "shortcuts": "voicestream.sinks.command:ShortcutsSink",
+    "command": "voicestream.sinks.command:CommandSink",
+    "hubspot": "voicestream.sinks.hubspot:HubSpotSink",
 }
 
 

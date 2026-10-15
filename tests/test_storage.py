@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import wave
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +15,7 @@ from helpers import seg
 from voicestream.models import AgentRun, AgentStatus, AudioFrame, Item, ItemKind, Meeting, TranscriptSegment
 from voicestream.storage import SessionStore, atomic_write, list_sessions, load_meeting, slugify
 
-STARTED = datetime(2026, 10, 14, 13, 30, 12, tzinfo=timezone.utc)
+STARTED = datetime(2026, 10, 14, 13, 30, 12, tzinfo=UTC)
 
 
 def _stamp(dt: datetime = STARTED) -> str:

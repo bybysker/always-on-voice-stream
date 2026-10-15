@@ -318,7 +318,7 @@ async def test_drain_gives_up_after_its_timeout_and_cancel_all_stops_work(cfg: C
         worker.cancel()
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: cancel_all() leaves cancelled runs marked RUNNING (persisted and shown in notes)")
+@pytest.mark.xfail(strict=True, reason="BUG (latent: nothing in src calls cancel_all yet): cancelled runs stay marked RUNNING")
 async def test_cancelled_runs_are_not_left_running(cfg: Config, meeting: Meeting, tmp_path: Path) -> None:
     meeting.items["A1"] = _task("A1")
     runner, _, _ = _runner(cfg, meeting, tmp_path, FakeEngine(gate=asyncio.Event()))
@@ -469,14 +469,19 @@ def test_agent_sdk_env_scrubs_other_tools_secrets(cfg: Config, tmp_path: Path, s
     assert "ANTHROPIC_API_KEY" not in env  # the agent itself still needs Claude
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: VOICESTREAM_WEBHOOK_URL (webhook sink url_env) is not scrubbed from the agent env")
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: SECRET_ENV_VARS misses sink credentials (VOICESTREAM_WEBHOOK_URL, VOICESTREAM_GOOGLE_URL, "
+    "VOICESTREAM_GOOGLE_SECRET), so agents inherit them",
+)
 def test_agent_sdk_env_scrubs_every_sink_credential(cfg: Config, tmp_path: Path, sdk: Any) -> None:
     env = _sdk_engine(cfg).options(tmp_path).env
     defaults: set[str] = set()
     for target in REGISTRY.values():
         module, _, cls = target.partition(":")
         fields = getattr(importlib.import_module(module), cls).Config.model_fields
-        defaults |= {f.default for name, f in fields.items() if name.endswith("_env")}
+        # env-var *names* only (e.g. ``token_env``); list fields such as command's ``pass_env`` aren't secrets
+        defaults |= {f.default for name, f in fields.items() if name.endswith("_env") and isinstance(f.default, str)}
     assert defaults and {name for name in defaults if env.get(name) != ""} == set()
 
 
