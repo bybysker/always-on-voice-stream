@@ -323,7 +323,8 @@ class Config(_Section):
 
     @property
     def data_path(self) -> Path:
-        return Path(os.path.expanduser(self.data_dir))
+        # absolute, so paths handed to the dashboard and sinks don't depend on the working directory
+        return Path(self.data_dir).expanduser().absolute()
 
     def source_label(self, source: str) -> str:
         if source == "mic":

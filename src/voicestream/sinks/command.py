@@ -10,7 +10,9 @@ Both sinks hand over the same JSON a webhook gets::
      "notes_markdown": "..."} # meeting.notes only
 
 The JSON is ASCII-escaped, so accents arrive intact whatever encoding the reader
-assumes. Titles and notes are in the meeting's language.
+assumes. Titles and notes are in the meeting's language. An item cancelled before
+it was pushed is never sent; later changes (``item.status``, ``item.dismissed``) go
+to the update shortcut or command.
 
 ``shortcuts`` runs a shortcut per event with ``shortcuts run <name> --input-path
 <payload.json>``. That reaches any app with Shortcuts actions (App Intents), such
@@ -19,6 +21,10 @@ the Shortcut Input, then *Get Dictionary Value* for ``item`` and then ``title``.
 the shortcut ends with output (*Stop and Output*), its first line becomes the
 item's ref, e.g. the new object's id or URL. The shortcut must not ask questions:
 the run waits for an answer until ``timeout_s``.
+
+Neither sink retries a failed run, a timed-out one included: it may have done its
+work anyway (killing ``shortcuts`` doesn't stop the shortcut), and running it again
+could create the same task twice. Push it again from the dashboard instead.
 
 ``command`` runs a program per event, never through a shell. A command is a list
 of arguments, or a string split like a shell would (``shlex``). Placeholders are
@@ -63,7 +69,7 @@ from urllib.parse import quote
 
 from pydantic import Field, field_validator, model_validator
 
-from ..models import Item, Meeting
+from ..models import Item, ItemStatus, Meeting
 from . import _proc
 from .base import Sink, SinkConfig, SinkError, item_markdown
 
@@ -126,18 +132,22 @@ class ShortcutsSink(Sink):
         self.run: _proc.Runner = _proc.run
 
     def accepts(self, item: Item, default_min_conf: float) -> bool:
-        return bool(self.cfg.item_shortcut) and super().accepts(item, default_min_conf)
+        return bool(self.cfg.item_shortcut) and item.status != ItemStatus.CANCELLED and super().accepts(item, default_min_conf)
 
     async def _shortcut(self, name: str, data: dict[str, Any]) -> str:
-        """Run shortcut ``name`` on ``data``; return the first line of its output."""
+        """Run shortcut ``name`` on ``data``; return the first line of its output. Never retried: a
+        shortcut does what it likes (create a task…), and one that timed out may still finish."""
         _proc.require_macos("Shortcuts")
         with tempfile.TemporaryDirectory(prefix="voicestream-") as tmp:
             src, out = Path(tmp) / "payload.json", Path(tmp) / "output.txt"
             src.write_bytes(_encode(data))
-            res = await self.run(
-                [SHORTCUTS, "run", name, "--input-path", str(src), "--output-path", str(out), "--output-type", "public.plain-text"],
-                timeout=self.cfg.timeout_s,
-            )
+            try:
+                res = await self.run(
+                    [SHORTCUTS, "run", name, "--input-path", str(src), "--output-path", str(out), "--output-type", "public.plain-text"],
+                    timeout=self.cfg.timeout_s,
+                )
+            except SinkError as exc:
+                raise _proc.not_retried(exc) from None
             output = out.read_text(encoding="utf-8", errors="replace") if out.exists() else ""
         if res.returncode != 0:
             raise SinkError(f"shortcut “{name}” failed (exit {res.returncode}): {_proc.tail(res.stderr)}", retryable=False)
@@ -244,21 +254,25 @@ class CommandSink(Sink):
         self.run: _proc.Runner = _proc.run
 
     def accepts(self, item: Item, default_min_conf: float) -> bool:
-        return bool(self.cfg.item_command) and super().accepts(item, default_min_conf)
+        return bool(self.cfg.item_command) and item.status != ItemStatus.CANCELLED and super().accepts(item, default_min_conf)
 
     async def _exec(self, argv: list[str], data: dict[str, Any], values: dict[str, str]) -> str:
-        """Run ``argv`` with placeholders filled in; return the first line it prints."""
+        """Run ``argv`` with placeholders filled in; return the first line it prints. Never retried:
+        a command that timed out may have done its work."""
         body = _encode(data)
         with tempfile.TemporaryDirectory(prefix="voicestream-") as tmp:
             path = Path(tmp) / "payload.json"
             path.write_bytes(body)
             filled = fill_values(values | {"json_path": str(path)})
-            res = await self.run(
-                [_PLACEHOLDER.sub(lambda m: filled[m.group(1)], arg) for arg in argv],
-                stdin=body,
-                env=_proc.child_env(self.cfg.pass_env),
-                timeout=self.cfg.timeout_s,
-            )
+            try:
+                res = await self.run(
+                    [_PLACEHOLDER.sub(lambda m: filled[m.group(1)], arg) for arg in argv],
+                    stdin=body,
+                    env=_proc.child_env(self.cfg.pass_env),
+                    timeout=self.cfg.timeout_s,
+                )
+            except SinkError as exc:
+                raise _proc.not_retried(exc) from None
         if res.returncode != 0:
             raise SinkError(f"{Path(argv[0]).name} exited with {res.returncode}: {_proc.tail(res.stderr)}", retryable=False)
         return _proc.first_line(res.stdout)

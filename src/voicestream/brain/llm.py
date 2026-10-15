@@ -69,6 +69,7 @@ class LLM(ABC):
         schema: type[M],
         max_tokens: int = 4096,
         effort: str | None = "low",
+        usage_hook: UsageHook | None = None,
     ) -> M: ...
 
     @abstractmethod
@@ -80,15 +81,19 @@ class LLM(ABC):
         content: Sequence[Block],
         max_tokens: int = 4096,
         effort: str | None = "low",
+        usage_hook: UsageHook | None = None,
     ) -> str: ...
 
     async def aclose(self) -> None:
         pass
 
-    def _report(self, usage: TokenUsage) -> None:
-        if self.on_usage:
+    def _report(self, usage: TokenUsage, hook: UsageHook | None = None) -> None:
+        """Send ``usage`` to the call's own ``usage_hook`` if it has one (agent runs are billed to the
+        agent budget, not the extraction one), else to ``on_usage``."""
+        hook = hook or self.on_usage
+        if hook:
             try:
-                self.on_usage(usage)
+                hook(usage)
             except Exception:  # pragma: no cover
                 log.exception("usage hook failed")
 
@@ -164,10 +169,10 @@ class ClaudeLLM(LLM):
                 raise LLMError(f"{type(exc).__name__}: {getattr(exc, 'message', exc)}") from exc
             raise
 
-    def _account(self, model: str, resp: Any) -> None:
+    def _account(self, model: str, resp: Any, hook: UsageHook | None) -> None:
         usage = getattr(resp, "usage", None)
         if usage is not None:
-            self._report(TokenUsage.from_anthropic(model, usage))
+            self._report(TokenUsage.from_anthropic(model, usage), hook)
 
     @staticmethod
     def _text_of(resp: Any) -> str:
@@ -182,6 +187,7 @@ class ClaudeLLM(LLM):
         schema: type[M],
         max_tokens: int = 4096,
         effort: str | None = "low",
+        usage_hook: UsageHook | None = None,
     ) -> M:
         from anthropic import transform_schema
 
@@ -196,7 +202,7 @@ class ClaudeLLM(LLM):
             output_config=output_config,
             **params,
         )
-        self._account(model, resp)
+        self._account(model, resp, usage_hook)
         stop = getattr(resp, "stop_reason", None)
         if stop == "refusal":
             raise LLMError(f"model refused: {getattr(resp, 'stop_details', None)}")
@@ -216,6 +222,7 @@ class ClaudeLLM(LLM):
         content: Sequence[Block],
         max_tokens: int = 4096,
         effort: str | None = "low",
+        usage_hook: UsageHook | None = None,
     ) -> str:
         resp = await self._create(
             model=model,
@@ -224,7 +231,7 @@ class ClaudeLLM(LLM):
             messages=[{"role": "user", "content": list(content)}],
             **model_params(model, effort),
         )
-        self._account(model, resp)
+        self._account(model, resp, usage_hook)
         if getattr(resp, "stop_reason", None) == "refusal":
             raise LLMError("model refused")
         return self._text_of(resp).strip()
@@ -246,9 +253,11 @@ class ScriptedLLM(LLM):
             raise nxt
         return nxt
 
-    async def structured(self, *, model, system, content, schema, max_tokens=4096, effort="low"):  # type: ignore[override]
+    async def structured(  # type: ignore[override]
+        self, *, model, system, content, schema, max_tokens=4096, effort="low", usage_hook=None
+    ):
         self.calls.append({"kind": "structured", "model": model, "system": system, "content": list(content), "schema": schema})
-        self._report(TokenUsage(model=model, input_tokens=1000, output_tokens=100))
+        self._report(TokenUsage(model=model, input_tokens=1000, output_tokens=100), usage_hook)
         nxt = self._next()
         if callable(nxt) and not isinstance(nxt, BaseModel):
             nxt = nxt(self.calls[-1])
@@ -256,9 +265,9 @@ class ScriptedLLM(LLM):
             return nxt if isinstance(nxt, schema) else schema.model_validate(nxt.model_dump())
         return schema.model_validate(nxt)
 
-    async def complete(self, *, model, system, content, max_tokens=4096, effort="low"):  # type: ignore[override]
+    async def complete(self, *, model, system, content, max_tokens=4096, effort="low", usage_hook=None):  # type: ignore[override]
         self.calls.append({"kind": "complete", "model": model, "system": system, "content": list(content)})
-        self._report(TokenUsage(model=model, input_tokens=1000, output_tokens=100))
+        self._report(TokenUsage(model=model, input_tokens=1000, output_tokens=100), usage_hook)
         nxt = self._next()
         if callable(nxt):
             nxt = nxt(self.calls[-1])

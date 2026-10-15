@@ -575,7 +575,7 @@ async def test_slack_rejected_blocks_fall_back_to_plain_text(cfg: Config, slack_
         (httpx.Response(404, text="no_service"), False, "no_service .*create a new one"),
         (httpx.Response(403, text="invalid_token"), False, "invalid_token"),
         (httpx.Response(410, text="channel_is_archived"), False, "archived"),
-        (httpx.Response(500, text="rollup_error"), True, "HTTP 500"),
+        (httpx.Response(500, text="rollup_error"), False, "HTTP 500.*may have been applied anyway"),
     ],
 )
 async def test_slack_errors(cfg: Config, slack_url: str, reply: httpx.Response, retryable: bool, match: str) -> None:
@@ -710,10 +710,39 @@ async def test_webhook_url_from_env_is_redacted_in_errors(cfg: Config, meeting: 
     with pytest.raises(SinkError) as bad:
         await sink.push_item(action(), meeting)
 
-    assert busy.value.retryable and not bad.value.retryable
+    assert not busy.value.retryable and not bad.value.retryable  # the 503'd delivery may have been processed
     for err in (busy, bad):
         assert "abcsecret" not in str(err.value) and "https://hooks.zapier.com/…" in str(err.value)
     assert len(api.calls) == 2  # the 503 wasn't retried: the receiver may not be idempotent
+
+
+@pytest.mark.parametrize(
+    "lost",
+    [httpx.ReadTimeout("no answer"), httpx.ReadError("reset"), httpx.RemoteProtocolError("closed"), httpx.WriteError("broken pipe")],
+)
+async def test_a_delivery_that_may_have_arrived_is_never_resent(
+    cfg: Config, meeting: Meeting, no_sleep: list[float], lost: Exception
+) -> None:
+    sink = webhook(cfg, url=HOOK_URL)
+    FakeApi(sink, lost)
+    with pytest.raises(SinkError, match="may have been applied anyway.*Push button") as err:
+        await sink.push_item(action(), meeting)
+    assert not err.value.retryable and "abcsecret" not in str(err.value)
+
+    api = FakeApi(sink, lost, "ok")
+    item = action()
+    meeting.items = {item.id: item}
+    dispatcher = Dispatcher(cfg, meeting, [sink])
+    for _ in range(3):
+        assert await dispatcher.sync(require_stable=False) == 0  # neither the mixin nor the dispatcher resends it
+    assert len(api.calls) == 1 and item.pushed == {} and no_sleep == []
+
+
+async def test_a_delivery_that_never_left_is_retried(cfg: Config, meeting: Meeting, no_sleep: list[float]) -> None:
+    sink = webhook(cfg, url=HOOK_URL)
+    api = FakeApi(sink, httpx.ConnectError("refused"), httpx.ConnectTimeout("no route"), "ok")
+    assert await sink.push_item(action(), meeting)
+    assert len(api.calls) == 3
 
 
 async def test_webhook_config_and_check(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:

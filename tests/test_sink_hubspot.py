@@ -29,9 +29,23 @@ from voicestream.sinks.hubspot import (
 TOKEN = "pat-eu1-00000000-test"
 OWNERS = "/crm/owners/2026-09"
 OBJ = "/crm/objects/2026-09"
-OWNER = {"id": "77", "email": "Alex.Martin@gmail.com", "firstName": "Alex", "lastName": "Martin", "userId": 4242, "type": "PERSON", "archived": False}
-LEA = {"id": "101", "properties": {"firstname": "Lea", "lastname": "Dupont", "email": "lea@acme.fr", "associatedcompanyid": "9001"}}
-PAUL = {"id": "102", "properties": {"firstname": "Paul", "lastname": "Dupont", "email": "paul@dupont.fr", "associatedcompanyid": None}}
+OWNER = {
+    "id": "77",
+    "email": "Alex.Martin@gmail.com",
+    "firstName": "Alex",
+    "lastName": "Martin",
+    "userId": 4242,
+    "type": "PERSON",
+    "archived": False,
+}
+LEA = {
+    "id": "101",
+    "properties": {"firstname": "Lea", "lastname": "Dupont", "email": "lea@acme.fr", "associatedcompanyid": "9001"},
+}
+PAUL = {
+    "id": "102",
+    "properties": {"firstname": "Paul", "lastname": "Dupont", "email": "paul@dupont.fr", "associatedcompanyid": None},
+}
 HELENE = {"id": "103", "properties": {"firstname": "Helene", "lastname": "Lefevre", "email": None, "associatedcompanyid": "9002"}}
 ACME = {"id": "9001", "properties": {"name": "ACME"}}
 ACME_LABS = {"id": "9003", "properties": {"name": "Acme Labs"}}
@@ -88,7 +102,9 @@ class FakeHubSpot:
         return json.loads(self.made(method, path)[i].content)
 
 
-def routes(contacts: list[dict[str, Any]] | None = None, companies: list[dict[str, Any]] | None = None, **extra: Route) -> dict[tuple[str, str], Route]:
+def routes(
+    contacts: list[dict[str, Any]] | None = None, companies: list[dict[str, Any]] | None = None, **extra: Route
+) -> dict[tuple[str, str], Route]:
     base: dict[tuple[str, str], Route] = {
         ("GET", OWNERS): {"results": [OWNER]},
         ("POST", f"{OBJ}/contacts/search"): crm_search(contacts if contacts is not None else [LEA, PAUL, HELENE]),
@@ -141,16 +157,16 @@ def make(app: Config, **kw: Any) -> HubSpotSink:
 
 
 def action(**kw: Any) -> Item:
-    fields: dict[str, Any] = dict(
-        id="A1",
-        kind=ItemKind.ACTION,
-        title="Envoyer le devis à Léa",
-        detail="Inclure l'option « premium » & les délais <urgent>",
-        owner="Alex",
-        due_date="2026-10-16",
-        priority="high",
-        evidence="Alex, tu peux envoyer le devis d'ici vendredi ?",
-    )
+    fields: dict[str, Any] = {
+        "id": "A1",
+        "kind": ItemKind.ACTION,
+        "title": "Envoyer le devis à Léa",
+        "detail": "Inclure l'option « premium » & les délais <urgent>",
+        "owner": "Alex",
+        "due_date": "2026-10-16",
+        "priority": "high",
+        "evidence": "Alex, tu peux envoyer le devis d'ici vendredi ?",
+    }
     return Item(**(fields | kw))
 
 
@@ -169,7 +185,9 @@ def search_body(prop: str, *values: str, properties: list[str] = CONTACT_PROPERT
 # ------------------------------------------------------------------ tasks
 
 
-async def test_push_creates_task_assigned_due_and_associated(app: Config, fr_meeting: Meeting, token: str, slept: list[float]) -> None:
+async def test_push_creates_task_assigned_due_and_associated(
+    app: Config, fr_meeting: Meeting, token: str, slept: list[float]
+) -> None:
     sink = make(app)
     api = FakeHubSpot(sink, routes())
 
@@ -223,7 +241,9 @@ async def test_owner_is_the_only_user_or_nobody(app: Config, fr_meeting: Meeting
     assert "hubspot_owner_id" not in api.body("POST", f"{OBJ}/tasks")["properties"]
 
 
-async def test_someone_elses_item_is_unassigned_and_its_owner_matched(app: Config, fr_meeting: Meeting, token: str, slept: list[float]) -> None:
+async def test_someone_elses_item_is_unassigned_and_its_owner_matched(
+    app: Config, fr_meeting: Meeting, token: str, slept: list[float]
+) -> None:
     sink = make(app, owners="all")
     fr_meeting.participants = []
     api = FakeHubSpot(sink, routes())
@@ -244,7 +264,9 @@ async def test_agent_and_own_items_are_not_looked_up(app: Config, fr_meeting: Me
     assert not api.made("POST", f"{OBJ}/contacts/search") and not api.made("POST", f"{OBJ}/companies/search")
 
 
-async def test_undated_item_is_due_next_workday_at_due_time(app: Config, fr_meeting: Meeting, token: str, slept: list[float], monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_undated_item_is_due_next_workday_at_due_time(
+    app: Config, fr_meeting: Meeting, token: str, slept: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
     sink = make(app, due_time="08:30", match="off")
     api = FakeHubSpot(sink, routes())
     monkeypatch.setattr(hubspot, "today", lambda tz: date(2026, 10, 16) if tz == "Europe/Amsterdam" else None)
@@ -259,7 +281,9 @@ async def test_undated_item_is_due_next_workday_at_due_time(app: Config, fr_meet
     assert api.body("POST", f"{OBJ}/tasks")["properties"]["hs_timestamp"] == "2026-11-02T07:30:00Z"  # CET after DST
 
 
-async def test_done_item_is_created_completed_and_cancelled_is_skipped(app: Config, fr_meeting: Meeting, token: str, slept: list[float]) -> None:
+async def test_done_item_is_created_completed_and_cancelled_is_skipped(
+    app: Config, fr_meeting: Meeting, token: str, slept: list[float]
+) -> None:
     sink = make(app, match="off")
     api = FakeHubSpot(sink, routes())
     await sink.push_item(action(status=ItemStatus.DONE), fr_meeting)
@@ -279,7 +303,9 @@ async def test_accents_match_both_ways(app: Config, fr_meeting: Meeting, token: 
     await sink.push_item(action(), fr_meeting)
     # the accented last name is searched as spoken and without accents
     assert api.body("POST", f"{OBJ}/contacts/search", 1) == search_body("lastname", "Lefèvre", "Lefevre")
-    assert api.body("POST", f"{OBJ}/tasks")["associations"] == associations(("101", 204), ("103", 204), ("9001", 192), ("9002", 192))
+    assert api.body("POST", f"{OBJ}/tasks")["associations"] == associations(
+        ("101", 204), ("103", 204), ("9001", 192), ("9002", 192)
+    )
     assert fold("  Léa   DUPONT ") == fold("lea dupont") == "lea dupont"
 
 
@@ -291,7 +317,9 @@ async def test_ambiguous_or_partial_names_link_nothing(app: Config, fr_meeting: 
     await sink.push_item(action(), fr_meeting)
     assert api.body("POST", f"{OBJ}/tasks")["associations"] == []
     # an ambiguous person is not tried as a company; one word and a non-matching name are
-    company_lookups = [json.loads(c.content)["filterGroups"][0]["filters"][0]["value"] for c in api.made("POST", f"{OBJ}/companies/search")]
+    company_lookups = [
+        json.loads(c.content)["filterGroups"][0]["filters"][0]["value"] for c in api.made("POST", f"{OBJ}/companies/search")
+    ]
     assert company_lookups == ["Léa", "Dupont Paul"]
 
 
@@ -309,7 +337,9 @@ async def test_companies_match_by_exact_name(app: Config, fr_meeting: Meeting, t
     fr_meeting.participants = ["Acme", "Énergie Verte"]
     api = FakeHubSpot(sink, routes(companies=[ACME, ACME_LABS, {"id": "9004", "properties": {"name": "Energie verte"}}]))
     await sink.push_item(action(), fr_meeting)
-    assert api.body("POST", f"{OBJ}/companies/search", 1) == search_body("name", "Énergie Verte", "Energie Verte", properties=["name"])
+    assert api.body("POST", f"{OBJ}/companies/search", 1) == search_body(
+        "name", "Énergie Verte", "Energie Verte", properties=["name"]
+    )
     assert api.body("POST", f"{OBJ}/tasks")["associations"] == associations(("9001", 192), ("9004", 192))
 
     twins = make(app)
@@ -326,11 +356,17 @@ async def test_followup_recipients_match_by_email(app: Config, fr_meeting: Meeti
     api = FakeHubSpot(sink, routes())
     await sink.push_item(action(), fr_meeting)
     lookups = [json.loads(c.content) for c in api.made("POST", f"{OBJ}/contacts/search")]
-    assert lookups == [search_body("email", "LEA@acme.fr"), search_body("email", "lea@acme.fr"), search_body("email", "inconnu@nulle-part.fr")]
+    assert lookups == [
+        search_body("email", "LEA@acme.fr"),
+        search_body("email", "lea@acme.fr"),
+        search_body("email", "inconnu@nulle-part.fr"),
+    ]
     assert api.body("POST", f"{OBJ}/tasks")["associations"] == associations(("101", 204), ("9001", 192))
 
 
-async def test_lookups_are_cached_per_meeting_and_spaced_out(app: Config, fr_meeting: Meeting, token: str, slept: list[float]) -> None:
+async def test_lookups_are_cached_per_meeting_and_spaced_out(
+    app: Config, fr_meeting: Meeting, token: str, slept: list[float]
+) -> None:
     sink = make(app)
     api = FakeHubSpot(sink, routes())
     await sink.push_item(action(), fr_meeting)
@@ -388,7 +424,9 @@ async def test_untrusted_text_stays_data(app: Config, fr_meeting: Meeting, token
 # ---------------------------------------------------------------- updates
 
 
-async def test_update_edits_and_completes_without_moving_the_time(app: Config, fr_meeting: Meeting, token: str, slept: list[float]) -> None:
+async def test_update_edits_and_completes_without_moving_the_time(
+    app: Config, fr_meeting: Meeting, token: str, slept: list[float]
+) -> None:
     sink = make(app)
     current = {"id": "555", "properties": {"hs_task_status": "IN_PROGRESS", "hs_timestamp": "2026-10-16T12:30:00.000Z"}}
     api = FakeHubSpot(sink, routes(**{f"GET {OBJ}/tasks/555": current, f"PATCH {OBJ}/tasks/555": current}))
@@ -405,19 +443,29 @@ async def test_update_edits_and_completes_without_moving_the_time(app: Config, f
             "hs_task_status": "COMPLETED",
         }
     }
-    await sink.update_item(edited.model_copy(update={"due_date": "2026-10-20", "status": ItemStatus.OPEN}), fr_meeting, "hubspot:tasks/555")
+    await sink.update_item(
+        edited.model_copy(update={"due_date": "2026-10-20", "status": ItemStatus.OPEN}), fr_meeting, "hubspot:tasks/555"
+    )
     moved = api.body("PATCH", f"{OBJ}/tasks/555")["properties"]
     assert moved["hs_timestamp"] == "2026-10-20T07:00:00Z" and "hs_task_status" not in moved  # never reopened
     assert not api.made("POST", f"{OBJ}/contacts/search")  # associations are made once, at creation
 
 
-async def test_cancelled_or_dismissed_archives_unless_completed(app: Config, fr_meeting: Meeting, token: str, slept: list[float]) -> None:
+async def test_cancelled_or_dismissed_archives_unless_completed(
+    app: Config, fr_meeting: Meeting, token: str, slept: list[float]
+) -> None:
     sink = make(app)
     open_task = {"id": "555", "properties": {"hs_task_status": "NOT_STARTED", "hs_timestamp": "2026-10-16T07:00:00Z"}}
     done_task = {"id": "556", "properties": {"hs_task_status": "COMPLETED", "hs_timestamp": "2026-10-16T07:00:00Z"}}
     api = FakeHubSpot(
         sink,
-        routes(**{f"GET {OBJ}/tasks/555": open_task, f"GET {OBJ}/tasks/556": done_task, f"DELETE {OBJ}/tasks/555": httpx.Response(204)}),
+        routes(
+            **{
+                f"GET {OBJ}/tasks/555": open_task,
+                f"GET {OBJ}/tasks/556": done_task,
+                f"DELETE {OBJ}/tasks/555": httpx.Response(204),
+            }
+        ),
     )
     await sink.update_item(action(dismissed=True), fr_meeting, "hubspot:tasks/555")
     await sink.update_item(action(status=ItemStatus.CANCELLED), fr_meeting, "hubspot:tasks/555")
@@ -426,7 +474,9 @@ async def test_cancelled_or_dismissed_archives_unless_completed(app: Config, fr_
     assert not api.made("DELETE", f"{OBJ}/tasks/556") and not [c for c in api.calls if c.method == "PATCH"]
 
 
-async def test_update_of_a_task_deleted_in_hubspot_is_a_no_op(app: Config, fr_meeting: Meeting, token: str, slept: list[float]) -> None:
+async def test_update_of_a_task_deleted_in_hubspot_is_a_no_op(
+    app: Config, fr_meeting: Meeting, token: str, slept: list[float]
+) -> None:
     sink = make(app)
     gone = httpx.Response(404, json={"status": "error", "message": "Object not found.", "category": "OBJECT_NOT_FOUND"})
     api = FakeHubSpot(sink, routes(**{f"GET {OBJ}/tasks/555": gone}))
@@ -453,7 +503,9 @@ async def test_dispatcher_round_trip(app: Config, fr_meeting: Meeting, token: st
 # ------------------------------------------------------------------ notes
 
 
-async def test_push_notes_logs_a_meeting_on_matched_records(app: Config, fr_meeting: Meeting, token: str, slept: list[float]) -> None:
+async def test_push_notes_logs_a_meeting_on_matched_records(
+    app: Config, fr_meeting: Meeting, token: str, slept: list[float]
+) -> None:
     sink = make(app)
     api = FakeHubSpot(sink, routes(**{f"PATCH {OBJ}/meetings/888": {"id": "888"}}))
     notes = "# Point hebdo avec Acme\n\n> Devis à envoyer\n\n- [ ] **Envoyer le devis** — Alex\n\n<b>pas du HTML</b>"
@@ -498,7 +550,9 @@ async def test_push_notes_untitled_and_deleted_meeting(app: Config, fr_meeting: 
     assert len(api.made("POST", f"{OBJ}/meetings")) == 1
 
 
-async def test_unmatched_meetings_are_not_logged_by_default(app: Config, fr_meeting: Meeting, token: str, slept: list[float]) -> None:
+async def test_unmatched_meetings_are_not_logged_by_default(
+    app: Config, fr_meeting: Meeting, token: str, slept: list[float]
+) -> None:
     sink = make(app)
     fr_meeting.participants = ["Quelqu'un d'Inconnu"]
     api = FakeHubSpot(sink, routes())
@@ -511,7 +565,11 @@ async def test_notes_can_be_logged_as_a_note(app: Config, fr_meeting: Meeting, t
     api = FakeHubSpot(sink, routes())
     assert await sink.push_notes(fr_meeting, "# Point hebdo\n\nTout va bien") == "hubspot:notes/999"
     assert api.body("POST", f"{OBJ}/notes") == {
-        "properties": {"hs_timestamp": "2026-10-15T12:00:00Z", "hs_note_body": rich_text("# Point hebdo\n\nTout va bien"), "hubspot_owner_id": "77"},
+        "properties": {
+            "hs_timestamp": "2026-10-15T12:00:00Z",
+            "hs_note_body": rich_text("# Point hebdo\n\nTout va bien"),
+            "hubspot_owner_id": "77",
+        },
         "associations": associations(("101", 202), ("9001", 190)),
     }
 
@@ -530,7 +588,12 @@ async def test_rate_limits_are_retried(app: Config, fr_meeting: Meeting, token: 
     limited = httpx.Response(
         429,
         headers={"Retry-After": "2"},
-        json={"status": "error", "message": "You have reached your ten_secondly_rolling limit.", "errorType": "RATE_LIMIT", "policyName": "TEN_SECONDLY_ROLLING"},
+        json={
+            "status": "error",
+            "message": "You have reached your ten_secondly_rolling limit.",
+            "errorType": "RATE_LIMIT",
+            "policyName": "TEN_SECONDLY_ROLLING",
+        },
     )
     created = httpx.Response(201, json={"id": "555"})
     contacts = crm_search([LEA])
@@ -547,19 +610,60 @@ async def test_rate_limits_are_retried(app: Config, fr_meeting: Meeting, token: 
     assert api.body("POST", f"{OBJ}/tasks")["associations"] == associations(("101", 204), ("9001", 192))
 
 
-async def test_server_error_on_create_is_not_resent(app: Config, fr_meeting: Meeting, token: str, slept: list[float]) -> None:
-    sink = make(app, match="off")
-    api = FakeHubSpot(sink, routes(**{f"POST {OBJ}/tasks": httpx.Response(502, text="Bad gateway")}))
+@pytest.mark.parametrize("failure", [httpx.Response(502, text="Bad gateway"), httpx.ReadTimeout("no answer")])
+async def test_a_create_that_may_have_happened_is_never_resent(
+    app: Config, fr_meeting: Meeting, token: str, slept: list[float], failure: httpx.Response | Exception
+) -> None:
+    # HubSpot applied the first create but the answer was lost; resending would make a second task
+    app.sinks = {"hubspot": {"enabled": True, "owner_email": "alex.martin@gmail.com", "match": "off"}}
+    [sink] = build_sinks(app)
+    assert isinstance(sink, HubSpotSink)
+    attempts: list[httpx.Request] = []
+
+    def create(request: httpx.Request) -> Reply:
+        attempts.append(request)
+        if len(attempts) == 1:
+            if isinstance(failure, Exception):
+                raise failure
+            return failure
+        return httpx.Response(201, json={"id": str(len(attempts))})
+
+    FakeHubSpot(sink, routes(**{f"POST {OBJ}/tasks": create}))
+    item = action()
+    fr_meeting.items = {item.id: item}
+    dispatcher = Dispatcher(app, fr_meeting, [sink])
+    for _ in range(3):
+        assert await dispatcher.sync(require_stable=False) == 0
+    assert len(attempts) == 1 and item.pushed == {}
+    assert await dispatcher.push_now(item.id) == {"hubspot": "hubspot:tasks/2"}  # you checked, and push it by hand
+
+    attempts.clear()  # the next create fails the same way: the error itself says "don't retry"
     with pytest.raises(SinkError) as err:
         await sink.push_item(action(), fr_meeting)
-    assert err.value.retryable and "HTTP 502" in str(err.value)
-    assert len(api.made("POST", f"{OBJ}/tasks")) == 1
+    assert not err.value.retryable and len(attempts) == 1
+
+
+async def test_a_create_that_never_reached_hubspot_is_retried(app: Config, fr_meeting: Meeting, token: str, slept: list[float]) -> None:
+    def refused(request: httpx.Request) -> Reply:
+        raise httpx.ConnectError("connection refused")
+
+    sink = make(app, match="off")
+    api = FakeHubSpot(sink, routes(**{f"POST {OBJ}/tasks": refused}))
+    with pytest.raises(SinkError) as err:
+        await sink.push_item(action(), fr_meeting)
+    assert err.value.retryable
+    assert len(api.made("POST", f"{OBJ}/tasks")) == 4  # the mixin's own retries
 
 
 async def test_errors_are_explained(app: Config, fr_meeting: Meeting, token: str, slept: list[float]) -> None:
     unauthorized = httpx.Response(
         401,
-        json={"status": "error", "message": "Authentication credentials not found.", "category": "INVALID_AUTHENTICATION", "correlationId": "c-1"},
+        json={
+            "status": "error",
+            "message": "Authentication credentials not found.",
+            "category": "INVALID_AUTHENTICATION",
+            "correlationId": "c-1",
+        },
     )
     sink = make(app)
     FakeHubSpot(sink, routes(**{"GET " + OWNERS: unauthorized}))
@@ -574,7 +678,12 @@ async def test_errors_are_explained(app: Config, fr_meeting: Meeting, token: str
             "status": "error",
             "message": "This app hasn't been granted all required scopes to make this call.",
             "correlationId": "c-2",
-            "errors": [{"message": "One or more of the following scopes are required.", "context": {"requiredGranularScopes": ["crm.objects.contacts.write"]}}],
+            "errors": [
+                {
+                    "message": "One or more of the following scopes are required.",
+                    "context": {"requiredGranularScopes": ["crm.objects.contacts.write"]},
+                }
+            ],
             "links": {"scopes": "https://developers.hubspot.com/scopes"},
             "category": "MISSING_SCOPES",
         },
@@ -585,7 +694,10 @@ async def test_errors_are_explained(app: Config, fr_meeting: Meeting, token: str
         await sink.push_item(action(), fr_meeting)
     assert not err.value.retryable
 
-    invalid = httpx.Response(400, json={"status": "error", "message": "Property values were not valid: hs_task_priority", "category": "VALIDATION_ERROR"})
+    invalid = httpx.Response(
+        400,
+        json={"status": "error", "message": "Property values were not valid: hs_task_priority", "category": "VALIDATION_ERROR"},
+    )
     sink = make(app, match="off")
     FakeHubSpot(sink, routes(**{f"POST {OBJ}/tasks": invalid}))
     with pytest.raises(SinkError, match="VALIDATION_ERROR .*hs_task_priority"):
@@ -612,9 +724,23 @@ async def test_missing_token_fails_at_call_time(app: Config, fr_meeting: Meeting
 
 
 async def test_check_reports_portal_owner_and_scopes(app: Config, token: str) -> None:
-    account = {"portalId": 146_000_123, "uiDomain": "app-eu1.hubspot.com", "dataHostingLocation": "eu1", "timeZone": "Europe/Amsterdam"}
+    account = {
+        "portalId": 146_000_123,
+        "uiDomain": "app-eu1.hubspot.com",
+        "dataHostingLocation": "eu1",
+        "timeZone": "Europe/Amsterdam",
+    }
     sink = make(app)
-    api = FakeHubSpot(sink, routes(**{"GET /account-info/2026-09/details": account, f"GET {OBJ}/contacts": {"results": []}, f"GET {OBJ}/companies": {"results": []}}))
+    api = FakeHubSpot(
+        sink,
+        routes(
+            **{
+                "GET /account-info/2026-09/details": account,
+                f"GET {OBJ}/contacts": {"results": []},
+                f"GET {OBJ}/companies": {"results": []},
+            }
+        ),
+    )
     line = await sink.check()
     assert line == (
         "portal 146000123 on app-eu1.hubspot.com · tasks assigned to Alex.Martin@gmail.com (owner 77) · "
@@ -626,14 +752,54 @@ async def test_check_reports_portal_owner_and_scopes(app: Config, token: str) ->
     assert len(api.made("GET", OWNERS)) == 2  # always live
 
     nobody = make(app, owner_email="typo@gmail.con", match="off")
-    FakeHubSpot(nobody, routes(**{"GET /account-info/2026-09/details": account, f"GET {OBJ}/contacts": {"results": []}, "GET " + OWNERS: {"results": []}}))
+    FakeHubSpot(
+        nobody,
+        routes(
+            **{
+                "GET /account-info/2026-09/details": account,
+                f"GET {OBJ}/contacts": {"results": []},
+                "GET " + OWNERS: {"results": []},
+            }
+        ),
+    )
     assert await nobody.check() == (
         "portal 146000123 on app-eu1.hubspot.com · tasks unassigned: no HubSpot user has the e-mail typo@gmail.con · "
         "no contact matching, so meetings aren't logged"
     )
 
     no_scope = make(app)
-    denied = httpx.Response(403, json={"status": "error", "message": "missing scopes", "category": "MISSING_SCOPES", "errors": [{"context": {"requiredScopes": ["crm.objects.companies.read"]}}]})
-    FakeHubSpot(no_scope, routes(**{"GET /account-info/2026-09/details": account, f"GET {OBJ}/contacts": {"results": []}, f"GET {OBJ}/companies": denied}))
+    denied = httpx.Response(
+        403,
+        json={
+            "status": "error",
+            "message": "missing scopes",
+            "category": "MISSING_SCOPES",
+            "errors": [{"context": {"requiredScopes": ["crm.objects.companies.read"]}}],
+        },
+    )
+    FakeHubSpot(
+        no_scope,
+        routes(
+            **{
+                "GET /account-info/2026-09/details": account,
+                f"GET {OBJ}/contacts": {"results": []},
+                f"GET {OBJ}/companies": denied,
+            }
+        ),
+    )
     with pytest.raises(SinkError, match=r"scope\(s\) crm\.objects\.companies\.read"):
         await no_scope.check()
+
+    # account details are informational: a key without the basic "oauth" scope still passes
+    no_oauth = make(app)
+    FakeHubSpot(
+        no_oauth,
+        routes(
+            **{
+                "GET /account-info/2026-09/details": httpx.Response(403, json={"category": "MISSING_SCOPES", "message": "oauth"}),
+                f"GET {OBJ}/contacts": {"results": []},
+                f"GET {OBJ}/companies": {"results": []},
+            }
+        ),
+    )
+    assert (await no_oauth.check()).startswith("tasks assigned to Alex.Martin@gmail.com (owner 77)")

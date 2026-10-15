@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 
 from ..config import Config
@@ -20,12 +21,12 @@ def build_source(spec: str, cfg: Config, clock: Clock, *, speed: float = 1.0) ->
     if spec.startswith("file:"):
         from .file import file_source
 
-        path, _, name = spec[5:].partition("@")
+        path, name = _split_name(spec[5:])
         return file_source(path, name=name or "mic", clock=clock, speed=speed)
     if spec.startswith("ffmpeg:"):
         from .ffmpeg import FFmpegSource
 
-        args, _, name = spec[7:].rpartition("@") if "@" in spec[7:] else (spec[7:], "", "")
+        args, name = _split_name(spec[7:])
         return FFmpegSource(name=name or "system", input_args=args, clock=clock)
     if spec == "mic":
         from .mic import MicSource
@@ -34,6 +35,19 @@ def build_source(spec: str, cfg: Config, clock: Clock, *, speed: float = 1.0) ->
     if spec == "system":
         return _system_source(cfg, clock)
     raise CaptureSetupError(f"unknown source '{spec}' (use mic, system, file:<path> or ffmpeg:<args>)")
+
+
+def _split_name(target: str) -> tuple[str, str]:
+    """``<path-or-args>[@name]`` -> (path-or-args, name or "").
+
+    Paths and device names may contain '@' themselves (Google Drive's macOS mount is
+    ~/Library/CloudStorage/GoogleDrive-<email>/, DirectShow has '@device_cm_{...}' names), so only a
+    plain identifier after the last '@' counts as the name.
+    """
+    head, at, name = target.rpartition("@")
+    if at and head and re.fullmatch(r"[\w-]+", name):
+        return head, name
+    return target, ""
 
 
 def _system_source(cfg: Config, clock: Clock) -> AudioSource:

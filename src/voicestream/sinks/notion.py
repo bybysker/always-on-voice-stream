@@ -34,7 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..config import Config as AppConfig
 from ..models import Item, ItemStatus, Meeting
-from .base import Sink, SinkConfig, SinkError, env_secret, item_markdown
+from .base import ITEM_LABELS, Sink, SinkConfig, SinkError, env_secret, item_labels, item_markdown
 from .http import HttpSinkMixin
 
 log = logging.getLogger(__name__)
@@ -48,8 +48,8 @@ ARRAY_MAX = 100
 MD_CHUNK_CHARS = 10_000
 MD_CHUNK_LINES = 250
 """Markdown goes up in pieces of about this size (a request may carry 1000 blocks / 500 KB)."""
-AGENT_MARK = "Agent result"
-"""Label :func:`item_markdown` puts before an agent's result; used to append it only once."""
+AGENT_MARKS = tuple(labels["agent"] for labels in ITEM_LABELS.values())
+"""Labels :func:`item_markdown` puts before an agent's result (any language); used to append it only once."""
 
 # role -> (property names tried in order, case-insensitively; compatible property types)
 _ROLES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
@@ -171,8 +171,9 @@ class NotionSink(HttpSinkMixin, Sink):
         if item.agent and item.agent.result_summary and not item.dismissed:
             # the result usually lands after the page was created
             page = await self._call("GET", f"pages/{page_id}/markdown")
-            if AGENT_MARK not in page.get("markdown", ""):
-                await self._append(page_id, _md_chunks(f"**{AGENT_MARK}:**\n\n{item.agent.result_summary}"))
+            if not any(mark in page.get("markdown", "") for mark in AGENT_MARKS):
+                label = item_labels(meeting)["agent"]
+                await self._append(page_id, _md_chunks(f"**{label}:**\n\n{item.agent.result_summary}"))
 
     def _properties(self, s: _Schema, item: Item, meeting: Meeting) -> dict[str, Any]:
         """Values for every mapped property; empty ones clear the property on update.

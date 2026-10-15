@@ -43,6 +43,11 @@ from .transcribe.echo import EchoFilter
 log = logging.getLogger(__name__)
 
 
+def _moved(path: str, old: Path, new: Path) -> str:
+    p = Path(path)
+    return str(new / p.relative_to(old)) if p.is_relative_to(old) else path
+
+
 class MeetingSession:
     """Everything scoped to one meeting."""
 
@@ -141,6 +146,8 @@ class MeetingSession:
             self._unlisten()
             self.store.close()
             self._cleanup_empty()
+            # the dashboard waits for this to leave "wrapping up…"
+            self.app.bus.publish("meeting.ended", meeting_id=self.meeting.id, title=self.meeting.title, notes=None, items=0)
             return None
         try:
             await self.extractor.flush()
@@ -161,12 +168,13 @@ class MeetingSession:
         except Exception:
             log.exception("summary failed")
             notes = rerender(self.meeting, cfg.user_name)
+        if self._rename():
+            notes = rerender(self.meeting, cfg.user_name)  # the agents' files moved with the folder
         self.store.save_notes(notes)
         try:
             await self.dispatcher.finalize(notes)
         except Exception:
             log.exception("final push failed")
-        self.store.rename_with_title()
         self.store.save()
         notes_path = self.store.dir / "notes.md"
         self.app.bus.publish(
@@ -188,6 +196,7 @@ class MeetingSession:
 
     async def _late_agents(self) -> None:
         await self.agents.drain(self.app.cfg.agents.timeout_s + 30)
+        self._rename()  # held back while the agents were writing into the folder
         notes = rerender(self.meeting, self.app.cfg.user_name)
         self.store.save_notes(notes)
         self.store.save()
@@ -195,6 +204,28 @@ class MeetingSession:
         await self._shutdown_tasks()
         self._unlisten()
         self.app.bus.publish("meeting.notes_updated", meeting_id=self.meeting.id, notes=str(self.store.dir / "notes.md"))
+
+    def _rename(self) -> bool:
+        """Append the title slug to the folder name, carrying the agents' paths along. Never while an
+        agent is working in it: it would keep writing under the old path."""
+        if self.agents.busy:
+            return False
+        old = self.store.dir
+        self.store.rename_with_title()
+        new = self.store.dir
+        if new == old:
+            return False
+        if self.agents.root == old / "agents":
+            self.agents.root = self.store.agents_dir
+        for item in self.meeting.items.values():
+            run = item.agent
+            if run is None or not (run.workspace or run.result_files):
+                continue
+            run.workspace = _moved(run.workspace, old, new) if run.workspace else None
+            run.result_files = [_moved(f, old, new) for f in run.result_files]
+            # only the paths changed: refreshes the dashboard's file links, the console stays quiet
+            self.app.bus.publish("agent.updated", meeting_id=self.meeting.id, item=item.model_dump(mode="json"), moved=True)
+        return True
 
     async def _shutdown_tasks(self) -> None:
         self.agents.stop()
@@ -207,7 +238,10 @@ class MeetingSession:
     def _cleanup_empty(self) -> None:
         try:
             for p in sorted(self.store.dir.rglob("*"), reverse=True):
-                if p.is_file() and p.name in ("transcript.md", "meeting.json", "transcript.jsonl"):
+                if p.is_file() and (
+                    p.name in ("transcript.md", "meeting.json", "transcript.jsonl")
+                    or (p.name.startswith("audio-") and p.suffix == ".wav")  # capture.store_audio
+                ):
                     p.unlink()
                 elif p.is_dir():
                     p.rmdir()
@@ -397,6 +431,8 @@ class Assistant:
         path = await self.end_meeting("replayed")
         if self._background:
             await asyncio.wait(self._background, timeout=self.cfg.agents.timeout_s + 60)
+            if path is not None:
+                path = session.store.dir / path.name  # late agents may have let the folder be renamed
         if self.llm:
             await self.llm.aclose()
         for sink in self.sinks:
@@ -495,9 +531,11 @@ class Assistant:
             if session is None or session.finished:
                 return None
             self.current = None
-        path = await session.finish(reason)
-        if path is not None:
+            # listed right away: its items can still be edited, pushed and run while it wraps up
             self.finished_meetings.append(session)
+        path = await session.finish(reason)
+        if path is None:
+            self.finished_meetings.remove(session)  # nothing was said: nothing to keep
         return path
 
     async def _screen(self) -> None:

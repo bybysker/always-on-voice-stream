@@ -526,7 +526,9 @@ async def test_overload_is_retried_for_creates_but_5xx_is_not(make, api: FakeNot
     api.fail[("POST", "pages")] = [error(500, "internal_server_error", "Oops")]
     with pytest.raises(SinkError) as exc:
         await sink.push_item(action(), meeting)
-    assert exc.value.retryable and api.calls().count(("POST", "pages")) == 3
+    # …and not retryable either, or the dispatcher would resend it a few seconds later
+    assert not exc.value.retryable and api.calls().count(("POST", "pages")) == 3
+    assert "may have been applied anyway, so it isn't retried" in str(exc.value) and "Push button" in str(exc.value)
     api.fail[("PATCH", f"pages/{PAGE1}")] = [error(529, "service_overload", "Overloaded")]
     await sink.update_item(action(status=ItemStatus.DONE), meeting, URL1)
     assert api.calls().count(("PATCH", f"pages/{PAGE1}")) == 2

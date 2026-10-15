@@ -8,8 +8,10 @@
  * or {ok: false, error, retryable}. Web apps can't read request headers, so the secret
  * travels in the body. A request with a "key" is idempotent for 6 hours: if an answer
  * gets lost and voicestream retries, the bridge finishes and returns what the first
- * attempt created instead of creating it again. It only edits events and Docs it made
- * itself, e-mails only you, and never sends a draft.
+ * attempt created instead of creating it again. Every action is safe to repeat that way,
+ * so any error but a setup mistake is retryable: Google's error messages follow the
+ * account's language, so they can't be sorted by their text. It only edits events and
+ * Docs it made itself, e-mails only you, and never sends a draft.
  */
 
 var VERSION = 1;
@@ -19,7 +21,6 @@ var LOCK_WAIT_MS = 30000;
 var DAY_TAG = 'voicestream_day'; // also marks the events this bridge made
 var DOC_MARK = 'Meeting notes written by voicestream'; // the Drive description of its Docs
 var INDENT_PT = 36;
-var TRANSIENT = /timed? ?out|try again|too many times in a short time|temporar|unavailable|server error|backend error|\block\b/i;
 var SAFE_URL = /^(?:https?:\/\/|mailto:)[^\s<>"'`]+$/i;
 var BOXES = {' ': '☐', x: '☑', X: '☑'};
 
@@ -39,7 +40,7 @@ function doPost(e) {
     out.ok = true;
   } catch (err) {
     var message = String((err && err.message) || err);
-    out = {ok: false, error: message, retryable: !(err instanceof BridgeError) && TRANSIENT.test(message)};
+    out = {ok: false, error: message, retryable: !(err instanceof BridgeError)};
   }
   return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
 }
@@ -146,7 +147,7 @@ function meetingNotes(req, state, save) {
     renderMarkdown(doc.getBody(), req.doc.markdown);
     doc.saveAndClose();
     out.doc_id = doc.getId();
-    out.doc_url = doc.getUrl();
+    out.doc_url = 'https://docs.google.com/document/d/' + doc.getId() + '/edit'; // getUrl()'s format isn't documented
   }
   // the e-mails don't hold the notes hostage: a failure is reported, the doc is kept
   if (req.recap && !state.recap_sent) {
@@ -181,14 +182,14 @@ function attempt(out, what, fn) {
 
 function openDoc(id) {
   if (!id) return null;
+  var file;
   try {
-    var file = DriveApp.getFileById(id);
-    // only a Doc this bridge made: a leaked secret must not be able to overwrite your other documents
-    return file.isTrashed() || file.getDescription() !== DOC_MARK ? null : DocumentApp.openById(id);
+    file = DriveApp.getFileById(id);
   } catch (err) {
-    if (/no item with the given id|missing|not found|deleted/i.test(String(err && err.message))) return null;
-    throw err;
+    return null; // deleted for good (the message is in the account's language, so it isn't matched)
   }
+  // only a Doc this bridge made: a leaked secret must not be able to overwrite your other documents
+  return file.isTrashed() || file.getDescription() !== DOC_MARK ? null : DocumentApp.openById(id);
 }
 
 function folder(name) {

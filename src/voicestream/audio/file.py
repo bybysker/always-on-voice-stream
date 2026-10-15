@@ -13,6 +13,9 @@ from ..models import SAMPLE_RATE, AudioFrame
 from .base import AudioSource, Clock, StreamResampler, float_to_int16, to_mono_float
 from .ffmpeg import FFmpegSource
 
+_PCM_DTYPES = {1: np.uint8, 2: np.int16, 4: np.int32}
+"""Sample widths (bytes) read natively; anything else (24-bit, float...) goes through ffmpeg."""
+
 
 class WavFileSource(AudioSource):
     """Streams a PCM WAV file in ``block_s`` frames.
@@ -43,9 +46,9 @@ class WavFileSource(AudioSource):
             rate = w.getframerate()
             channels = w.getnchannels()
             width = w.getsampwidth()
-            if width not in (1, 2, 4):
+            if width not in _PCM_DTYPES:
                 raise ValueError(f"unsupported WAV sample width {width} in {self.path}")
-            dtype = {1: np.uint8, 2: np.int16, 4: np.int32}[width]
+            dtype = _PCM_DTYPES[width]
             resampler = StreamResampler(rate, SAMPLE_RATE)
             block = max(1, int(rate * self.block_s))
             t_origin = self.clock.now()  # align with live sources on the meeting clock
@@ -78,11 +81,13 @@ def file_source(
     p = Path(path)
     if p.suffix.lower() == ".wav":
         try:
-            with wave.open(str(p), "rb"):
-                pass
-            return WavFileSource(p, name=name, clock=clock, speed=speed)
+            with wave.open(str(p), "rb") as w:
+                width = w.getsampwidth()
         except wave.Error:
-            pass  # e.g. float WAV; let ffmpeg decode it
+            width = 0  # e.g. float WAV; let ffmpeg decode it
+        # 24-bit PCM opens fine but can't be read natively, so it goes to ffmpeg as well
+        if width in _PCM_DTYPES:
+            return WavFileSource(p, name=name, clock=clock, speed=speed)
     args = (["-re"] if speed == 1.0 else []) + ["-i", str(p)]
     src = FFmpegSource(name=name, input_args=args, clock=clock, describe_as=f"file {p.name}")
     src.live = False

@@ -46,6 +46,7 @@ class SessionStore:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.meeting = meeting
         self.store_audio = store_audio
+        self._titled = False  # the title slug is appended once (the name may already end in "-2")
         self._wavs: dict[str, wave.Wave_write] = {}
         self._transcript_md = self.dir / "transcript.md"
         if not self._transcript_md.exists():
@@ -104,7 +105,7 @@ class SessionStore:
 
     def rename_with_title(self) -> None:
         """Append a slug of the meeting title to the folder name once it is known."""
-        if not self.meeting.title or "-" in self.dir.name.split("_")[-1]:
+        if not self.meeting.title or self._titled:
             return
         target = self.dir.with_name(f"{self.dir.name}-{slugify(self.meeting.title)}")
         if target.exists():
@@ -114,6 +115,7 @@ class SessionStore:
             self.dir.rename(target)
             self.dir = target
             self._transcript_md = target / "transcript.md"
+            self._titled = True
         except OSError as exc:
             log.debug("could not rename session dir: %s", exc)
 

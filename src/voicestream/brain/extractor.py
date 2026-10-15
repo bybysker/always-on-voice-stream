@@ -168,6 +168,7 @@ class Extractor:
                         self._trigger_at = self.now() + min(60.0, 10.0 * self._failures)
                         return [], []  # keep lines pending; retry soon
                     self._failures = 0
+                    self.mode = "heuristic"  # this round only: the next one tries Claude again
             if result is None:
                 result = extract_heuristic(
                     pending,
@@ -175,6 +176,9 @@ class Extractor:
                     wake_phrases=self.bc.wake_phrases,
                     commands_from=self.bc.commands_from,
                 )
+                if self.llm is not None:
+                    # Claude is back later (retry, budget): it must still see these lines as context
+                    self._blocks = self._blocks_with(pending, screens)
             refs = {i: s.id for i, s in pending}
             # allow references to earlier lines too (updates often cite them)
             for i in range(max(0, pending[0][0] - 200), pending[0][0]):
@@ -207,6 +211,16 @@ class Extractor:
             if not sources & set(self.bc.commands_from):
                 item.explicit_request = False
 
+    def _blocks_with(self, pending: list[tuple[int, TranscriptSegment]], screens: list[ScreenNote]) -> list[str]:
+        """The blocks sent so far plus one for ``pending``. Blocks are byte-identical once sent and only
+        ever appended, so every call hits the prompt cache for all earlier blocks."""
+        new_block = f"<transcript part='{self.rounds + 1}'>\n{self._build_block(pending, screens)}\n</transcript>"
+        blocks = self._blocks + [new_block]
+        # cap context: drop the oldest blocks (one-off cache miss) when the meeting gets long
+        while len(blocks) > 1 and sum(len(b) for b in blocks) > MAX_CONTEXT_CHARS:
+            blocks.pop(0)
+        return blocks
+
     def _build_block(self, pending: list[tuple[int, TranscriptSegment]], screens: list[ScreenNote]) -> str:
         events: list[tuple[float, str]] = [(s.t_start, render_segment(i, s)) for i, s in pending]
         events += [(n.t, render_screen(n)) for n in screens]
@@ -217,14 +231,8 @@ class Extractor:
         self, pending: list[tuple[int, TranscriptSegment]], screens: list[ScreenNote]
     ) -> ExtractionResult:
         assert self.llm is not None
-        # Transcript blocks are byte-identical once sent and only ever appended, so
-        # every call hits the prompt cache for all earlier blocks.
         part = self.rounds + 1
-        new_block = f"<transcript part='{part}'>\n{self._build_block(pending, screens)}\n</transcript>"
-        blocks = self._blocks + [new_block]
-        # cap context: drop the oldest blocks (one-off cache miss) when the meeting gets long
-        while len(blocks) > 1 and sum(len(b) for b in blocks) > MAX_CONTEXT_CHARS:
-            blocks.pop(0)
+        blocks = self._blocks_with(pending, screens)
         content = [text_block(b) for b in blocks[:-1]]
         content.append(text_block(blocks[-1], cache=True))
         visible = [i for i in self.meeting.items.values() if not i.dismissed]

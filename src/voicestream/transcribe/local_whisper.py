@@ -34,7 +34,11 @@ def _load(cfg: LocalWhisperConfig) -> Any:
             except ImportError as exc:
                 raise TranscriptionError("faster-whisper is not installed: pip install 'voicestream[local]'", fatal=True) from exc
             log.info("loading whisper model %s (%s/%s)…", *key)
-            _MODELS[key] = WhisperModel(cfg.model, device=cfg.device, compute_type=cfg.compute_type)
+            try:
+                _MODELS[key] = WhisperModel(cfg.model, device=cfg.device, compute_type=cfg.compute_type)
+            except Exception as exc:  # unknown model, unsupported device/compute type, failed download
+                # not fatal: this utterance is skipped and the next one tries loading again
+                raise TranscriptionError(f"could not load whisper model {cfg.model!r} ({cfg.device}/{cfg.compute_type}): {exc}") from exc
         return _MODELS[key]
 
 

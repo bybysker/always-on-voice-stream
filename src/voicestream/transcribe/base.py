@@ -126,6 +126,12 @@ class ChunkTranscriber(Transcriber):
                 if attempt == self.max_retries:
                     log.error("%s transcription failed after retries: %r", self.backend, exc)
                     return None
+            except ImportError:
+                raise  # a missing package won't install itself: stop the pipeline
+            except Exception:
+                # a bug or an odd reply must cost this utterance, not the whole stream
+                log.exception("%s transcription failed (%.1fs audio)", self.backend, utt.duration)
+                return None
             await asyncio.sleep(delay)
             delay = min(delay * 2, 8.0)
         return None
@@ -170,9 +176,9 @@ class ChunkTranscriber(Transcriber):
                     break
                 result = await task
                 utt = utterances.pop(task)
-                self._bill(utt.duration)
                 if result is None:
-                    continue
+                    continue  # the request failed, and failed requests aren't billed
+                self._bill(utt.duration)  # transcribed (even if filtered below): billed
                 text = clean_transcript(result.text)
                 if not text or is_hallucination(text, utt.speech_seconds):
                     continue

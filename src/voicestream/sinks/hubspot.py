@@ -9,7 +9,8 @@ accounts create new private apps on 2026-10-26. The calls use the date-versioned
 
 Scopes the key needs: ``crm.objects.contacts.write`` (tasks, meetings and notes are
 activities, which HubSpot files under the contacts scope), ``crm.objects.contacts.read``
-and ``crm.objects.companies.read`` (matching participants) and
+and ``crm.objects.companies.read`` (matching participants), ``crm.objects.companies.write``
+(linking an activity to a company; companies themselves are never changed) and
 ``crm.objects.owners.read`` (finding you).
 
 Setup, once:
@@ -17,7 +18,7 @@ Setup, once:
 1. In HubSpot open **Development** → **Keys** → **Service keys** → **Create service key**
    (some accounts have it under **Settings** → **Integrations** → **Service Keys**; you
    need Super Admin or Developer Tools access). Name it "voicestream", click **Add new
-   scope**, tick the four scopes above, **Update**, then **Create** and confirm.
+   scope**, tick the five scopes above, **Update**, then **Create** and confirm.
 2. Open the key, click **Show**, copy it and add ``HUBSPOT_TOKEN=<the key>`` to
    ``~/.voicestream/.env``.
 3. In ``voicestream.toml`` add ``[sinks.hubspot]`` with ``enabled = true`` and
@@ -57,9 +58,11 @@ What it does:
   (**Actions** → **Restore activity**). HubSpot tasks have no "cancelled" state, and
   completing a task that was never done would be worse.
 
-Rate limits (per account: 100 requests per 10 s on Free/Starter, 190 on Pro/Enterprise)
-come back as 429. Those are retried, and so are 5xx answers except to a create, which
-may already have been applied: there's no idempotency key to make that safe.
+Going over a rate limit (100 requests per 10 s per app on Free/Starter, 190 on
+Professional/Enterprise, plus a daily cap per account) gets a 429. Those are retried,
+and so are 5xx answers, except to a create: one that got a 5xx or no answer at all may
+have been applied, and there's no idempotency key to make resending it safe. It fails
+without a retry instead: check HubSpot and push it again by hand if it's missing.
 
 Ref formats: ``hubspot:tasks/<id>``; ``hubspot:meetings/<id>`` or ``hubspot:notes/<id>``.
 """
@@ -90,7 +93,13 @@ API = "https://api.hubapi.com"
 VERSION = "2026-09"
 OBJECTS = f"/crm/objects/{VERSION}"
 REF_PREFIX = "hubspot:"
-SCOPES = ("crm.objects.contacts.write", "crm.objects.contacts.read", "crm.objects.companies.read", "crm.objects.owners.read")
+SCOPES = (
+    "crm.objects.contacts.write",
+    "crm.objects.contacts.read",
+    "crm.objects.companies.read",
+    "crm.objects.companies.write",
+    "crm.objects.owners.read",
+)
 ASSOCIATION_TYPES = {"tasks": (204, 192), "meetings": (200, 188), "notes": (202, 190)}
 """HUBSPOT_DEFINED association type ids: activity → contact, activity → company."""
 PRIORITY = {"high": "HIGH", "medium": "MEDIUM", "low": "LOW"}
@@ -173,7 +182,9 @@ class HubSpotSink(HttpSinkMixin, Sink):
             self._owner, self._owner_known = (people[0] if people else None), True
         return self._owner
 
-    async def _search(self, object_type: str, filters: list[dict[str, str]], properties: list[str]) -> list[dict[str, Any]] | None:
+    async def _search(
+        self, object_type: str, filters: list[dict[str, str]], properties: list[str]
+    ) -> list[dict[str, Any]] | None:
         """Records matching any of ``filters``; ``None`` when there are too many to tell a unique match."""
         wait = self._last_search + SEARCH_INTERVAL_S - monotonic()
         if wait > 0:
@@ -337,23 +348,33 @@ class HubSpotSink(HttpSinkMixin, Sink):
         return await self._create(kind, props, associations)
 
     async def check(self) -> str:
-        account = (await self._api("GET", f"/account-info/{VERSION}/details")).json()
+        parts: list[str] = []
+        try:
+            account = (await self._api("GET", f"/account-info/{VERSION}/details")).json()
+            parts.append(f"portal {account.get('portalId')} on {account.get('uiDomain')}")
+        except HubSpotError as exc:
+            if exc.status != 403:  # some API rollouts want the basic "oauth" scope here; it's only informational
+                raise
         self._owner_known = False  # always a live lookup
         owner = await self._owner_record()
-        # read scopes; the write scope shows on the first push
+        # read scopes; the write scopes show on the first push
         for object_type in ("contacts", "companies") if self.cfg.match != "off" else ("contacts",):
             await self._api("GET", f"{OBJECTS}/{object_type}", params={"limit": 1})
-        parts = [f"portal {account.get('portalId')} on {account.get('uiDomain')}"]
         if owner:
             parts.append(f"tasks assigned to {owner.get('email')} (owner {owner['id']})")
         elif self.cfg.owner_email:
             parts.append(f"tasks unassigned: no HubSpot user has the e-mail {self.cfg.owner_email}")
         else:
             parts.append("tasks unassigned: set owner_email to your HubSpot login e-mail")
-        if self.cfg.match == "off":
-            parts.append("no contact matching" + ("" if self.cfg.log_unmatched else ", so meetings aren't logged"))
+        logged_as = "Meetings" if self.cfg.log_meeting else "Notes"
+        if not self.cfg.notes:
+            pass
+        elif self.cfg.match != "off":
+            parts.append(f"meetings logged as {logged_as} on matched contacts")
+        elif self.cfg.log_unmatched:
+            parts.append(f"meetings logged as {logged_as} on no contact (match = off)")
         else:
-            parts.append(f"meetings logged as {'Meetings' if self.cfg.log_meeting else 'Notes'} on matched contacts")
+            parts.append("no contact matching, so meetings aren't logged")
         return " · ".join(parts)
 
 

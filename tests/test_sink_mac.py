@@ -293,11 +293,18 @@ async def test_reminders_update_of_a_deleted_reminder_is_a_no_op(cfg: Config, me
 async def test_reminders_osascript_errors(cfg: Config, meeting: Meeting, on_mac: None, stderr: str, retryable: bool, match: str) -> None:
     sink, _ = reminders(cfg, Result(1, "", stderr))
     with pytest.raises(SinkError, match=match) as exc:
-        await sink.push_item(action(), meeting)
+        await sink.update_item(action(), meeting, "x-apple-reminder://R")
     assert exc.value.retryable is retryable
     if "-1743" in stderr:
         assert str(exc.value) == PERMISSION_HELP
         assert "tccutil reset AppleEvents" in PERMISSION_HELP
+
+    # a create that failed this way may still have made the reminder: never retried
+    sink, _ = reminders(cfg, Result(1, "", stderr))
+    with pytest.raises(SinkError, match=match) as exc:
+        await sink.push_item(action(), meeting)
+    assert not exc.value.retryable
+    assert ("isn't retried" in str(exc.value)) is retryable
 
 
 @pytest.mark.parametrize("stdout", ["", "not json", "[1]", '{"id": 42}', '{"id": ""}'])
@@ -308,12 +315,26 @@ async def test_reminders_bad_replies(cfg: Config, meeting: Meeting, on_mac: None
     assert not exc.value.retryable
 
 
-async def test_reminders_timeout_is_retryable(cfg: Config, meeting: Meeting, on_mac: None) -> None:
-    sink, runner = reminders(cfg, SinkError("osascript timed out after 60s", retryable=True), timeout_s=12)
+async def test_reminders_timeout_retries_updates_but_never_a_create(cfg: Config, meeting: Meeting, on_mac: None) -> None:
+    timed_out = SinkError("osascript timed out after 12s", retryable=True)
+    sink, runner = reminders(cfg, timed_out, timed_out, timeout_s=12)
     with pytest.raises(SinkError) as exc:
-        await sink.push_item(action(), meeting)
+        await sink.update_item(action(), meeting, "x-apple-reminder://R")
     assert exc.value.retryable
-    assert runner.calls[0].timeout == 12
+    with pytest.raises(SinkError, match="It may have gone through anyway, so it isn't retried") as exc:
+        await sink.push_item(action(), meeting)
+    assert not exc.value.retryable
+    assert [c.timeout for c in runner.calls] == [12, 12]
+
+
+async def test_reminders_a_timed_out_create_is_not_repeated_by_the_dispatcher(cfg: Config, meeting: Meeting, on_mac: None) -> None:
+    # Reminders made the reminder, but osascript was killed before it answered
+    sink, runner = reminders(cfg, SinkError("osascript timed out after 60s", retryable=True), ok('{"id":"x-apple-reminder://2"}'))
+    item = meeting.items["A1"] = action()
+    dispatcher = Dispatcher(cfg, meeting, [sink])
+    for _ in range(3):
+        assert await dispatcher.sync(require_stable=False) == 0
+    assert len(runner.calls) == 1 and item.pushed == {}
 
 
 async def test_reminders_check(cfg: Config, on_mac: None) -> None:
@@ -662,6 +683,34 @@ async def test_shortcuts_without_update_or_notes(cfg: Config, meeting: Meeting, 
     await sink.update_item(action(), meeting, "x")
     assert await sink.push_notes(meeting, "notes") is None
     assert runner.calls == []
+
+
+@pytest.mark.parametrize("kind", ["shortcuts", "command"])
+async def test_a_timed_out_run_is_never_repeated(cfg: Config, meeting: Meeting, on_mac: None, kind: str) -> None:
+    # the shortcut (or command) created the task but answered too late: running it again would add a second one
+    timed_out = SinkError("shortcuts timed out after 60s", retryable=True)
+    if kind == "shortcuts":
+        sink, runner = shortcuts(cfg, timed_out, ok(), item_shortcut="Ajouter", update_shortcut="Modifier")
+    else:
+        sink, runner = command(cfg, timed_out, ok(), item_command="promethee add {title}", update_command="promethee set {ref}")
+    item = meeting.items["A1"] = action()
+    dispatcher = Dispatcher(cfg, meeting, [sink])
+    for _ in range(3):
+        assert await dispatcher.sync(require_stable=False) == 0
+    assert len(runner.calls) == 1 and item.pushed == {}
+    runner.replies = [timed_out]
+    with pytest.raises(SinkError, match="isn't retried") as exc:
+        await sink.update_item(action(), meeting, "promethee://task/7")
+    assert not exc.value.retryable
+
+
+def test_an_item_cancelled_before_its_push_is_never_sent(cfg: Config) -> None:
+    # dispatch.mode = "end": "never mind, skip the deck" mid-meeting must not become a Promethee task at the end
+    for sink in (shortcuts(cfg, item_shortcut="Ajouter")[0], command(cfg, item_command="promethee add {title}")[0]):
+        assert sink.accepts(action(), 0.5)
+        assert sink.accepts(action(status=ItemStatus.DONE), 0.5)
+        assert not sink.accepts(action(status=ItemStatus.CANCELLED), 0.5)
+        assert not sink.accepts(action(dismissed=True), 0.5)
 
 
 async def test_shortcuts_failure(cfg: Config, meeting: Meeting, on_mac: None) -> None:

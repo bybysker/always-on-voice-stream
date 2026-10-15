@@ -48,24 +48,35 @@ def test_unknown_suffix_falls_back_to_family_price(cfg: Config) -> None:
     assert m.llm_cost(TokenUsage("gpt-5", input_tokens=10**9)) == 0.0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: the family-prefix fallback ignores the major version, so claude-haiku-4-5 ($1/$5 per MTok) is billed "
-    "at Haiku 5.5 rates ($0.10/$0.50) and the daily budget trips ~10x late",
-)
 def test_fallback_price_never_crosses_major_versions(cfg: Config) -> None:
     m = CostMeter(cfg, persist=False)
     assert m.model_price("claude-haiku-4-5") != cfg.pricing.llm_per_mtok["claude-haiku-5-5"]
     assert m.model_price("claude-opus-4-1-20250805") != cfg.pricing.llm_per_mtok["claude-opus-5-5"]
+    assert m.model_price("claude-haiku-5") == cfg.pricing.llm_per_mtok["claude-haiku-5-5"]  # same major version
+    assert m.model_price("claude-sonnet-5-7") == cfg.pricing.llm_per_mtok["claude-sonnet-5-5"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: config.py prices Sonnet 5.5 cache reads at $0.10/MTok; the published rate is $0.20 "
-    "(claude-api model table, cached 2026-10-06)",
-)
-def test_default_sonnet_cache_read_price(cfg: Config) -> None:
-    assert cfg.pricing.llm_per_mtok["claude-sonnet-5-5"].cache_read == pytest.approx(0.20)
+def test_an_unpriced_model_is_free_with_one_warning(cfg: Config, caplog: pytest.LogCaptureFixture) -> None:
+    m = CostMeter(cfg, persist=False)
+    for _ in range(3):
+        assert m.llm_cost(TokenUsage("claude-haiku-4-5", input_tokens=1_000_000)) == 0.0
+    assert [r.getMessage() for r in caplog.records if "claude-haiku-4-5" in r.getMessage()] == [
+        "no price for model claude-haiku-4-5: its spend counts as $0 (add it to [pricing.llm_per_mtok])"
+    ]
+    cfg.pricing.llm_per_mtok["claude-haiku-4-5"] = cfg.pricing.llm_per_mtok["claude-haiku-5-5"].model_copy(
+        update={"input": 1.0, "output": 5.0}
+    )
+    assert m.llm_cost(TokenUsage("claude-haiku-4-5", input_tokens=1_000_000)) == pytest.approx(1.0)
+
+
+def test_default_cache_read_prices(cfg: Config) -> None:
+    # A tester's xfail claimed Sonnet 5.5 cache reads cost $0.20/MTok. Anthropic's pricing page (checked
+    # 2026-10-14) bills cache reads at 0.05x the base input price on Opus and Sonnet 5.5: $0.10 for Sonnet
+    # ($2 input) and $0.20 for Opus ($4 input). So the config is right and the claim was wrong.
+    for model in ("claude-sonnet-5-5", "claude-opus-5-5"):
+        price = cfg.pricing.llm_per_mtok[model]
+        assert price.cache_read == pytest.approx(0.05 * price.input)
+    assert cfg.pricing.llm_per_mtok["claude-sonnet-5-5"].cache_read == pytest.approx(0.10)
 
 
 def test_pricing_overrides_from_config(cfg: Config) -> None:

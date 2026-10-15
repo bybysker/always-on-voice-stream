@@ -72,6 +72,15 @@ async def run(
     return Result(proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace"))
 
 
+def not_retried(exc: SinkError) -> SinkError:
+    """``exc`` for an action that may have gone through before it failed (a timeout, an app that
+    stopped answering): killing ``shortcuts`` doesn't stop the shortcut, and the dispatcher's retry
+    of a create would make a duplicate. A failure that can't have done anything is returned as is."""
+    if not exc.retryable:
+        return exc
+    return SinkError(f"{exc}. It may have gone through anyway, so it isn't retried: check, then push it again from the dashboard if it's missing", retryable=False)
+
+
 def require_macos(what: str) -> None:
     if sys.platform != "darwin":
         raise SinkError(f"{what} needs macOS", retryable=False)

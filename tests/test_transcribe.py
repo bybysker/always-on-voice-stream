@@ -176,13 +176,28 @@ async def test_non_retryable_error_skips_only_that_utterance(slept: list[float])
     assert slept == []
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: utterances whose transcription failed are still billed")
 async def test_failed_utterances_are_not_billed(slept: list[float]) -> None:
     usage: list[float] = []
     t = _Scripted([TranscriptionError("HTTP 400"), "two"], on_usage=lambda m, s: usage.append(s))
     segs = [s async for s in t.stream("mic", "Me", _frames(bursts(2)))]
     assert len(segs) == 1
     assert usage == [pytest.approx(segs[0].t_end - segs[0].t_start)]
+
+
+async def test_unexpected_error_skips_only_that_utterance(slept: list[float]) -> None:
+    usage: list[float] = []
+    t = _Scripted([KeyError("text"), "two"], on_usage=lambda m, s: usage.append(s))
+    segs = [s async for s in t.stream("mic", "Me", _frames(bursts(2)))]
+    assert [s.text for s in segs] == ["two"]
+    assert len(t.prompts) == 2 and slept == []  # not retried: a bug won't fix itself
+    assert usage == [pytest.approx(segs[0].t_end - segs[0].t_start)]
+
+
+async def test_missing_package_stops_the_stream() -> None:
+    t = _Scripted([ModuleNotFoundError("No module named 'faster_whisper'"), "never"])
+    with pytest.raises(ImportError):
+        _ = [s async for s in t.stream("mic", "Me", _frames(bursts(2)))]
+    assert len(t.prompts) == 1
 
 
 async def test_fatal_error_stops_the_stream() -> None:
@@ -442,16 +457,27 @@ async def test_rest_stream_stops_on_a_rejected_key() -> None:
     assert err.value.fatal and len(api.requests) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: a 200 whose body isn't JSON (captive portal, proxy page) raises JSONDecodeError, which "
-    "_transcribe_with_retry doesn't catch, so one bad reply ends the whole stream",
-)
 async def test_rest_non_json_reply_does_not_end_the_stream(slept: list[float]) -> None:
     api = _Api(httpx.Response(200, text="<html>Sign in to the Wi-Fi</html>"), {"text": "Recovered."}, {"text": "Recovered."})
     segs = [s async for s in _rest(api).stream("mic", "Me", _frames(bursts(2)))]
     assert segs and segs[-1].text == "Recovered."
     assert segs[-1].t_start == pytest.approx(_onset(1) - PRE_ROLL_S, abs=0.05)
+
+
+@pytest.mark.parametrize("body", [{"text": "<html>Sign in to the Wi-Fi</html>"}, {"json": ["not", "an", "object"]}])
+async def test_rest_200_without_a_json_transcript_is_retryable(body: dict[str, Any]) -> None:
+    with pytest.raises(TranscriptionError) as err:
+        await _rest(_Api(httpx.Response(200, **body))).transcribe_utterance(_utt(), None)
+    assert err.value.retryable and not err.value.fatal
+
+
+async def test_rest_bills_only_requests_that_returned_a_transcript(slept: list[float]) -> None:
+    usage: list[tuple[str, float]] = []
+    api = _Api(httpx.Response(400, json={"error": {"message": "audio too short"}}), httpx.Response(503, text="busy"), {"text": "Second."})
+    segs = [s async for s in _rest(api, on_usage=lambda m, s: usage.append((m, s))).stream("mic", "Me", _frames(bursts(2)))]
+    assert [s.text for s in segs] == ["Second."] and len(api.requests) == 3
+    # OpenAI doesn't bill failed requests: not the rejected utterance, and the retried one only once
+    assert usage == [("gpt-transcribe", pytest.approx(segs[0].t_end - segs[0].t_start))]
 
 
 def test_rest_requires_an_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -540,8 +566,22 @@ async def _realtime(
     speaker: str = "Me",
     cfg: dict[str, Any] | None = None,
     process_request: Any = None,
+    hold: dict[int, int] | None = None,
     **kw: Any,
 ) -> tuple[OpenAIRealtimeTranscriber, list[Any]]:
+    """``hold`` maps burst ``k`` to how many transcripts must be out before it starts, which pins
+    where results land relative to utterances without relying on timing."""
+    segs: list[Any] = []
+
+    async def frames() -> AsyncIterator[AudioFrame]:
+        async for f in _frames(bursts(3) if sig is None else sig, source):
+            for k, n in (hold or {}).items():
+                if abs(f.t_start - (_onset(k) - 0.5)) < 0.01:  # burst k-1 is committed, burst k not started
+                    async with asyncio.timeout(5):
+                        while len(segs) < n:
+                            await asyncio.sleep(0.01)
+            yield f
+
     async with websockets.serve(mock.handler, "127.0.0.1", 0, process_request=process_request) as srv:
         port = srv.sockets[0].getsockname()[1]
         t = OpenAIRealtimeTranscriber(
@@ -549,7 +589,8 @@ async def _realtime(
             api_key="sk-test",
             **kw,
         )
-        segs = [s async for s in t.stream(source, speaker, _frames(bursts(3) if sig is None else sig, source))]
+        async for s in t.stream(source, speaker, frames()):
+            segs.append(s)
     return t, segs
 
 
@@ -671,18 +712,39 @@ async def test_realtime_does_not_rotate_before_rotate_after_s() -> None:
     assert len(mock.conns) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: rotation never triggers — on_event registers the new utterance (current/inflight) before its first send(), so ensure_connected() never sees an idle socket",
-)
 async def test_realtime_rotates_the_session_between_utterances() -> None:
     mock = _RealtimeMock()
-    _, segs = await _realtime(mock, cfg={"rotate_after_s": 0.0})
+    # every transcript is in before the next utterance starts, so each start is a safe point to rotate
+    _, segs = await _realtime(mock, cfg={"rotate_after_s": 0.0}, hold={1: 1, 2: 2})
+    assert [s.text for s in segs] == [f"utterance 1 (conn {n})" for n in (1, 2, 3)]
     assert len(segs) == 3 and mock.commits == 3  # nothing re-sent
-    assert len(mock.conns) >= 2
+    assert len(mock.conns) == 3  # and no socket is opened after the last utterance
     for conn in mock.conns:  # no utterance is split across sockets
         assert conn.types[0] == "session.update"
         assert conn.types[-1] == "input_audio_buffer.commit"
+
+
+async def test_realtime_rotation_waits_until_trailing_results_are_in() -> None:
+    def completed(item_id: str, text: str) -> str:
+        return json.dumps({"type": "conversation.item.input_audio_transcription.completed", "item_id": item_id, "transcript": text})
+
+    async def first_answered_late(ws: Any, conn: _Conn) -> None:
+        iid = conn.item()
+        await ws.send(json.dumps({"type": "input_audio_buffer.committed", "item_id": iid}))
+        if (conn.n, conn.commits) == (1, 1):
+            return  # still outstanding when the second utterance starts: no rotation then
+        if (conn.n, conn.commits) == (1, 2):
+            await ws.send(completed(conn.item(1), "first"))
+        await ws.send(completed(iid, f"utterance {conn.commits} (conn {conn.n})"))
+
+    mock = _RealtimeMock(first_answered_late)
+    _, segs = await _realtime(mock, cfg={"rotate_after_s": 0.0}, hold={2: 2})
+    assert [s.text for s in segs] == ["first", "utterance 2 (conn 1)", "utterance 1 (conn 2)"]
+    assert [c.commits for c in mock.conns] == [2, 1]  # rotated at the first idle start, nothing re-sent
+    for conn in mock.conns:
+        assert conn.types[0] == "session.update"
+        assert conn.types[-1] == "input_audio_buffer.commit"
+    assert [s.t_start for s in segs] == pytest.approx([_onset(k) - PRE_ROLL_S for k in range(3)], abs=0.05)
 
 
 async def test_realtime_commit_empty_error_skips_only_that_utterance() -> None:
@@ -714,6 +776,58 @@ async def test_realtime_failed_transcription_and_hallucinations_are_skipped() ->
 
     _, segs = await _realtime(_RealtimeMock(mixed))
     assert [s.text for s in segs] == ["Thank you."]  # 2 s of speech: a real "thank you"
+
+
+async def test_realtime_bills_committed_audio_even_without_a_transcript() -> None:
+    async def fail_first(ws: Any, conn: _Conn) -> None:
+        if conn.commits == 1:
+            iid = conn.item()
+            await ws.send(json.dumps({"type": "input_audio_buffer.committed", "item_id": iid}))
+            await ws.send(json.dumps({"type": "conversation.item.input_audio_transcription.failed", "item_id": iid,
+                                      "error": {"type": "server_error", "message": "boom"}}))
+            return
+        await _RealtimeMock.answer(ws, conn)
+
+    mock = _RealtimeMock(fail_first)
+    t, segs = await _realtime(mock)
+    assert len(segs) == 2
+    (conn,) = mock.conns
+    assert len(conn.committed_audio) == 3  # the failed utterance's audio was committed, so it is billed too
+    assert t.billed_seconds == pytest.approx(sum(conn.committed_audio) / 2 / RATE)
+
+
+async def test_realtime_bills_audio_re_sent_after_a_reconnect() -> None:
+    async def drop_first(ws: Any, conn: _Conn) -> None:
+        if conn.n == 1:
+            await ws.close()
+            return
+        await _RealtimeMock.answer(ws, conn)
+
+    mock = _RealtimeMock(drop_first)
+    t, segs = await _realtime(mock)
+    assert len(segs) == 3 and [c.commits for c in mock.conns] == [1, 3]
+    # the first utterance was committed on both sockets: each commit is transcribed, so each is billed
+    assert t.billed_seconds == pytest.approx(sum(n for c in mock.conns for n in c.committed_audio) / 2 / RATE)
+
+
+async def test_realtime_re_sent_utterance_starts_a_fresh_live_caption() -> None:
+    async def drop_after_delta(ws: Any, conn: _Conn) -> None:
+        iid = conn.item()
+        await ws.send(json.dumps({"type": "input_audio_buffer.committed", "item_id": iid}))
+        await ws.send(json.dumps({"type": "conversation.item.input_audio_transcription.delta", "item_id": iid,
+                                  "delta": f"words {conn.commits}"}))
+        if conn.n == 1:
+            await ws.close()  # the final transcript is lost with the socket
+        elif conn.commits > 1:
+            await ws.send(json.dumps({"type": "conversation.item.input_audio_transcription.completed", "item_id": iid,
+                                      "transcript": f"final {conn.commits}"}))
+        # the re-sent first utterance never completes either, so its live caption stands in
+
+    partials: list[str] = []
+    _, segs = await _realtime(_RealtimeMock(drop_after_delta), completion_timeout_s=0.5,
+                              on_partial=lambda src, sp, text: partials.append(text))
+    assert [s.text for s in segs] == ["words 1", "final 2", "final 3"]
+    assert partials[:2] == ["words 1", "words 1"]  # re-sent: the caption starts over instead of doubling
 
 
 async def test_realtime_rejected_key_raises_from_stream() -> None:
@@ -773,11 +887,6 @@ class _DeepgramSocket:
         return raw
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: when the first chunk of an utterance fails to send, the reconnect skips the chunk-less utterance and "
-    "leaves its stream_start on the dead socket's timeline, so its results match no utterance and it is lost",
-)
 async def test_deepgram_utterance_whose_first_chunk_hits_a_dead_socket_is_kept() -> None:
     sockets: list[_DeepgramSocket] = []
 
@@ -789,3 +898,39 @@ async def test_deepgram_utterance_whose_first_chunk_hits_a_dead_socket_is_kept()
     segs = [s async for s in t.stream("mic", "Me", _frames(bursts(2)))]
     assert len(sockets) == 2
     assert [s.text for s in segs] == ["utterance on socket 1", "utterance on socket 2"]
+
+
+class _DyingMidUtterance(_DeepgramSocket):
+    """The first connection sends a final for the first half second it hears, then dies at 1 s."""
+
+    said = False
+
+    async def send(self, payload: bytes | str) -> None:
+        if isinstance(payload, bytes) and self.n == 1:
+            if self.received >= 1.0:
+                raise ConnectionResetError("socket is dead")
+            if self.received >= 0.5 and not self.said:
+                self.said = True
+                self.inbox.put_nowait(json.dumps({
+                    "type": "Results", "start": 0.0, "duration": self.received, "is_final": True,
+                    "channel": {"alternatives": [{"transcript": "heard on socket 1"}]},
+                }))
+        await super().send(payload)
+
+
+async def test_deepgram_utterance_cut_off_mid_way_is_re_sent_once_and_billed_per_connection() -> None:
+    sockets: list[_DeepgramSocket] = []
+
+    async def connect(url: str, **kw: Any) -> _DeepgramSocket:
+        sockets.append(_DyingMidUtterance(len(sockets) + 1, dies_after_finalize=False))
+        return sockets[-1]
+
+    t = DeepgramTranscriber(DeepgramConfig(), api_key="k", connect=connect, result_timeout_s=0.5)
+    segs = [s async for s in t.stream("mic", "Me", _frames(bursts(1)))]
+    assert len(sockets) == 2
+    # the new connection transcribes the whole utterance again: the dead one's final isn't repeated
+    assert [s.text for s in segs] == ["utterance on socket 2"]
+    assert sockets[1].received == pytest.approx(segs[0].t_end - segs[0].t_start, abs=0.05)
+    # Deepgram bills the audio each connection received, the re-sent part included
+    assert sockets[0].received >= 1.0
+    assert t.billed_seconds == pytest.approx(sockets[0].received + sockets[1].received)

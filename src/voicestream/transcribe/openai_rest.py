@@ -84,10 +84,16 @@ class OpenAITranscriber(ChunkTranscriber):
         except httpx.TransportError as exc:
             raise TranscriptionError(f"network error: {exc}", retryable=True) from exc
         if resp.status_code == 200:
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                data = None
+            if not isinstance(data, dict):
+                # a captive portal or proxy page answering in the API's place: try again later
+                raise TranscriptionError(f"HTTP 200 without a JSON transcript: {resp.text[:300]!r}", retryable=True)
             langs = data.get("languages") or []
             lang = langs[0].get("code") if langs and isinstance(langs[0], dict) else data.get("language")
-            return TranscribeResult(text=data.get("text", ""), language=lang)
+            return TranscribeResult(text=str(data.get("text") or ""), language=lang)
         retryable = resp.status_code in (408, 409, 429) or resp.status_code >= 500
         detail = resp.text[:300]
         if resp.status_code in (401, 403):

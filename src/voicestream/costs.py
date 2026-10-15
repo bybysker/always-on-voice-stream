@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from dataclasses import asdict, dataclass, field
 from datetime import date
@@ -17,6 +18,13 @@ from .config import Config, ModelPrice
 from .events import EventBus
 
 log = logging.getLogger(__name__)
+
+_FAMILY_MAJOR = re.compile(r"(claude-[a-z]+-\d+)(?:-|$)")  # claude-haiku-5-5-20261001 -> claude-haiku-5
+
+
+def _family_major(model: str) -> str | None:
+    m = _FAMILY_MAJOR.match(model)
+    return m.group(1) if m else None
 
 
 @dataclass
@@ -63,6 +71,7 @@ class CostMeter:
         self._lock = threading.Lock()
         self._day = self._load(date.today().isoformat())
         self.session = DaySpend(day="session")
+        self._unpriced: set[str] = set()
 
     # ------------------------------------------------------------------ pricing
 
@@ -70,11 +79,18 @@ class CostMeter:
         prices = self.cfg.pricing.llm_per_mtok
         if model in prices:
             return prices[model]
-        # tolerate suffixed ids / unknown minor versions by family prefix
+        # tolerate dated/suffixed ids and unknown minor versions, but never across major versions:
+        # claude-haiku-4-5 costs 10x claude-haiku-5-5
         for name, price in prices.items():
-            family = name.rsplit("-", 2)[0]  # e.g. claude-haiku
-            if model.startswith(family):
+            if model.startswith(name + "-"):
                 return price
+        family = _family_major(model)
+        for name, price in prices.items():
+            if family and _family_major(name) == family:
+                return price
+        if model not in self._unpriced:
+            self._unpriced.add(model)
+            log.warning("no price for model %s: its spend counts as $0 (add it to [pricing.llm_per_mtok])", model)
         return None
 
     def llm_cost(self, u: TokenUsage) -> float:

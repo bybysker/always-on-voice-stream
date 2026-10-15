@@ -110,6 +110,7 @@ enabled = true
 
 # [sinks.hubspot]          # meeting logged on matched contacts/companies + your tasks (HUBSPOT_TOKEN)
 # enabled = true
+# owner_email = "you@example.com"
 
 # [sinks.shortcuts]        # any app with Shortcuts actions, e.g. Promethee
 # enabled = true

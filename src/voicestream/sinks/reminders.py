@@ -13,7 +13,8 @@ go to ``list_name`` (created when missing), due at ``due_time`` on the item's du
 date. Edits update the title, notes, priority and due date. A due date is never
 cleared, and a completed reminder is never reopened, since you may have changed it
 in Reminders yourself. Done items complete the reminder; cancelled or dismissed
-ones delete it. Meeting notes aren't supported.
+ones delete it. Meeting notes aren't supported. A create that times out isn't retried,
+since Reminders may have made the reminder anyway; updates set absolute values and are.
 
 Ref format: the reminder's scripting id, ``x-apple-reminder://<UUID>``.
 
@@ -39,7 +40,8 @@ log = logging.getLogger(__name__)
 
 OSASCRIPT = "/usr/bin/osascript"
 TRANSIENT = {-600, -609, -1712}
-"""Apple event errors worth retrying: app not running, connection invalid, timed out."""
+"""Apple event errors worth retrying (updates only: a create may have happened): app not
+running, connection invalid, timed out."""
 NOT_PERMITTED = -1743
 PERMISSION_HELP = (
     "macOS didn't let voicestream control Reminders (error -1743). Open System Settings → "
@@ -185,7 +187,10 @@ class RemindersSink(Sink):
     # -------------------------------------------------------------- sink API
 
     async def push_item(self, item: Item, meeting: Meeting) -> str:
-        out = await self._osa(self._request("create", item, meeting))
+        try:
+            out = await self._osa(self._request("create", item, meeting))
+        except SinkError as exc:
+            raise _proc.not_retried(exc) from None
         rid = out.get("id")
         if not isinstance(rid, str) or not rid:
             raise SinkError(f"reminders: created a reminder but got no id back: {out}", retryable=False)

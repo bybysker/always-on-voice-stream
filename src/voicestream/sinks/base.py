@@ -15,7 +15,7 @@ from typing import Any, ClassVar, Literal
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ..config import Config
-from ..models import Item, Meeting
+from ..models import Item, ItemStatus, Meeting
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +52,8 @@ class Sink(ABC):
         self.app = app
 
     def accepts(self, item: Item, default_min_conf: float) -> bool:
-        if item.dismissed or item.kind.value not in self.cfg.kinds:
+        """Whether to *create* this item here (pushed items are kept in sync regardless)."""
+        if item.dismissed or item.status == ItemStatus.CANCELLED or item.kind.value not in self.cfg.kinds:
             return False
         if item.confidence < (self.cfg.min_confidence if self.cfg.min_confidence is not None else default_min_conf):
             return False
@@ -130,29 +131,43 @@ def build_sinks(app: Config, only: list[str] | None = None) -> list[Sink]:
     return sinks
 
 
+ITEM_LABELS = {
+    "en": {"owner": "Owner", "due": "Due", "priority": "Priority", "agent": "Agent result",
+           "captured": "Captured by voicestream from {title}.", "meeting_on": "meeting on {when}"},
+    "fr": {"owner": "Responsable", "due": "Échéance", "priority": "Priorité", "agent": "Résultat de l'agent",
+           "captured": "Capturé par voicestream depuis {title}.", "meeting_on": "la réunion du {when}"},
+}  # fmt: skip
+
+
+def item_labels(meeting: Meeting) -> dict[str, str]:
+    """Labels in the meeting's language (French meetings get French task bodies)."""
+    return ITEM_LABELS["fr" if (meeting.language or "").startswith("fr") else "en"]
+
+
 def item_markdown(item: Item, meeting: Meeting) -> str:
     """Body text used by sinks that accept Markdown descriptions."""
+    t = item_labels(meeting)
     lines = []
     if item.detail:
         lines += [item.detail, ""]
     meta = []
     if item.owner:
-        meta.append(f"**Owner:** {item.owner}")
+        meta.append(f"**{t['owner']}:** {item.owner}")
     if item.due_date or item.due_text:
         due = item.due_date or ""
         if item.due_text and item.due_text != item.due_date:
             due = f"{due} ({item.due_text})" if due else item.due_text
-        meta.append(f"**Due:** {due}")
+        meta.append(f"**{t['due']}:** {due}")
     if item.priority:
-        meta.append(f"**Priority:** {item.priority}")
+        meta.append(f"**{t['priority']}:** {item.priority}")
     if meta:
         lines += [" · ".join(meta), ""]
     if item.evidence:
         lines += [f"> {item.evidence}", ""]
     if item.agent and item.agent.result_summary:
-        lines += ["**Agent result:**", "", item.agent.result_summary, ""]
-    title = meeting.title or f"meeting on {meeting.started_at.astimezone():%Y-%m-%d %H:%M}"
-    lines.append(f"_Captured by voicestream from {title}._")
+        lines += [f"**{t['agent']}:**", "", item.agent.result_summary, ""]
+    title = meeting.title or t["meeting_on"].format(when=f"{meeting.started_at.astimezone():%Y-%m-%d %H:%M}")
+    lines.append(f"_{t['captured'].format(title=title)}_")
     return "\n".join(lines).strip()
 
 

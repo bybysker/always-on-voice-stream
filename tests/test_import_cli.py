@@ -135,6 +135,16 @@ def test_cli_init_writes_templates(tmp_path: Path) -> None:
     assert cli.main(["init", str(target)]) == 1  # refuses to overwrite
 
 
+def test_a_relative_data_dir_is_made_absolute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `--data-dir ./x`: the notes and agent-file paths sent to the dashboard must not depend on the working dir
+    from voicestream.config import Config
+
+    monkeypatch.chdir(tmp_path)
+    assert Config(data_dir="./x").data_path == tmp_path / "x"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert Config(data_dir="~/.voicestream").data_path == tmp_path / "home" / ".voicestream"
+
+
 def test_cli_unknown_session(tmp_path: Path) -> None:
     cfgp = _write_cfg(tmp_path)
     with pytest.raises(SystemExit):

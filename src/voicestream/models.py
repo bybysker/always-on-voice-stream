@@ -163,12 +163,12 @@ class Item(BaseModel):
     """Sink name -> item revision that was last pushed (to detect updates)."""
 
     def is_mine(self, user_name: str) -> bool:
-        if not self.owner:
+        owner, me = (self.owner or "").strip().lower(), user_name.strip().lower()
+        if not owner:  # blank owners (hand-edited or imported meetings) are nobody's
             return False
-        owner = self.owner.strip().lower()
-        return owner in {"me", "i", "myself", user_name.strip().lower()} or (
-            bool(user_name) and owner.split()[0] == user_name.strip().lower().split()[0]
-        )
+        if owner in {"me", "i", "myself"}:
+            return True
+        return bool(me) and (owner == me or owner.split()[0] == me.split()[0])
 
     def one_line(self) -> str:
         bits = [self.title]
@@ -198,7 +198,9 @@ class FollowUpEmail(BaseModel):
 
 
 class Meeting(BaseModel):
-    id: str = Field(default_factory=lambda: utcnow().strftime("%Y%m%d-%H%M%S"))
+    # microseconds: back-to-back meetings (always-on mode) can start within the same second, and
+    # sinks key their refs and idempotency ids on this
+    id: str = Field(default_factory=lambda: utcnow().strftime("%Y%m%d-%H%M%S-%f"))
     title: str | None = None
     started_at: datetime = Field(default_factory=utcnow)
     ended_at: datetime | None = None

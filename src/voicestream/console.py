@@ -95,7 +95,7 @@ class ConsolePrinter:
             if agent and agent.get("status") == "suggested" and t == "item.added":
                 line += s(f"   [agent can do this: 'run {it['id']}']", "35")
             self.emit(line)
-        elif t == "agent.updated":
+        elif t == "agent.updated" and not d.get("moved"):
             it = d["item"]
             a = it.get("agent") or {}
             st = a.get("status")
@@ -123,6 +123,8 @@ class ConsolePrinter:
             self.emit(s.dim(f"   🖥  {d['note']['description'][:160]}"))
         elif t == "meeting.ending":
             self.emit(s.dim("   … wrapping up the meeting (final extraction, summary, push)"))
+        elif t == "meeting.ended" and not d.get("notes"):
+            self.emit(s.dim("── meeting closed: nothing was said, nothing kept ──"))
         elif t == "meeting.ended":
             self.emit(s.bold(f"── meeting ended: {d.get('title') or 'untitled'} · {d.get('items', 0)} items ──"))
             self.emit(f"   notes: {d.get('notes')}")

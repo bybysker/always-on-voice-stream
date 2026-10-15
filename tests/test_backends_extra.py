@@ -156,6 +156,39 @@ def test_local_whisper_missing_package_message(monkeypatch: pytest.MonkeyPatch) 
         local_whisper._load(LocalWhisperConfig(model="tiny"))
 
 
+def test_local_whisper_model_that_fails_to_load_skips_the_utterance(monkeypatch: pytest.MonkeyPatch) -> None:
+    from voicestream.config import LocalWhisperConfig
+    from voicestream.transcribe import local_whisper
+    from voicestream.transcribe.base import TranscriptionError
+
+    def whisper_model(*a: Any, **kw: Any) -> Any:
+        raise ValueError("Requested float16 compute type, but the target device or backend do not support it")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=whisper_model))
+    local_whisper._MODELS.clear()
+    with pytest.raises(TranscriptionError, match="could not load whisper model 'tiny' \\(cpu/float16\\)") as err:
+        local_whisper._load(LocalWhisperConfig(model="tiny", compute_type="float16"))
+    assert not err.value.fatal and not err.value.retryable  # the next utterance tries loading again
+    assert local_whisper._MODELS == {}
+
+
+async def test_local_whisper_error_skips_only_that_utterance() -> None:
+    from voicestream.transcribe.local_whisper import LocalWhisperTranscriber
+
+    class Flaky(_FakeWhisper):
+        def transcribe(self, audio: np.ndarray, **kw: Any):
+            if not self.calls:
+                self.calls.append({})
+                raise RuntimeError("CUDA out of memory")
+            return super().transcribe(audio, **kw)
+
+    usage: list[float] = []
+    t = LocalWhisperTranscriber(model=Flaky(), on_usage=lambda m, s: usage.append(s))
+    segs = [s async for s in t.stream("mic", "Me", _frames(float_to_int16(bursts(2))))]
+    assert [s.text for s in segs] == ["Hello there."]
+    assert usage == [pytest.approx(segs[0].t_end - segs[0].t_start)]
+
+
 # ------------------------------------------------------------------- screen
 
 

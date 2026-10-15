@@ -150,7 +150,7 @@ class OpenAIRealtimeTranscriber(Transcriber):
         awaiting_ack: deque[_Utt] = deque()  # committed on the current socket, waiting for item_id
         by_item: dict[str, _Utt] = {}
         out: asyncio.Queue[TranscriptSegment | None] = asyncio.Queue()
-        state: dict[str, Any] = {"ws": None, "opened": 0.0, "rx": None, "current": None, "failed": None}
+        state: dict[str, Any] = {"ws": None, "opened": 0.0, "rx": None, "current": None, "failed": None, "reconnect": None}
         resampler = StreamResampler(16_000, RATE)
 
         def to24k(samples: np.ndarray) -> bytes:
@@ -181,7 +181,10 @@ class OpenAIRealtimeTranscriber(Transcriber):
                         ev = json.loads(raw)
                     except (TypeError, ValueError):
                         continue
-                    self._handle(ev, awaiting_ack, by_item, source, speaker)
+                    try:
+                        self._handle(ev, awaiting_ack, by_item, source, speaker)
+                    except Exception as exc:  # one odd event mustn't take the socket and its results down
+                        log.warning("%s: ignoring unexpected realtime event (%r): %.200s", source, exc, raw)
                     release_ready()
             except Exception as exc:  # connection closed / network error
                 log.info("%s realtime socket closed: %r", source, exc)
@@ -190,7 +193,8 @@ class OpenAIRealtimeTranscriber(Transcriber):
                     state["ws"] = None
                     if any(u.committed and not u.done for u in inflight):
                         # results were lost with the socket: reconnect now and re-send
-                        asyncio.ensure_future(_reconnect_quietly())
+                        # (keep a reference: the loop only holds tasks weakly)
+                        state["reconnect"] = asyncio.ensure_future(_reconnect_quietly())
 
         async def _reconnect_quietly() -> None:
             try:
@@ -201,7 +205,8 @@ class OpenAIRealtimeTranscriber(Transcriber):
         async def ensure_connected() -> Any:
             async with conn_lock:
                 ws = state["ws"]
-                idle = state["current"] is None and not inflight
+                # idle: between utterances with every result in, so closing the socket loses nothing
+                idle = state["current"] is None and all(u.done for u in inflight)
                 if ws is not None and (time.monotonic() - state["opened"] < self.cfg.rotate_after_s or not idle):
                     return ws
                 if ws is not None:  # rotate the 60-minute session between utterances
@@ -226,10 +231,15 @@ class OpenAIRealtimeTranscriber(Transcriber):
                 for u in inflight:
                     if u.committed and not u.done:
                         self.reconnects += 1
+                        if u.item_id:  # it gets a new item (and new live deltas) on this socket
+                            by_item.pop(u.item_id, None)
+                            u.item_id = None
+                        u.partial = ""
                         await self._send_audio(ws, u.chunks)
                         await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
                         u.committed_at = time.monotonic()
                         awaiting_ack.append(u)
+                        self._bill(u.audio_seconds)  # committed (and billed) once more
                 cur = state["current"]
                 if cur is not None and cur.chunks:
                     await self._send_audio(ws, cur.chunks)
@@ -261,6 +271,9 @@ class OpenAIRealtimeTranscriber(Transcriber):
 
         async def on_event(ev: Any) -> None:
             if ev.kind == "start":
+                # the one safe point to rotate a due session: before this utterance is registered,
+                # so it isn't split across sockets and (when idle) no pending result is lost
+                await ensure_connected()
                 u = _Utt(seq=next(seq), t_start=ev.t)
                 state["current"] = u
                 inflight.append(u)
@@ -308,6 +321,8 @@ class OpenAIRealtimeTranscriber(Transcriber):
             except Exception as exc:
                 state["failed"] = exc
             finally:
+                if state["reconnect"] is not None:
+                    state["reconnect"].cancel()  # don't let a late reconnect reopen what we close
                 await close_ws()
                 out.put_nowait(None)
 

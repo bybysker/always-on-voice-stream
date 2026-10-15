@@ -6,7 +6,7 @@ import logging
 import re
 from datetime import date
 from difflib import SequenceMatcher
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -41,7 +41,13 @@ class ExtractedItem(BaseModel):
         return v
 
 
+ClearableField = Literal["detail", "owner", "due_text", "due_date", "priority"]
+
+
 class ItemUpdate(BaseModel):
+    """A change to an existing item. ``None`` (and ``""``) means "keep": the model can't clear a field.
+    Only a manual edit can, by naming the field in ``clear``."""
+
     id: str
     title: str | None = None
     detail: str | None = None
@@ -56,6 +62,9 @@ class ItemUpdate(BaseModel):
     dismiss: bool = False
     evidence: str | None = None
     segment_refs: list[int] = Field(default_factory=list)
+    explicit_request: bool = False
+    """A direct "Hey Claude" command merged into this item: its agent run counts as explicit."""
+    clear: set[ClearableField] = Field(default_factory=set)
 
     @field_validator("priority", mode="before")
     @classmethod
@@ -75,7 +84,11 @@ class ExtractionResult(BaseModel):
 
 _FIRST_PERSON = {"me", "i", "myself", "self", "user", "the user"}
 _UNASSIGNED = {"", "unassigned", "unknown", "none", "null", "n/a", "tbd", "someone", "anyone"}
+# pronouns aren't owners either ("We should…", "On va…" open a sentence like a name would)
+_UNASSIGNED |= {"we", "they", "he", "she", "it", "this", "that", "you", "everyone", "everybody", "somebody", "nobody",
+                "nous", "on", "ils", "elles", "il", "elle", "vous", "tout le monde", "quelqu'un", "personne"}  # fmt: skip
 _ASSISTANT = {"assistant", "claude", "ai", "the assistant", "agent"}
+_CLEARABLE = set(get_args(ClearableField))  # by a manual edit; title and status can't be cleared
 
 
 def _norm_title(t: str) -> str:
@@ -174,8 +187,9 @@ class ItemTracker:
                     due_date=new.due_date if not dup.due_date else None,
                     detail=new.detail if len(new.detail) > len(dup.detail) else None,
                     delegate=new.delegate if new.delegate and dup.agent is None else None,
-                    agent_prompt=new.agent_prompt if dup.agent is None else None,
+                    agent_prompt=new.agent_prompt if dup.agent is None or new.explicit_request else None,
                     segment_refs=new.segment_refs,
+                    explicit_request=new.explicit_request,
                 )
                 if self._apply_update(dup, upd, seg_refs) and dup not in updated:
                     updated.append(dup)
@@ -227,12 +241,16 @@ class ItemTracker:
     def _apply_update(self, item: Item, upd: ItemUpdate, seg_refs: dict[int, str]) -> bool:
         changed = False
 
-        def setf(name: str, value: object) -> None:
+        def setf(name: str, value: object, *, allow_none: bool = False) -> None:
             nonlocal changed
-            if value is not None and getattr(item, name) != value:
+            if (value is not None or allow_none) and getattr(item, name) != value:
                 setattr(item, name, value)
                 changed = True
 
+        for name in upd.clear:
+            setf(name, "" if name == "detail" else None, allow_none=True)
+        if "due_text" in upd.clear:
+            setf("due_date", None, allow_none=True)  # it was resolved from those words
         if upd.dismiss:
             if not item.dismissed:
                 item.dismissed = True
@@ -245,8 +263,10 @@ class ItemTracker:
             setf("owner", self.normalize_owner(upd.owner))
         if upd.due_text is not None or upd.due_date is not None:
             due_text, due_date = self.normalize_due(upd.due_text or item.due_text, upd.due_date)
+            # new words replace the date too, even when they don't resolve: sinks show due_date first
+            new_words = due_text is not None and due_text != item.due_text
             setf("due_text", due_text)
-            setf("due_date", due_date)
+            setf("due_date", due_date, allow_none=new_words)
         setf("priority", upd.priority)
         setf("status", upd.status)
         if upd.confidence is not None:
@@ -258,10 +278,16 @@ class ItemTracker:
             if sid and sid not in item.segment_ids:
                 item.segment_ids.append(sid)
         if item.kind == ItemKind.ACTION:
-            if upd.delegate and item.agent is None:
+            if (upd.delegate or upd.explicit_request) and item.agent is None:
                 prompt = (upd.agent_prompt or "").strip() or _default_agent_prompt(item)
-                item.agent = AgentRun(prompt=prompt)
+                item.agent = AgentRun(prompt=prompt, explicit=upd.explicit_request)
                 changed = True
+            elif upd.explicit_request and item.agent is not None and item.agent.status == AgentStatus.SUGGESTED:
+                # asked for directly now, so agents.mode = "commands" may auto-run it
+                prompt = (upd.agent_prompt or "").strip() or item.agent.prompt
+                if not item.agent.explicit or prompt != item.agent.prompt:
+                    item.agent.explicit, item.agent.prompt = True, prompt
+                    changed = True
             elif (
                 upd.agent_prompt
                 and item.agent is not None
@@ -292,19 +318,36 @@ class ItemTracker:
         return item
 
     def add_manual(self, kind: ItemKind, title: str, owner: str | None = None, due_text: str | None = None) -> Item:
-        res = ExtractionResult(
-            new_items=[ExtractedItem(kind=kind, title=title, owner=owner, due_text=due_text, confidence=1.0)]
-        )
-        added, updated = self.apply(res)
-        return (added or updated)[0]
+        """Add an item by hand; a title matching an existing item is merged into it and returns it."""
+        if not title.strip():
+            raise ValueError("an item needs a title")
+        new = ExtractedItem(kind=kind, title=title, owner=owner, due_text=due_text, confidence=1.0)
+        dup = self._find_duplicate(new)
+        added, _ = self.apply(ExtractionResult(new_items=[new]))
+        if added:
+            return added[0]
+        assert dup is not None
+        return dup
 
     def edit(self, item_id: str, **fields: object) -> Item | None:
-        """Manual edit from the dashboard/CLI (title, detail, owner, due_text, due_date, status, priority)."""
+        """Manual edit from the dashboard/CLI (title, detail, owner, due_text, due_date, status, priority).
+
+        Unlike a model update, an empty value (``None``/``""``, or an owner like "unassigned") clears the
+        field: that is what the dashboard sends when you empty an input. Title and status can't be cleared.
+        """
         item = self.meeting.items.get(item_id)
         if item is None:
             return None
         allowed = {"title", "detail", "owner", "due_text", "due_date", "status", "priority"}
-        upd = ItemUpdate(id=item_id, **{k: v for k, v in fields.items() if k in allowed})
+        given = {k: v for k, v in fields.items() if k in allowed}
+
+        def emptied(k: str, v: object) -> bool:
+            if v is None:
+                return True
+            return isinstance(v, str) and (not v.strip() or (k == "owner" and self.normalize_owner(v) is None))
+
+        clear = {k for k, v in given.items() if k in _CLEARABLE and emptied(k, v)}
+        upd = ItemUpdate(id=item_id, clear=clear, **{k: v for k, v in given.items() if k not in clear})
         if self._apply_update(item, upd, {}):
             self._publish("item.updated", item=item.model_dump(mode="json"))
         return item

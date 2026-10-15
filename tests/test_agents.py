@@ -91,6 +91,12 @@ def _runner(
     return runner, bus, changes
 
 
+@pytest.fixture(autouse=True)
+def _agents_allowed(cfg: Config) -> None:
+    """conftest switches agents off, and 'off' means nothing runs: these tests run them (off-mode tests set it)."""
+    cfg.agents.mode = "suggest"
+
+
 # ------------------------------------------------------------------------ policy
 
 
@@ -177,7 +183,6 @@ def test_nothing_is_approved_after_stop(cfg: Config, meeting: Meeting, tmp_path:
     assert not runner.approve("A1")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: approve() ignores agents.mode='off' (README: 'off — agents never run')")
 def test_off_mode_never_runs_agents_even_when_approved(cfg: Config, meeting: Meeting, tmp_path: Path) -> None:
     cfg.agents.mode = "off"
     meeting.items["A1"] = _task("A1")
@@ -318,10 +323,10 @@ async def test_drain_gives_up_after_its_timeout_and_cancel_all_stops_work(cfg: C
         worker.cancel()
 
 
-@pytest.mark.xfail(strict=True, reason="BUG (latent: nothing in src calls cancel_all yet): cancelled runs stay marked RUNNING")
 async def test_cancelled_runs_are_not_left_running(cfg: Config, meeting: Meeting, tmp_path: Path) -> None:
+    cfg.agents.max_concurrent = 1
     meeting.items["A1"] = _task("A1")
-    runner, _, _ = _runner(cfg, meeting, tmp_path, FakeEngine(gate=asyncio.Event()))
+    runner, bus, changes = _runner(cfg, meeting, tmp_path, FakeEngine(gate=asyncio.Event()))
     worker = asyncio.ensure_future(runner.run())
     try:
         runner.approve("A1")
@@ -329,8 +334,15 @@ async def test_cancelled_runs_are_not_left_running(cfg: Config, meeting: Meeting
             await asyncio.sleep(0.01)
             if meeting.items["A1"].agent.status == AgentStatus.RUNNING:  # type: ignore[union-attr]
                 break
+        meeting.items["A2"] = _task("A2")
+        runner.approve("A2")  # waits for A1's slot
+        saved = len(changes)
         await runner.cancel_all()
-        assert meeting.items["A1"].agent.status not in (AgentStatus.QUEUED, AgentStatus.RUNNING)  # type: ignore[union-attr]
+        for item_id in ("A1", "A2"):
+            run = meeting.items[item_id].agent
+            assert run is not None and (run.status, run.error) == (AgentStatus.FAILED, "cancelled")
+        assert not runner.busy and len(changes) == saved + 2  # saved, and shown on the dashboard
+        assert [e.data["item"]["agent"]["status"] for e in bus.history if e.type == "agent.updated"][-2:] == ["failed"] * 2
     finally:
         worker.cancel()
 
@@ -404,7 +416,6 @@ async def test_api_engine_through_the_runner(cfg: Config, meeting: Meeting, tmp_
     assert "Research Globex" in llm.calls[0]["content"][0]["text"]  # the brief, not just the title
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: ApiEngine never reports its cost, so api-engine runs bypass budget.agents_daily_usd")
 async def test_api_engine_spend_counts_against_the_agent_budget(cfg: Config, meeting: Meeting, tmp_path: Path) -> None:
     cfg.agents.engine = "api"
     costs = CostMeter(cfg, persist=False)
@@ -413,6 +424,21 @@ async def test_api_engine_spend_counts_against_the_agent_budget(cfg: Config, mee
     await runner.execute("A1")
     assert meeting.items["A1"].agent.cost_usd > 0  # type: ignore[union-attr]
     assert costs.today.agents_usd > 0
+    # billed once, to the agent budget: the extraction budget (and its heuristic fallback) is untouched
+    price = cfg.pricing.llm_per_mtok[cfg.agents.model]
+    assert costs.today.agents_usd == pytest.approx((1000 * price.input + 100 * price.output) / 1e6)  # ScriptedLLM usage
+    assert costs.today.llm_usd == 0.0
+
+
+async def test_api_engine_bills_a_failed_call_too(cfg: Config, tmp_path: Path) -> None:
+    class Refused(ScriptedLLM):
+        async def complete(self, **kw: Any) -> str:  # type: ignore[override]
+            await super().complete(**kw)  # the tokens were spent…
+            raise LLMError("model refused")  # …before the refusal
+
+    costs = CostMeter(cfg, persist=False)
+    res = await ApiEngine(cfg.agents, Refused(["x"]), "Alex", price=costs.llm_cost).run("x", tmp_path)
+    assert not res.ok and res.error == "model refused" and res.cost_usd > 0
 
 
 # ------------------------------------------------------------- Agent SDK engine
@@ -469,11 +495,6 @@ def test_agent_sdk_env_scrubs_other_tools_secrets(cfg: Config, tmp_path: Path, s
     assert "ANTHROPIC_API_KEY" not in env  # the agent itself still needs Claude
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: SECRET_ENV_VARS misses sink credentials (VOICESTREAM_WEBHOOK_URL, VOICESTREAM_GOOGLE_URL, "
-    "VOICESTREAM_GOOGLE_SECRET), so agents inherit them",
-)
 def test_agent_sdk_env_scrubs_every_sink_credential(cfg: Config, tmp_path: Path, sdk: Any) -> None:
     env = _sdk_engine(cfg).options(tmp_path).env
     defaults: set[str] = set()
@@ -483,6 +504,23 @@ def test_agent_sdk_env_scrubs_every_sink_credential(cfg: Config, tmp_path: Path,
         # env-var *names* only (e.g. ``token_env``); list fields such as command's ``pass_env`` aren't secrets
         defaults |= {f.default for name, f in fields.items() if name.endswith("_env") and isinstance(f.default, str)}
     assert defaults and {name for name in defaults if env.get(name) != ""} == set()
+
+
+def test_agent_sdk_env_scrubs_anything_that_looks_secret(
+    cfg: Config, tmp_path: Path, sdk: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    looks_secret = ["AWS_SECRET_ACCESS_KEY", "GH_TOKEN", "STRIPE_API_KEY", "DB_PASSWORD", "ZAPIER_WEBHOOK",
+                    "SIGNING_PRIVATE_KEY", "GCP_CREDENTIALS", "VOICESTREAM_ANYTHING"]
+    claude = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]
+    for name in [*looks_secret, *claude, "TEAM_NOTION", "HOME", "MY_PATH"]:
+        monkeypatch.setenv(name, f"value-{name}")
+    # a sink configured to read its credentials from variables with harmless-looking names
+    cfg.sinks["notion"] = {"enabled": True, "token_env": "TEAM_NOTION"}
+    cfg.sinks["command"] = {"enabled": True, "item_command": ["true"], "pass_env": ["MY_PATH"]}
+    engine = AgentRunner(cfg, Meeting(), tmp_path).engine()
+    env = engine.options(tmp_path).env
+    assert {name: env.get(name) for name in [*looks_secret, "TEAM_NOTION"]} == dict.fromkeys([*looks_secret, "TEAM_NOTION"], "")
+    assert not {"HOME", "MY_PATH", *claude} & set(env)  # inherited unchanged: the agent needs them
 
 
 def _result(sdk: Any, **kw: Any) -> Any:
@@ -542,7 +580,6 @@ async def test_agent_sdk_run_out_of_turns_keeps_partial_work(cfg: Config, tmp_pa
     assert res.error == "error_max_turns (max_turns) — partial result kept"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: TASK.md counts as a deliverable, so a failed run with no output says 'partial result kept'")
 async def test_agent_sdk_failure_without_deliverables_is_not_called_partial(
     cfg: Config, meeting: Meeting, tmp_path: Path, sdk: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

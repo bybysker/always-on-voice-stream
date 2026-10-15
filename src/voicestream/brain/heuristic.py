@@ -34,14 +34,28 @@ _REQUEST_WORDS = (
     r"|vous pouvez|pouvez-vous|pourriez-vous|merci de|quelqu'un peut"
 )
 _REQUEST = re.compile(rf"\b(?:{_REQUEST_WORDS})\s+(?P<task>.+?)(?:\?|$)", re.I)
-_NAMED_REQUEST = re.compile(
-    rf"^(?P<name>[A-ZÀ-Ý][a-zà-ÿ]+),?\s+(?:{_REQUEST_WORDS})\s+(?P<task>.+?)(?:\?|$)", re.I
+# Capitalised sentence openers that aren't someone being addressed ("So can you…", "Alors, tu peux…").
+# "Ben" is left out: as a name it is far more common than the French filler.
+_NOT_NAMES = (
+    r"um+|uh+|so|okay|ok|yeah|yes|no|and|also|then|just|actually|basically|well|right|alright|now|but|oh|hey|hi"
+    r"|sorry|thanks|great|cool|maybe|everyone|guys|euh+|bon|alors|donc|du coup|en fait|et|oui|non|bref|voilà"
+    r"|merci|salut|super|parfait|écoute|dis"
 )
-_NAMED_COMMIT = re.compile(
-    r"^(?P<name>[A-ZÀ-Ý][a-zà-ÿ]+)\s+(?:will|is going to|needs to|should|va|doit|devrait)\s+(?P<task>.+)"
+# A capitalised name ("Sarah", "Élodie", "Jean-Pierre") opening the sentence, after any fillers. The
+# patterns using it are case-sensitive on purpose (only their keywords are (?i:…)), or any word would do.
+_LEAD_NAME = (
+    rf"^(?:(?i:{_NOT_NAMES})[,\s]+)*(?!(?i:{_NOT_NAMES})\b)(?P<name>[A-ZÀ-Ý][a-zà-ÿ]+(?:-[A-ZÀ-Ý][a-zà-ÿ]+)?)"
 )
+_NAMED_REQUEST = re.compile(rf"{_LEAD_NAME},?\s+(?i:{_REQUEST_WORDS})\s+(?P<task>.+?)(?:\?|$)")
+_NAMED_COMMIT = re.compile(rf"{_LEAD_NAME}\s+(?:will|is going to|needs to|should|va|doit|devrait)\s+(?P<task>.+)")
+# "action items: …", "TODO update the wiki". "follow up", "action" and "à faire" are also ordinary words
+# ("take action on…", "I'll follow up with…"), so they only count as a label before a separator; an
+# imperative "Follow up with legal…" opening the sentence is a task in itself (verb included).
+_LABEL = r"action items?|to-?dos?|points? d'actions?"
 _EXPLICIT_ITEM = re.compile(
-    r"\b(?:action item|to-?do|follow[- ]up|point d'action|à faire|action)\s*(?:is|:|,|-|for|pour)?\s*(?P<task>.+)", re.I
+    rf"\b(?:(?:{_LABEL}|to dos?|follow[- ]ups?|à faire|actions?)(?:\s*(?:(?:is|are|for|pour)\b|[:,–—-]))+"
+    rf"|(?:{_LABEL})\b|^(?=follow[- ]up (?:with|on|about|regarding)\b))\s*(?P<task>.+)",
+    re.I,
 )
 _DECISION = re.compile(
     r"\b(?:we decided|we've decided|we agreed|we've agreed|decision is|let's go with|we'll go with|we're going with|agreed that"
@@ -55,13 +69,17 @@ _OPEN_Q = re.compile(
     re.I,
 )
 _DUE = re.compile(
-    r"\b(?P<due>(?:by|before|on|until)\s+(?:end of (?:the )?(?:day|week|month)|eod|eow|tomorrow|today|tonight|"
-    r"next \w+|this \w+|monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"\b(?P<due>(?:by|before|until)\s+(?:next|this) \w+|"
+    # after "on", only time words: "on this feature" is the task's object, not a deadline
+    r"(?:by|before|on|until)\s+(?:end of (?:the )?(?:day|week|month)|eod|eow|tomorrow|today|tonight|"
+    r"(?:next|this) (?:week(?:end)?|month|morning|afternoon|evening|monday|tuesday|wednesday|thursday|friday|saturday"
+    r"|sunday)|monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
     r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\w*\.? \d{1,2}(?:st|nd|rd|th)?)|"
     r"tomorrow|end of (?:the )?(?:day|week)|eod|eow|next week|in (?:\d+|a|two|three|a few|a couple of) (?:days?|weeks?)"
     r"|(?:d'ici|avant|pour) (?:la fin de (?:la )?(?:semaine|journée|mois)|demain|ce soir|lundi|mardi|mercredi|jeudi"
     r"|vendredi|samedi|dimanche|la semaine prochaine|le \d{1,2}(?:er)?(?: \w+)?)(?: prochaine?)?"
-    r"|demain|après-demain|la semaine prochaine|en fin de journée|dans (?:\d+|deux|trois|quelques) (?:jours|semaines))(?!\w)",
+    r"|demain|après-demain|ce soir|la semaine prochaine|en fin de journée"
+    r"|dans (?:\d+|deux|trois|huit|quinze|quelques) (?:jours|semaines))(?!\w)",
     re.I,
 )
 _FILLER = re.compile(
@@ -69,10 +87,10 @@ _FILLER = re.compile(
     re.I,
 )
 _SKIP_TASKS = re.compile(
-    r"^(?:see|think|guess|know|mean|say|be honest|be fair|go|do it|do that|try|check|look)\b[\s.!?]*$"
+    r"^(?:see|think|guess|mean|say|be honest|be fair|go|do it|do that|try|check|look)\b[\s.!?]*$"
     r"|^(?:get started|start|begin|kick off|move on|wrap up|wrap it up|recap|dive in|jump in|go ahead|"
-    r"take a (?:step back|look|break)|see|think about it|circle back|discuss)\b"
-    r"|^(?:commencer|démarrer|y aller|passer à|faire court|faire simple|partager (?:mon|l')écran|voir|regarder|réfléchir)\b",
+    r"take a (?:step back|look|break)|see|think about it|circle back|discuss|know|share (?:my|the|your) screen)\b"
+    r"|^(?:commencer|démarrer|y aller|passer à|faire court|faire simple|partager (?:mon |l')écran|voir|regarder|réfléchir)\b",
     re.I,
 )
 
@@ -145,7 +163,8 @@ def extract_heuristic(
             conf = 0.55
             if m := _EXPLICIT_ITEM.search(sentence):
                 task, conf = m.group("task"), 0.75
-                owner = user_name if is_me and re.search(r"\b(i|me|my)\b", task, re.I) else None
+                first_person = re.search(r"\b(?:(?:i|me|my|je|moi|mon|ma|mes)\b|j')", task, re.I)
+                owner = user_name if is_me and first_person else None
                 inner = _SELF_COMMIT.match(task) or _WE_COMMIT.match(task)
                 if inner:
                     task = inner.group("task")

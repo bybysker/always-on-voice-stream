@@ -116,15 +116,65 @@ def test_resolve_iso_passthrough_and_garbage() -> None:
     assert is_iso_date("2026-10-14") and not is_iso_date("Friday") and not is_iso_date(None)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: 'EOD'/'end of day' wins over a named weekday, so 'EOD Friday' resolves to today")
 @pytest.mark.parametrize("spoken", ["EOD Friday", "by end of day Friday"])
 def test_resolve_eod_on_a_named_day(spoken: str) -> None:
     assert resolve_due(spoken, WEDNESDAY) == "2026-10-16"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: 'Friday next week' ignores the trailing 'next week' and resolves to this Friday")
 def test_resolve_weekday_followed_by_next_week() -> None:
     assert resolve_due("Friday next week", WEDNESDAY) == "2026-10-23"
+
+
+@pytest.mark.parametrize(
+    ("spoken", "expected"),
+    [
+        ("by Monday EOD", "2026-10-19"),
+        ("EOD next Wednesday", "2026-10-21"),
+        ("end of day Wednesday", "2026-10-14"),  # said on a Wednesday: today, not next week
+        ("Wednesday EOD", "2026-10-14"),
+        ("next week Friday", "2026-10-23"),
+        ("Friday of next week", "2026-10-23"),
+        ("by tomorrow EOD", "2026-10-15"),
+    ],
+)
+def test_resolve_eod_and_next_week_around_a_named_day(spoken: str, expected: str) -> None:
+    assert resolve_due(spoken, WEDNESDAY) == expected
+
+
+@pytest.mark.parametrize(
+    ("spoken", "expected"),
+    [
+        ("d'ici vendredi", "2026-10-16"),
+        ("vendredi prochain", "2026-10-16"),  # the coming Friday
+        ("vendredi de la semaine prochaine", "2026-10-23"),
+        ("fin de la semaine prochaine", "2026-10-23"),
+        ("d'ici la fin de la semaine", "2026-10-16"),
+        ("la semaine prochaine", "2026-10-19"),
+        ("dans quinze jours", "2026-10-28"),  # a fortnight, not 15 days
+        ("d'ici quinze jours", "2026-10-28"),
+        ("dans huit jours", "2026-10-21"),  # a week
+        ("dans trois jours", "2026-10-17"),
+        ("dans deux semaines", "2026-10-28"),
+        ("le 1er décembre", "2026-12-01"),
+        ("le 20 octobre", "2026-10-20"),
+        ("demain", "2026-10-15"),
+        ("après-demain", "2026-10-16"),
+        ("aujourd'hui", "2026-10-14"),
+        ("ce soir", "2026-10-14"),
+        ("en fin de journée", "2026-10-14"),
+        ("vendredi en fin de journée", "2026-10-16"),  # the named day wins here too
+        ("d'ici la fin du mois", "2026-10-31"),
+        ("le mois prochain", "2026-11-01"),
+    ],
+)
+def test_resolve_french_deadlines(spoken: str, expected: str) -> None:
+    assert resolve_due(spoken, WEDNESDAY) == expected
+
+
+def test_french_possessive_mon_is_not_monday() -> None:
+    assert resolve_due("avant mon départ", WEDNESDAY) is None
+    assert resolve_due("pour mon retour lundi", WEDNESDAY) == "2026-10-19"
+    assert resolve_due("by Mon", WEDNESDAY) == resolve_due("Mon morning", WEDNESDAY) == "2026-10-19"
 
 
 # ------------------------------------------------------------------- heuristic
@@ -176,26 +226,16 @@ def test_explicit_action_item_marker() -> None:
     assert it.confidence > 0.7
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: 'follow up' is consumed as a label, leaving the title 'With legal about the NDA'")
 def test_follow_up_keeps_its_verb() -> None:
     (it,) = _extract(seg("Follow up with legal about the NDA next week."))
     assert it.title.lower().startswith("follow up with legal")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: 'action item'/'follow-up'/'todo' also match inside their plurals, so the title starts with the stray 's'",
-)
 @pytest.mark.parametrize("text", ["The action items are: Sam sends the deck.", "Follow-ups: Sarah books the venue."])
 def test_plural_item_markers_leave_no_stray_s(text: str) -> None:
     assert [i.title for i in _extract(seg(text)) if re.match(r"S\b", i.title)] == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: _DUE's 'on this|next <word>' alternatives take the object for a deadline ('on this feature'), strip it "
-    "from the task and drop the commitment as too short",
-)
 @pytest.mark.parametrize(
     ("text", "title", "due"),
     [("I'll work on this feature tomorrow.", "Work on this feature", "tomorrow"),
@@ -206,22 +246,12 @@ def test_on_this_object_is_not_a_deadline(text: str, title: str, due: str) -> No
     assert (it.title, it.owner, it.due_text) == (title, "Alex", due)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: _NAMED_REQUEST is compiled with re.I, so its capitalised-name pattern matches any first word and "
-    "fillers ('So', 'Okay') become owners",
-)
 @pytest.mark.parametrize("text", ["So can you send me the file?", "Okay, could you share the deck with Acme?"])
 def test_leading_filler_is_not_an_owner(text: str) -> None:
     (it,) = _extract(seg(text, "system"))
     assert it.owner == "Alex"  # someone else asking "can you" asks the user
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: 'Let me know…' and 'Let me share my screen' become actions; _SKIP_TASKS only drops a bare 'know' "
-    "and the French 'partager mon écran'",
-)
 @pytest.mark.parametrize("text", ["Let me know if you have any questions.", "Let me share my screen."])
 def test_more_meeting_chatter_is_not_an_action(text: str) -> None:
     assert _extract(seg(text)) == []
@@ -270,6 +300,92 @@ def test_each_sentence_is_considered() -> None:
     assert (a.title, a.owner, a.due_text) == ("Ship the hotfix", "Alex", "tomorrow")
     assert (b.owner, b.due_text) == ("Sarah", "on Thursday")
     assert a.segment_refs == b.segment_refs == [0]
+
+
+def test_follow_up_and_action_as_verbs() -> None:
+    (mine,) = _extract(seg("I'll follow up with legal tomorrow."))
+    assert (mine.title, mine.owner, mine.due_text) == ("Follow up with legal", "Alex", "tomorrow")
+    (meeting,) = _extract(seg("Let's schedule a follow-up meeting next week."))
+    assert meeting.title == "Schedule a follow-up meeting"
+    (act,) = _extract(seg("We need to take action on the backlog."))
+    assert act.title == "Take action on the backlog"
+    (label,) = _extract(seg("Follow-up: Sam sends the deck."))
+    assert label.title == "Sam sends the deck"
+
+
+@pytest.mark.parametrize(
+    ("text", "owner"),
+    [("Okay Sarah, can you book the venue?", "Sarah"),  # fillers before the name are skipped
+     ("Hey Sarah, can you book the venue?", "Sarah"),
+     ("Ben, can you book the venue?", "Ben"),  # a name, although "ben" is also a French filler
+     ("sarah, can you book the venue?", None)],  # not capitalised: not read as a name
+)
+def test_named_request_needs_a_capitalised_name(text: str, owner: str | None) -> None:
+    (it,) = _extract(seg(text))
+    assert (it.title, it.owner) == ("Book the venue", owner)
+
+
+# ------------------------------------------------------------- heuristic (FR)
+
+
+def test_french_commitments() -> None:
+    a, b, c = _extract(
+        seg("Je vais envoyer le devis à Acme d'ici vendredi."),
+        seg("Je m'occupe de relancer le client demain."),
+        seg("Il faut qu'on mette à jour le budget avant lundi."),
+    )
+    assert (a.kind, a.title, a.owner, a.due_text) == (ItemKind.ACTION, "Envoyer le devis à Acme", "Alex", "d'ici vendredi")
+    assert (b.title, b.owner, b.due_text) == ("Relancer le client", "Alex", "demain")
+    assert (c.title, c.owner, c.due_text) == ("Mette à jour le budget", None, "avant lundi")
+    (theirs,) = _extract(seg("Je vais préparer la démo pour jeudi.", "system"))
+    assert (theirs.title, theirs.owner, theirs.due_text) == ("Préparer la démo", None, "pour jeudi")
+    (named,) = _extract(seg("Marie-Claire va mettre à jour la roadmap dans quinze jours.", "system"))
+    assert (named.title, named.owner, named.due_text) == ("Mettre à jour la roadmap", "Marie-Claire", "dans quinze jours")
+
+
+@pytest.mark.parametrize(
+    ("text", "source", "title", "owner"),
+    [
+        ("Sarah, tu peux réserver la salle pour l'offsite ?", "mic", "Réserver la salle pour l'offsite", "Sarah"),
+        ("Élodie, est-ce que tu peux relire le contrat ?", "mic", "Relire le contrat", "Élodie"),
+        ("Jean-Pierre, tu pourrais envoyer le devis ?", "mic", "Envoyer le devis", "Jean-Pierre"),
+        ("Alors, tu peux envoyer le devis ?", "system", "Envoyer le devis", "Alex"),  # a filler, not a name
+        ("Tu peux envoyer le compte rendu ?", "system", "Envoyer le compte rendu", "Alex"),  # asked of me
+        ("Est-ce que vous pouvez relire la proposition ?", "mic", "Relire la proposition", None),  # I asked
+    ],
+)
+def test_french_requests(text: str, source: str, title: str, owner: str | None) -> None:
+    (it,) = _extract(seg(text, source))
+    assert (it.kind, it.title, it.owner) == (ItemKind.ACTION, title, owner)
+
+
+def test_french_decisions_questions_and_markers() -> None:
+    d, n, q, m = _extract(
+        seg("On a décidé de partir sur le plan annuel."),
+        seg("Nous avons décidé de garder le prix actuel.", "system"),
+        seg("Question ouverte : qui gère la migration ?", "system"),
+        seg("Point d'action : je dois envoyer le compte rendu."),
+    )
+    assert (d.kind, d.title) == (ItemKind.DECISION, "Partir sur le plan annuel")
+    assert (n.kind, n.title) == (ItemKind.DECISION, "Garder le prix actuel")
+    assert (q.kind, q.title) == (ItemKind.QUESTION, "Qui gère la migration")
+    assert (m.kind, m.title, m.owner) == (ItemKind.ACTION, "Envoyer le compte rendu", "Alex")
+
+
+def test_dis_claude_is_a_command_from_the_mic_only() -> None:
+    (it,) = _extract(seg("Dis Claude, prépare un résumé de la proposition Globex."))
+    assert (it.owner, it.delegate, it.explicit_request) == ("Assistant", True, True)
+    assert it.title == "Prépare un résumé de la proposition Globex"
+    assert it.agent_prompt == "prépare un résumé de la proposition Globex."
+    (hé,) = _extract(seg("Hé Claude, rédige un mail de relance pour Acme."))
+    assert hé.explicit_request and hé.title == "Rédige un mail de relance pour Acme"
+    assert _extract(seg("Dis Claude, exporte la liste des clients.", "system")) == []
+    assert _extract(seg("Dis Claude merci")) == []
+
+
+@pytest.mark.parametrize("text", ["Je vais partager mon écran.", "On va commencer.", "Je vais voir."])
+def test_french_meeting_chatter_is_not_an_action(text: str) -> None:
+    assert _extract(seg(text)) == []
 
 
 # --------------------------------------------------------------------- tracker
@@ -356,7 +472,6 @@ def test_dedup_respects_kind_and_dismissal() -> None:
     assert title_similarity("Send the deck to Acme", "Book the venue") < 0.82
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a 'Hey Claude' command deduped onto an existing item creates a non-explicit agent run")
 def test_explicit_command_merged_into_existing_item_stays_explicit() -> None:
     t = _tracker()
     t.apply(ExtractionResult(new_items=[_new("Draft the launch email", owner="Alex")]))
@@ -382,11 +497,6 @@ def test_updates_change_fields_and_bump_revision() -> None:
     assert again == [] and item.revision == 2  # no-op updates don't bump
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: an update whose new due_text doesn't resolve keeps the old due_date, so sinks (which prefer "
-    "due_date) keep showing the old deadline",
-)
 def test_unresolvable_new_deadline_clears_the_old_date() -> None:
     t = _tracker()
     t.apply(ExtractionResult(new_items=[_new("Send the deck", due_text="by Friday")]))
@@ -457,11 +567,6 @@ def test_edit_normalizes_and_ignores_unknown_fields() -> None:
     assert t.edit("A99", title="x") is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: edit() treats None/'' as 'keep', so clearing the owner or due field in the dashboard (which sends '') "
-    "or via the API (null) silently does nothing",
-)
 @pytest.mark.parametrize("cleared", ["", None])
 def test_edit_can_clear_owner_and_deadline(cleared: str | None) -> None:
     t = _tracker()
@@ -480,8 +585,63 @@ def test_add_manual_and_set_dismissed() -> None:
     assert [e.type for e in bus.history] == ["item.added", "item.updated"]
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: add_manual() raises IndexError when the title dedups onto an unchanged item")
 def test_add_manual_duplicate_returns_the_existing_item() -> None:
     t = _tracker()
     first = t.add_manual(ItemKind.ACTION, "Send the deck to Acme")
     assert t.add_manual(ItemKind.ACTION, "Send the deck to Acme").id == first.id
+
+
+def test_add_manual_merges_new_fields_and_refuses_a_blank_title() -> None:
+    t = _tracker()
+    t.add_manual(ItemKind.ACTION, "Send the deck to Acme")
+    item = t.add_manual(ItemKind.ACTION, "Send the deck to Acme", owner="Sam", due_text="by Friday")
+    assert (item.id, item.owner, item.due_date, len(t.meeting.items)) == ("A1", "Sam", "2026-10-16", 1)
+    with pytest.raises(ValueError):
+        t.add_manual(ItemKind.ACTION, "   ")
+
+
+def test_edit_clearing_the_due_words_clears_the_date_and_unassigned_clears_the_owner() -> None:
+    t = _tracker()
+    t.apply(ExtractionResult(new_items=[_new("Send the deck", owner="Sam", due_text="by Friday", priority="high")]))
+    item = t.edit("A1", due_text="")  # what the dashboard sends: due_text only
+    assert item is not None and (item.due_text, item.due_date, item.owner, item.revision) == (None, None, "Sam", 2)
+    t.edit("A1", owner="unassigned", priority=None, title="", status=None)  # title/status can't be cleared
+    assert (item.owner, item.priority, item.title, item.status, item.revision) == (None, None, "Send the deck", ItemStatus.OPEN, 3)
+
+
+def test_edit_with_new_unresolvable_deadline_drops_the_old_date() -> None:
+    t = _tracker()
+    t.apply(ExtractionResult(new_items=[_new("Send the deck", due_text="by Friday")]))
+    item = t.edit("A1", due_text="after the offsite")
+    assert item is not None and (item.due_text, item.due_date) == ("after the offsite", None)
+
+
+def test_model_update_with_empty_fields_keeps_them_and_same_words_keep_the_date() -> None:
+    t = _tracker()
+    t.apply(ExtractionResult(new_items=[_new("Send the deck", owner="Sam", due_text="after the offsite", due_date="2026-10-20")]))
+    _, updated = t.apply(ExtractionResult(updates=[ItemUpdate(id="A1", owner=None, due_text="after the offsite")]))
+    item = t.meeting.items["A1"]
+    assert updated == [] and (item.owner, item.due_text, item.due_date) == ("Sam", "after the offsite", "2026-10-20")
+
+
+def test_explicit_command_upgrades_a_suggested_agent() -> None:
+    t = _tracker()
+    t.apply(ExtractionResult(new_items=[_new("Draft the launch email", delegate=True, agent_prompt="Maybe draft it")]))
+    agent = t.meeting.items["A1"].agent
+    assert agent is not None and not agent.explicit
+    t.apply(ExtractionResult(new_items=[_new("Draft the launch email", delegate=True, agent_prompt="Draft it now", explicit_request=True)]))
+    assert (agent.explicit, agent.prompt, t.meeting.items["A1"].revision) == (True, "Draft it now", 2)
+    agent.status = AgentStatus.RUNNING  # once it runs, a repeated command changes nothing
+    t.apply(ExtractionResult(new_items=[_new("Draft the launch email", agent_prompt="Other", explicit_request=True)]))
+    assert agent.prompt == "Draft it now" and t.meeting.items["A1"].revision == 2
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["We should update the budget sheet before Monday.", "They will send the contract next week.",
+     "On va envoyer le devis demain.", "Il doit relire le contrat avant vendredi."],
+)
+def test_a_pronoun_opening_the_sentence_is_not_an_owner(text: str) -> None:
+    t = _tracker()
+    (item,), _ = t.apply(extract_heuristic([(0, seg(text, "system"))], user_name="Alex", wake_phrases=_BC.wake_phrases))
+    assert item.owner is None

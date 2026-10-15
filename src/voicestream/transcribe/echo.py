@@ -10,16 +10,21 @@ overlapping in time contains (most of) the same words, the mic copy is dropped.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 from ..config import EchoConfig
 from ..models import TranscriptSegment
 
-_WORD = re.compile(r"[a-z0-9']+")
+# Unicode-aware, so French words stay whole ('très', not 'tr' + 's'), with elisions kept in one piece
+# ("c'est", "aujourd'hui"); fragments would let a short reply match any long line containing them.
+_WORD = re.compile(r"\w+(?:'\w+)*")
+_APOSTROPHES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u02bc": "'"})
 
 
 def words(text: str) -> list[str]:
-    return _WORD.findall(text.lower())
+    # NFKC composes 'e' + combining accent into 'é', so both transcripts' spellings compare equal
+    return _WORD.findall(unicodedata.normalize("NFKC", text).lower().translate(_APOSTROPHES))
 
 
 def containment(needle: list[str], haystack: list[str]) -> float:

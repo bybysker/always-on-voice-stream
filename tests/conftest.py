@@ -14,7 +14,11 @@ from voicestream.models import Meeting  # noqa: E402
 @pytest.fixture
 def cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
     """Isolated config: data in tmp, offline extraction, no agents, no auto-split."""
-    for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPGRAM_API_KEY", "NOTION_TOKEN", "MONDAY_TOKEN"):
+    for var in (
+        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPGRAM_API_KEY", "NOTION_TOKEN", "MONDAY_TOKEN", "LINEAR_API_KEY",
+        "GITHUB_TOKEN", "TODOIST_TOKEN", "SLACK_WEBHOOK_URL", "VOICESTREAM_WEBHOOK_URL", "VOICESTREAM_WEBHOOK_SECRET",
+        "VOICESTREAM_GOOGLE_URL", "VOICESTREAM_GOOGLE_SECRET", "HUBSPOT_TOKEN",
+    ):  # fmt: skip
         monkeypatch.delenv(var, raising=False)
     c = Config(user_name="Alex", data_dir=str(tmp_path / "data"))
     c.brain.provider = "heuristic"

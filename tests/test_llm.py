@@ -166,6 +166,22 @@ async def test_complete_refusal() -> None:
         await llm.complete(model="claude-haiku-5-5", system="S", content=[text_block("x")])
 
 
+async def test_a_call_can_bill_its_usage_elsewhere() -> None:
+    # agent runs go to the agent budget, not to the extraction budget the client's on_usage feeds
+    llm, _, usages = _llm(_resp("Drafted."), _resp(json.dumps({**EMPTY, "meeting_title": "Q4"})), _resp("", stop="refusal"))
+    billed: list[TokenUsage] = []
+    await llm.complete(model="claude-opus-5-5", system="S", content=[text_block("x")], usage_hook=billed.append)
+    await llm.structured(model="claude-opus-5-5", system="S", content=[text_block("x")], schema=WireExtraction,
+                         usage_hook=billed.append)
+    with pytest.raises(LLMError):  # a refused call is billed too
+        await llm.complete(model="claude-opus-5-5", system="S", content=[text_block("x")], usage_hook=billed.append)
+    assert [u.model for u in billed] == ["claude-opus-5-5"] * 3 and usages == []
+    from voicestream.brain.llm import ScriptedLLM
+
+    await ScriptedLLM(["ok"], on_usage=usages.append).complete(model="m", system="S", content=[], usage_hook=billed.append)
+    assert len(billed) == 4 and usages == []
+
+
 # ---------------------------------------------------------------------- errors
 
 

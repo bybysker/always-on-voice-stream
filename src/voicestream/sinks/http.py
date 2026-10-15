@@ -21,6 +21,13 @@ MAYBE_EXECUTED = {500, 502, 503, 504}
 """A non-idempotent request that got one of these may have been applied: retrying could duplicate it.
 (429 and 529 "overloaded" are rejected before processing, so they're safe to retry.)"""
 IDEMPOTENT = {"GET", "HEAD", "DELETE", "PUT", "OPTIONS"}
+NOT_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+"""Transport errors raised before the request reached the server: always safe to retry. Any other
+(read timeout, connection dropped mid-answer…) may come after the server has applied it."""
+UNCERTAIN = (
+    "it may have been applied anyway, so it isn't retried (that could make a duplicate): check {where}, "
+    "then push it again (dashboard Push button or `voicestream push`) if it's missing"
+)
 
 
 def retry_after(resp: httpx.Response) -> float | None:
@@ -60,23 +67,30 @@ class HttpSinkMixin:
         """Send a request, retrying rate limits and (for idempotent calls) server errors.
 
         ``write_safe=True`` marks a non-idempotent request as safe to retry on 5xx
-        (e.g. it carries an idempotency key). Raises :class:`SinkError` on failure.
+        (e.g. it carries an idempotency key). Raises :class:`SinkError` on failure; a
+        non-retryable one when any other request may have been applied (a 5xx, or no answer
+        after it was sent), so the dispatcher doesn't resend it either.
         """
         method = method.upper()
+        # the dispatcher retries a retryable SinkError later, so an uncertain create must not be one
+        resend_ok = method in IDEMPOTENT or write_safe
+        uncertain = UNCERTAIN.format(where=getattr(self, "name", None) or "the tool")
         resp: httpx.Response | None = None
         for attempt in range(retries + 1):
             try:
                 resp = await self.client().request(method, url, **kw)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
-                if attempt == retries or (method not in IDEMPOTENT and not write_safe and isinstance(exc, httpx.ReadTimeout)):
+                if not resend_ok and not isinstance(exc, NOT_SENT):
+                    raise SinkError(f"{method} {url}: {exc!r} — {uncertain}", retryable=False) from exc
+                if attempt == retries:
                     raise SinkError(f"{method} {url}: {exc!r}", retryable=True) from exc
                 await asyncio.sleep(min(30.0, 2**attempt + random.random()))
                 continue
             if resp.status_code in ok:
                 return resp
             retryable = resp.status_code in RETRYABLE
-            if resp.status_code in MAYBE_EXECUTED and method not in IDEMPOTENT and not write_safe:
-                break  # don't risk creating duplicates
+            if resp.status_code in MAYBE_EXECUTED and not resend_ok:
+                raise SinkError(f"{method} {url} → HTTP {resp.status_code}: {resp.text[:400]} — {uncertain}", retryable=False)
             if not retryable or attempt == retries:
                 break
             await asyncio.sleep(min(60.0, retry_after(resp) or (2**attempt + random.random())))

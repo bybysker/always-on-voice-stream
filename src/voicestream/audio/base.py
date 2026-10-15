@@ -86,6 +86,17 @@ class QueueAudioSource(AudioSource):
     def stop_capture(self) -> None:
         """Close the device. Called from the event loop thread."""
 
+    def reset(self) -> None:
+        super().reset()
+        # A fresh queue drops the stopped capture's leftovers, above all its end-of-stream marker
+        # (signal_end), which would otherwise end the restarted run at once. Timing restarts too, so
+        # frames are stamped on the meeting clock rather than as if the downtime never happened.
+        self._queue = asyncio.Queue()
+        self._resampler = None
+        self._device_rate = None
+        self._samples_out = 0
+        self._t_origin = None
+
     def push_from_thread(self, data: np.ndarray, rate: int) -> None:
         """Called from the capture thread with shape (n,) or (n, channels) audio."""
         loop = self._loop
@@ -132,6 +143,11 @@ class QueueAudioSource(AudioSource):
                 if getter in done:
                     frame = getter.result()
                     if frame is None:
+                        if not self.stopped:
+                            # a live device never ends by itself: its capture thread died (device
+                            # unplugged, default output switched). Raising lets the pipeline restart
+                            # it, where a normal end would leave the source off for the rest of the day.
+                            raise RuntimeError(f"{self.name}: audio capture ended unexpectedly")
                         break
                     yield frame
                 else:
@@ -142,7 +158,7 @@ class QueueAudioSource(AudioSource):
             await asyncio.to_thread(self.stop_capture)
 
     def signal_end(self) -> None:
-        """Capture thread hit end-of-stream or a fatal error."""
+        """Capture thread hit end-of-stream or a fatal error (unless stopped, :meth:`frames` raises)."""
         if self._loop and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._enqueue, None)
 
@@ -212,6 +228,10 @@ class StreamResampler:
         x = np.asarray(x, dtype=np.float32)
         if self.src_rate == self.dst_rate:
             return x.copy()
+        if x.size == 0:
+            # drivers can deliver empty buffers; with fewer samples than taps, np.convolve('valid')
+            # would swap its operands and return garbage
+            return np.zeros(0, dtype=np.float32)
         if self._taps is not None and self._hist is not None:
             xin = np.concatenate([self._hist, x])
             y = np.convolve(xin, self._taps, mode="valid").astype(np.float32)

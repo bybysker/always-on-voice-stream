@@ -3,8 +3,6 @@ not turn their words into "Me" lines (and so into the user's commitments)."""
 
 from __future__ import annotations
 
-import pytest
-
 from helpers import seg
 from voicestream.config import EchoConfig
 from voicestream.transcribe.echo import EchoFilter, containment, words
@@ -112,14 +110,18 @@ def test_other_sources_are_not_filtered() -> None:
     assert f.add(other, now=100.1) == [other]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: words() only matches [a-z0-9'], so accents split French words into fragments ('très' -> 'tr', 's') "
-    "and a short French reply is dropped as an echo of any long line that contains them",
-)
 def test_short_french_reply_is_not_mistaken_for_an_echo() -> None:
     f = EchoFilter()
     f.add(seg("C'est très bien expliqué dans le document que tu as partagé hier.", "system", t=10.0), now=100.0)
     mine = seg("Très bien.", "mic", t=11.0)  # the user agreeing, like "Sounds good." above
     f.add(mine, now=100.5)
     assert f.flush() == [mine]
+
+
+def test_echo_matching_ignores_apostrophe_style_and_accent_encoding() -> None:
+    assert words("C’est très bien, aujourd’hui") == ["c'est", "très", "bien", "aujourd'hui"]
+    f = EchoFilter()
+    f.add(seg("Je m'en occupe, j'envoie l'offre à l'équipe demain matin.", "system", t=10.0), now=100.0)
+    # the mic's copy of the same words, transcribed with typographic apostrophes and decomposed accents
+    assert f.add(seg("je m’en occupe j’envoie l’offre à l’équipe demain matin", "mic", t=10.5), now=100.4) == []
+    assert f.dropped == 1

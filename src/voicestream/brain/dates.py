@@ -45,7 +45,10 @@ _FR_UNITS = {"jour": "day", "jours": "days", "semaine": "week", "semaines": "wee
 
 
 def _in_n(m: re.Match[str]) -> str:  # "dans trois jours" → "in 3 days"
-    return f"in {_FR_NUM_VALUES.get(m[1], m[1])} {_FR_UNITS[m[2]]}"
+    n = _FR_NUM_VALUES.get(m[1], m[1])
+    if m[2].startswith("jour") and n in ("8", "15"):
+        return f"in {int(n) // 7} weeks"  # "dans huit/quinze jours" means in one/two weeks
+    return f"in {n} {_FR_UNITS[m[2]]}"
 
 
 _FR_RULES: list[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]]] = [
@@ -63,6 +66,8 @@ _FR_RULES: list[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]]] = 
     (re.compile(rf"\b(?:dans|d ici) {_FR_NUM} (jours?|semaines?|mois)\b"), _in_n),
     (re.compile(rf"\b({_WD_FR}) prochaine?\b"), r"\1"),  # "vendredi prochain" = the coming Friday
     (re.compile(r"\b1er\b"), "1st"),
+    # "mon" is also French for "my" ("avant mon départ"): keep it as Mon(day) only before a time or number
+    (re.compile(r"\bmon (?!\d|(?:morning|afternoon|evening|night|eod|end)\b)(?=[a-z])"), ""),
     (re.compile(r"\ble (\d{1,2})\b"), r"the \1th"),
 ]
 
@@ -118,7 +123,10 @@ def resolve_due(text: str | None, base: date | None = None) -> str | None:
             return date(int(m[1]), int(m[2]), int(m[3])).isoformat()
         except ValueError:
             return None
-    if re.search(r"\b(today|tonight|eod|end of (the )?day|this afternoon|this evening)\b", s) and "tomorrow" not in s:
+    tokens = s.split()
+    named_day = next(((i, wd) for i, tok in enumerate(tokens) if (wd := _weekday_index(tok)) is not None), None)
+    eod = re.search(r"\b(today|tonight|eod|end of (the )?day|this afternoon|this evening)\b", s) is not None
+    if eod and named_day is None and "tomorrow" not in s:  # a named day wins: "EOD Friday" is Friday
         return base.isoformat()
     if re.search(r"\b(day after tomorrow)\b", s):
         return (base + timedelta(days=2)).isoformat()
@@ -143,13 +151,17 @@ def resolve_due(text: str | None, base: date | None = None) -> str | None:
         nxt = (base.replace(day=28) + timedelta(days=4)).replace(day=1)
         return nxt.isoformat()
 
-    tokens = s.split()
-    for i, tok in enumerate(tokens):
-        wd = _weekday_index(tok)
-        if wd is None:
-            continue
-        prev = tokens[i - 1] if i > 0 else ""
-        return _next_weekday(base, wd, strictly_next_week=(prev == "next")).isoformat()
+    if named_day is not None:
+        i, wd = named_day
+        # "next Friday", "next week Friday", "Friday (of) next week": the Friday of next week
+        next_week = (
+            tokens[i - 1 : i] == ["next"]
+            or tokens[max(0, i - 2) : i] == ["next", "week"]
+            or re.match(r"(?:of )?next week\b", " ".join(tokens[i + 1 : i + 4])) is not None
+        )
+        if eod and not next_week and wd == base.weekday():
+            return base.isoformat()  # "EOD Wednesday" said on a Wednesday
+        return _next_weekday(base, wd, strictly_next_week=next_week).isoformat()
 
     if re.search(r"\bnext week\b", s):
         return (base + timedelta(days=7 - base.weekday())).isoformat()  # next Monday

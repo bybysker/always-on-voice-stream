@@ -11,6 +11,7 @@ import io
 import shutil
 import subprocess
 import time
+import types
 import wave
 from collections.abc import Iterator
 from pathlib import Path
@@ -35,6 +36,7 @@ from voicestream.audio.file import WavFileSource, file_source
 from voicestream.audio.vad import GateEvent, SpeechGate, VADSegmenter
 from voicestream.config import Config, VADConfig
 from voicestream.models import SAMPLE_RATE, AudioFrame, Utterance
+from voicestream.transcribe.base import FakeTranscriber, TranscribeResult
 
 FRAME_S = VADConfig().frame_ms / 1000
 FRAME_LEN = int(SAMPLE_RATE * FRAME_S)
@@ -103,7 +105,6 @@ def test_resampler_is_continuous_across_random_chunk_sizes(src: int, dst: int) -
     np.testing.assert_allclose(chunked, one_shot, atol=1e-5)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: an empty block makes np.convolve('valid') swap operands and emit 2 garbage samples")
 def test_resampler_empty_block_is_a_no_op() -> None:
     x = np.random.default_rng(1).normal(0, 0.3, 4800).astype(np.float32)
     ref = StreamResampler(48_000, 16_000)
@@ -298,10 +299,6 @@ def test_vad_restarts_timing_after_a_discontinuity_in_silence() -> None:
     assert second.t_start == pytest.approx(50.0 + _onset(0) - pre_roll, abs=0.1)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG (latent: no current source jumps its clock): an utterance open across a timestamp jump keeps the old time base (t_end ~48 s early)",
-)
 def test_vad_utterance_spanning_a_discontinuity_ends_on_the_new_clock() -> None:
     x = float_to_int16(bursts(1))
     cut = int(2.0 * SAMPLE_RATE)  # mid-speech; the device then resumes 48 s later
@@ -309,6 +306,26 @@ def test_vad_utterance_spanning_a_discontinuity_ends_on_the_new_clock() -> None:
     vad = VADSegmenter("mic")
     utts = [u for f in fl for u in vad.push(f)] + vad.flush()
     assert max(u.t_end for u in utts) > 51.0  # speech resumed at 50 s and ran until 51.5 s
+
+
+def test_vad_spots_a_discontinuity_when_frames_end_on_a_frame_boundary() -> None:
+    x = float_to_int16(bursts(1))
+    cut = 67 * FRAME_LEN  # mid-speech; 30 ms blocks leave the VAD's buffer empty at the jump
+    fl = list(_frames(x[:cut], block_s=FRAME_S)) + list(_frames(x[cut:], block_s=FRAME_S, t0=50.0))
+    vad = VADSegmenter("mic")
+    utts = [u for f in fl for u in vad.push(f)] + vad.flush()
+    assert max(u.t_end for u in utts) > 51.0
+    assert all(u.t_end <= cut / SAMPLE_RATE + 0.05 or u.t_start >= 50.0 for u in utts)  # none spans the gap
+
+
+def test_vad_pre_roll_does_not_carry_across_a_discontinuity() -> None:
+    x = float_to_int16(bursts(1))
+    cut = int(_onset(0) * SAMPLE_RATE)  # the device resumes 49 s later just as someone starts talking
+    fl = list(_frames(x[:cut])) + list(_frames(x[cut:], t0=50.0))
+    vad = VADSegmenter("mic")
+    (u,) = [u for f in fl for u in vad.push(f)] + vad.flush()
+    assert u.t_start >= 50.0  # its lead-in isn't audio from before the gap
+    assert u.t_end == pytest.approx(50.0 + _offset(0) - _onset(0), abs=0.25)
 
 
 @pytest.mark.parametrize("background", [0.0, 0.0005, 0.005, 0.02])
@@ -339,7 +356,6 @@ def test_vad_handles_a_stream_that_starts_mid_speech() -> None:
     assert second.t_start == pytest.approx(4.5 - 0.3, abs=0.1)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: speech_seconds counts frames trimmed/split off, so it can exceed the audio it describes")
 @pytest.mark.parametrize(
     ("scenario", "cfg"),
     [
@@ -457,11 +473,6 @@ async def _one_frame_then_fail(src: QueueAudioSource) -> AudioFrame:
     return frame
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: the end-of-stream marker from the stopped capture thread stays queued, so after Assistant._pipe's "
-    "retry the source ends at once and _pipe treats it as a normal end: system audio stops for the day",
-)
 async def test_queue_source_restarted_after_a_failure_delivers_audio_again() -> None:
     src = _DriverSource(Clock(), signals_end=True)
     await _one_frame_then_fail(src)
@@ -472,11 +483,6 @@ async def test_queue_source_restarted_after_a_failure_delivers_audio_again() -> 
     assert frame is not None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: reset() keeps the old time origin and sample count, so after a restart frames are stamped as if "
-    "no time had passed (lagging the meeting clock by the downtime, which also defeats echo matching)",
-)
 async def test_queue_source_restarted_later_is_stamped_on_the_meeting_clock() -> None:
     clock = _ManualClock()
     src = _DriverSource(clock)
@@ -499,6 +505,89 @@ async def test_queue_source_stamps_frames_by_sample_count_from_the_first_buffer(
     await frames.aclose()
     assert first.t_start == pytest.approx(2.0) and second.t_start == pytest.approx(first.t_end)
     assert first.samples.dtype == np.int16 and len(first.samples) == 1600
+
+
+class _DyingDriver(_DriverSource):
+    """Its capture thread dies after the first buffer, as ``LoopbackSource``'s worker does on a device error."""
+
+    def start_capture(self) -> None:
+        super().start_capture()
+        self.signal_end()
+
+
+async def test_queue_source_whose_capture_thread_dies_fails_instead_of_ending() -> None:
+    frames = _DyingDriver(Clock()).frames()
+    assert len((await anext(frames)).samples) == 1600
+    with pytest.raises(RuntimeError, match="ended unexpectedly"):  # a normal end makes _pipe give the source up
+        await asyncio.wait_for(anext(frames), 1.0)
+
+
+class _SpeakingDriver(QueueAudioSource):
+    """A driver source whose capture thread hears one sentence (then silence) per start, in 0.1 s buffers,
+    and reports end-of-stream when stopped, as ``LoopbackSource``'s does."""
+
+    def __init__(self, clock: Clock) -> None:
+        super().__init__("system", clock)
+        self.stops = 0
+
+    def start_capture(self) -> None:
+        x = np.concatenate([noise(0.5), speechlike(2.0, seed=3), noise(1.5, seed=4)])
+        for i in range(0, len(x), 1600):
+            self.push_from_thread(x[i : i + 1600], SAMPLE_RATE)
+
+    def stop_capture(self) -> None:
+        self.signal_end()
+        self.stops += 1
+
+
+class _FailsOnce(FakeTranscriber):
+    """The first request dies with an error that ends the stream (as a streaming backend's does when its
+    socket can't be re-established; a per-utterance error would only skip that utterance); later ones work."""
+
+    async def _transcribe_with_retry(self, utt: Utterance, prompt: str | None) -> TranscribeResult | None:
+        if not self.calls:
+            self.calls.append(utt)
+            raise ConnectionResetError("socket is dead")
+        return await super()._transcribe_with_retry(utt, prompt)
+
+
+async def test_assistant_restarts_a_failed_driver_source_on_the_meeting_clock(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The restart path end to end: Assistant._pipe resets the source after a transcription failure, and
+    the next sentence is heard again and stamped on the meeting clock."""
+    from voicestream import session as session_mod
+    from voicestream.session import Assistant
+
+    clock = _ManualClock()
+    src = _SpeakingDriver(clock)
+    real_sleep = asyncio.sleep
+
+    async def backoff(delay: float, result: object = None) -> object:  # _pipe's wait before retrying
+        while src.stops < 1:  # the failed run's capture is torn down meanwhile...
+            await real_sleep(0.01)
+        await real_sleep(0.05)  # ...and its end-of-stream marker lands
+        clock.t += 60.0  # the device was gone for a minute
+        return result
+
+    monkeypatch.setattr(session_mod, "asyncio", types.SimpleNamespace(**{**vars(asyncio), "sleep": backoff}))
+    stt = _FailsOnce(["Je reviens."], vad=cfg.vad)
+    a = Assistant(cfg, sources=[src], transcriber_factory=lambda s: stt, llm=None, sinks=[], always_on=True)
+    a.transcribers[src.name] = stt
+    clock.t = 5.0
+    pipe = asyncio.ensure_future(a._pipe(src))
+    got = asyncio.ensure_future(a._merge_q.get())
+    try:
+        await asyncio.wait({got, pipe}, timeout=5.0, return_when=asyncio.FIRST_COMPLETED)
+        assert got.done(), "system audio never came back after the restart"
+    finally:
+        a._stop.set()
+        src.stop()
+        got.cancel()
+        await asyncio.wait_for(pipe, 5.0)
+    seg = got.result()
+    assert seg.text == "Je reviens." and len(stt.calls) == 2
+    assert 65.0 <= seg.t_start < 66.0  # heard right after the restart, not stamped a minute in the past
 
 
 # ----------------------------------------------------------------------- file replay
@@ -567,12 +656,19 @@ def test_file_source_picks_reader_by_format(tmp_path: Path) -> None:
     assert file_source(tmp_path / "a.mp3", speed=1.0).input_args[:1] == ["-re"]  # real-time replay
 
 
+def test_file_source_hands_wavs_it_cannot_read_to_ffmpeg(tmp_path: Path) -> None:
+    path = tmp_path / "w24.wav"
+    with wave.open(str(path), "wb") as w:  # 24-bit PCM: wave opens it, numpy has no dtype for it
+        w.setnchannels(1)
+        w.setsampwidth(3)
+        w.setframerate(SAMPLE_RATE)
+        w.writeframes(bytes(3 * 1600))
+    src = file_source(path, name="system", speed=0)
+    assert isinstance(src, FFmpegSource) and src.live is False
+    assert (src.name, src.input_args) == ("system", ["-i", str(path)])
+
+
 @needs_ffmpeg
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: 24-bit PCM WAVs pass wave.open(), so file_source picks WavFileSource, which then raises "
-    "'unsupported WAV sample width 3' instead of letting ffmpeg decode them",
-)
 async def test_24_bit_wav_is_decoded(tmp_path: Path) -> None:
     x = _tone(0.5, 300, SAMPLE_RATE, amp=0.5)
     pcm24 = np.round(x * (2**23 - 1)).astype("<i4").view(np.uint8).reshape(-1, 4)[:, :3]
@@ -587,17 +683,23 @@ async def test_24_bit_wav_is_decoded(tmp_path: Path) -> None:
     assert rms_dbfs(pcm) == pytest.approx(rms_dbfs(x), abs=0.5)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: build_source splits 'file:' specs at the first '@', so paths containing one (Google Drive's macOS "
-    "mount is ~/Library/CloudStorage/GoogleDrive-<email>/) are cut short and the rest becomes the source name",
-)
 def test_file_spec_keeps_an_at_sign_inside_the_path(cfg: Config) -> None:
     path = "/Users/alex/Library/CloudStorage/GoogleDrive-alex@gmail.com/My Drive/standup.m4a"
     named = build_source(f"file:{path}@system", cfg, Clock(), speed=0)  # what `voicestream replay` builds
     assert isinstance(named, FFmpegSource) and (named.name, named.input_args) == ("system", ["-i", path])
     plain = build_source(f"file:{path}", cfg, Clock(), speed=0)
     assert isinstance(plain, FFmpegSource) and (plain.name, plain.input_args) == ("mic", ["-i", path])
+
+
+def test_ffmpeg_spec_takes_only_a_plain_name_after_the_last_at_sign(cfg: Config) -> None:
+    path = "/Users/alex/Library/CloudStorage/GoogleDrive-alex@gmail.com/My Drive/standup.m4a"
+    src = build_source(f"ffmpeg:-i '{path}'", cfg, Clock())
+    assert isinstance(src, FFmpegSource) and (src.name, src.input_args) == ("system", ["-i", path])
+    dshow = "audio=@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{5C6A0F7E}"  # DirectShow's alternative name
+    src = build_source(f'ffmpeg:-f dshow -i "{dshow}"', cfg, Clock())
+    assert (src.name, src.input_args) == ("system", ["-f", "dshow", "-i", dshow])
+    named = build_source(f"ffmpeg:-i '{path}'@mic", cfg, Clock())
+    assert (named.name, named.input_args) == ("mic", ["-i", path])
 
 
 @needs_ffmpeg

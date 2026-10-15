@@ -251,8 +251,10 @@ To update the bridge later, paste the new code, then use **Deploy** → **Manage
    - `crm.objects.contacts.write`
    - `crm.objects.contacts.read`
    - `crm.objects.companies.read`
+   - `crm.objects.companies.write`
    - `crm.objects.owners.read`
 3. Add `HUBSPOT_TOKEN=…` to `~/.voicestream/.env`.
+4. Set `owner_email` in `[sinks.hubspot]` to your HubSpot login, so tasks are assigned to you.
 
 Participants are matched to HubSpot contacts and companies by name, accents ignored. A record is
 associated only when the match is unique, and contacts are never created.
@@ -309,6 +311,7 @@ list_name = "Réunions"
 
 [sinks.hubspot]
 enabled = true
+owner_email = "you@example.com"    # your HubSpot login: tasks get assigned to you
 
 [sinks.shortcuts]
 enabled = true
@@ -320,7 +323,15 @@ enabled = true
 
 By default `google`, `reminders` and `hubspot` only take items **you** own (`owners = "mine"`).
 Your calendar and CRM stay yours; the other participants' tasks are listed in the notes and the
-follow-up draft.
+follow-up draft. Google Calendar and Apple Reminders both remind you of your tasks, so keep one:
+set `calendar = false` under `[sinks.google]` if you prefer Reminders.
+
+On first use, check these on your Mac:
+
+- Run `VOICESTREAM_TEST_REMINDERS=1 python -m pytest tests/test_sink_mac.py -k real`. It creates,
+  completes and deletes one test reminder.
+- Make sure your Promethee shortcut doesn't ask questions. A shortcut waiting for input is
+  stopped after `timeout_s` and not retried.
 
 ### Claude as a destination
 

@@ -282,7 +282,6 @@ async def test_three_failures_fall_back_to_the_heuristic(cfg: Config) -> None:
     assert rig.ex.processed_upto == 1
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: lines handled by the heuristic fallback are never added to the transcript blocks Claude sees")
 async def test_lines_from_a_fallback_round_stay_in_claude_context(cfg: Config) -> None:
     rig = Rig(cfg, [LLMError("a"), LLMError("b"), LLMError("c"), _empty()])
     rig.say(COMMIT, at=0.0)
@@ -293,7 +292,6 @@ async def test_lines_from_a_fallback_round_stay_in_claude_context(cfg: Config) -
     assert any(COMMIT in b["text"] for b in rig.transcript_blocks(3))
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: the extraction event reports mode='llm' for a round the heuristic handled after 3 failures")
 async def test_fallback_round_is_reported_as_heuristic(cfg: Config) -> None:
     rig = Rig(cfg, [LLMError("a"), LLMError("b"), LLMError("c")])
     rig.say(COMMIT, at=0.0)
@@ -325,6 +323,24 @@ async def test_over_budget_uses_heuristic_until_budget_returns(cfg: Config) -> N
     rig.say("Numbers look stable.", at=10.0)
     await rig.extract_at(20.0)
     assert len(rig.llm.calls) == 1 and rig.ex.mode == "llm"
+
+
+async def test_lines_from_budget_rounds_stay_in_claude_context(cfg: Config) -> None:
+    cfg.budget.daily_usd = 0.0
+    rig = Rig(cfg, [_empty(), _empty()], costs=CostMeter(cfg, persist=False))
+    rig.say(COMMIT, at=0.0)
+    await rig.extract_at(1.0)
+    cfg.budget.daily_usd = 100.0
+    rig.say("Actually Sam is taking that one.", "system", at=10.0)
+    await rig.extract_at(20.0)
+    first, new = rig.transcript_blocks(0)
+    assert first["text"].startswith("<transcript part='1'>") and COMMIT in first["text"]
+    assert new["text"].startswith("<transcript part='2'>") and COMMIT not in new["text"]
+    assert "transcript part 2 " in rig.context_block(0)["text"]
+    rig.say("Numbers look stable.", at=30.0)
+    await rig.extract_at(40.0)
+    # earlier blocks unchanged: the cache prefix holds
+    assert [b["text"] for b in rig.transcript_blocks(1)[:2]] == [first["text"], new["text"]]
 
 
 async def test_final_flush(cfg: Config) -> None:

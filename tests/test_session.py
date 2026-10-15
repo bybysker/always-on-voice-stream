@@ -273,14 +273,19 @@ async def test_mic_echo_of_system_audio_is_dropped(cfg: Config, tmp_path: Path) 
     assert owners == {"Send the revised pricing deck to Acme": "Alex", "Book the venue for the offsite": "Alex"}
 
 
-async def test_a_meeting_without_speech_leaves_nothing_behind(cfg: Config, tmp_path: Path) -> None:
+@pytest.mark.parametrize("store_audio", [False, True])
+async def test_a_meeting_without_speech_leaves_nothing_behind(cfg: Config, tmp_path: Path, store_audio: bool) -> None:
+    cfg.capture.store_audio = store_audio  # its audio files go too
     clock = Clock()
     h = Harness(cfg, _wav_sources(tmp_path, clock, mic=noise(4.0)), clock=clock)
     await asyncio.wait_for(h.a.run(), 30)
     assert "meeting.started" in h.types()  # not always-on: a meeting was opened up front…
     assert _session_dirs(cfg) == []  # …and removed again
-    assert "meeting.ended" not in h.types() and h.a.finished_meetings == []
-    assert h.types()[-1] == "assistant.stopped"
+    assert h.a.finished_meetings == []
+    # …but still closed, so the dashboard doesn't stay on "wrapping up…"
+    assert h.types()[-3:] == ["meeting.ending", "meeting.ended", "assistant.stopped"]
+    ended = h.events("meeting.ended")[0].data
+    assert (ended["items"], ended["notes"]) == (0, None)
 
 
 # -------------------------------------------------------------------- always-on
@@ -316,7 +321,6 @@ async def test_always_on_splits_meetings_after_silence(cfg: Config) -> None:
     assert "Send the deck to Sam" in todo and "Book the venue for the offsite" in todo
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: Meeting.id has 1-second resolution, so back-to-back meetings share TODO.md refs")
 async def test_back_to_back_meetings_keep_separate_todo_lines(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
     second, ticks = datetime(2026, 10, 14, 15, 30, 0, tzinfo=UTC), itertools.count()
     # both meetings start within the same second (each call is a microsecond later)
@@ -418,7 +422,6 @@ async def test_agent_still_running_at_the_end_updates_the_notes_later(cfg: Confi
     assert "Globex is about 20% cheaper than Initech." in path.read_text(encoding="utf-8")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: the session folder is renamed (title slug) while agents still work in agents/ under the old path")
 async def test_late_agent_results_land_in_the_renamed_session_folder(cfg: Config) -> None:
     cfg.agents.mode = "commands"
     cfg.agents.finish_wait_s = 0
@@ -443,3 +446,52 @@ async def test_late_agent_results_land_in_the_renamed_session_folder(cfg: Config
     assert agent is not None and agent.status == AgentStatus.DONE
     assert agent.result_files and all(Path(f).is_file() and session.store.dir in Path(f).parents for f in agent.result_files)
     assert "Globex is about 20% cheaper" in (session.store.dir / "notes.md").read_text(encoding="utf-8")
+
+
+async def test_finished_agent_results_follow_the_renamed_folder(cfg: Config) -> None:
+    cfg.agents.mode = "commands"
+    h = Harness(cfg, [IdleSource("mic")], agent_engine=FakeEngine(), always_on=False, title="Pricing sync")
+    run = asyncio.ensure_future(h.a.run())
+    try:
+        await h.wait_for("meeting.started")
+        await h.say("Hey Claude, compare Globex and Initech pricing for the Acme email.")
+        await h.a.extract_now()
+        await h.wait_for("agent.updated", lambda e: e.data["item"]["agent"]["status"] == "done")
+        path = await h.a.end_meeting()
+        h.a.stop()
+        await asyncio.wait_for(run, 30)
+    finally:
+        run.cancel()
+    (session,) = h.a.finished_meetings
+    assert path == session.store.dir / "notes.md" and session.store.dir.name.endswith("-pricing-sync")
+    agent = session.meeting.items["A1"].agent
+    assert agent is not None and agent.workspace is not None and Path(agent.workspace).parent == session.store.agents_dir
+    assert agent.result_files and all(Path(f).is_file() and session.store.dir in Path(f).parents for f in agent.result_files)
+    assert f"- `{session.store.agents_dir}" in path.read_text(encoding="utf-8")  # the notes link the moved files
+    assert load_meeting(session.store.dir)[0].items["A1"].agent.result_files == agent.result_files  # type: ignore[union-attr]
+
+
+async def test_items_stay_reachable_while_the_meeting_wraps_up(cfg: Config) -> None:
+    cfg.agents.mode = "commands"
+    gate = asyncio.Event()
+    h = Harness(cfg, [IdleSource("mic")], agent_engine=FakeEngine(gate), always_on=False)
+    run = asyncio.ensure_future(h.a.run())
+    try:
+        await h.wait_for("meeting.started")
+        await h.say("Hey Claude, compare Globex and Initech pricing for the Acme email.")
+        await h.say("Sam will book the venue by Friday.")
+        await h.a.extract_now()
+        await h.wait_for("agent.updated", lambda e: e.data["item"]["agent"]["status"] == "running")
+        ending = asyncio.ensure_future(h.a.end_meeting())
+        await h.wait_for("meeting.ending")  # finish() now waits for the agent (agents.finish_wait_s)
+        assert h.a.current is None
+        assert h.a.edit_item("A2", owner="Sarah")["owner"] == "Sarah"  # the dashboard can still edit it
+        assert h.a.state()["last_meeting"] is not None
+        gate.set()
+        assert await ending is not None
+        h.a.stop()
+        await asyncio.wait_for(run, 30)
+    finally:
+        run.cancel()
+    (session,) = h.a.finished_meetings
+    assert session.meeting.items["A2"].owner == "Sarah"

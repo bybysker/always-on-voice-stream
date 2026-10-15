@@ -15,6 +15,8 @@ from .sinks.base import Sink, SinkError
 log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 4
+LINKS_OTHER_NOTES = {"slack"}
+"""Sinks whose notes link to the copies the other sinks made (the Slack digest): they get the notes last."""
 
 
 class Dispatcher:
@@ -64,13 +66,14 @@ class Dispatcher:
 
     async def _push(self, item: Item, sink: Sink, action: str) -> bool:
         key = (item.id, sink.name)
+        revision = item.revision  # what is sent; an edit made while the request is in flight is synced next round
         try:
             if action == "create":
                 ref = await sink.push_item(item, self.meeting)
                 item.pushed[sink.name] = ref
             else:
                 await sink.update_item(item, self.meeting, item.pushed[sink.name])
-            item.pushed_revision[sink.name] = item.revision
+            item.pushed_revision[sink.name] = revision
             self._attempts.pop(key, None)
             if self.bus:
                 self.bus.publish(
@@ -163,7 +166,7 @@ class Dispatcher:
 
     async def push_notes(self, notes_markdown: str) -> dict[str, str]:
         out: dict[str, str] = {}
-        for sink in self.sinks:
+        for sink in sorted(self.sinks, key=lambda s: s.name in LINKS_OTHER_NOTES):
             if not (sink.supports_notes and sink.cfg.notes):
                 continue
             try:
@@ -176,7 +179,7 @@ class Dispatcher:
             except Exception as exc:
                 log.warning("notes → %s failed: %s", sink.name, exc)
                 if self.bus:
-                    self.bus.publish("sink.error", sink=sink.name, error=str(exc))
+                    self.bus.publish("sink.error", meeting_id=self.meeting.id, sink=sink.name, error=str(exc))
         if out and self.on_change:
             self.on_change()
         return out

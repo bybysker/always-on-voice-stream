@@ -179,8 +179,14 @@ class DeepgramTranscriber(Transcriber):
                 async for raw in ws:
                     if isinstance(raw, (bytes, bytearray)):
                         continue
-                    with contextlib.suppress(ValueError, TypeError):
-                        on_message(json.loads(raw))
+                    try:
+                        ev = json.loads(raw)
+                    except ValueError:
+                        continue
+                    try:
+                        on_message(ev)
+                    except Exception as exc:  # one odd message mustn't take the socket and its results down
+                        log.warning("%s: ignoring unexpected deepgram message (%r): %.200s", source, exc, raw)
             except Exception as exc:
                 log.info("%s: deepgram socket closed: %r", source, exc)
             finally:
@@ -219,14 +225,18 @@ class DeepgramTranscriber(Transcriber):
                 if st["rx"] is not None:
                     st["rx"].cancel()
                 st["rx"] = asyncio.ensure_future(receiver(ws))
-                # a new connection has a new timeline: re-send what the old one lost
+                # a new connection has a new timeline: re-base every unresolved utterance on it
+                # (the current one too, even before its first chunk got through) and re-send its audio
                 for u in inflight:
-                    if u.done or not u.chunks:
+                    if u.done:
                         continue
                     u.stream_start = st["sent"]
+                    u.finals.clear()  # the new connection transcribes all of it again
+                    u.confidences.clear()
                     for c in u.chunks:
                         await ws.send(c)
                         st["sent"] += len(c) / 2 / SAMPLE_RATE
+                    self._bill(u.seconds)  # Deepgram bills the audio each connection receives
                     if u.stream_end is not None:
                         u.stream_end = st["sent"]
                         await ws.send(json.dumps({"type": "Finalize"}))

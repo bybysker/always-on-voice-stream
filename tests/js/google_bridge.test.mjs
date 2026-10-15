@@ -94,7 +94,8 @@ function folderOf(g, name, owner, trashed = false) {
 
 function fakeGoogle({secret = SECRET} = {}) {
   const g = {props: {SECRET: secret}, cache: new Map(), seq: 0, docs: new Map(), files: new Map(), folders: [],
-    sent: [], drafts: [], locked: 0, fail: {}, outputs: []};
+    sent: [], drafts: [], locked: 0, fail: {}, outputs: [],
+    notFound: 'No item with the given ID could be found. Possibly because you have not edited this item or you do not have permission to access it.'};
   g.primary = new FakeCalendar(g, ME);
   g.team = new FakeCalendar(g, 'team@group.calendar.google.com');
   const globals = {
@@ -133,7 +134,7 @@ function fakeGoogle({secret = SECRET} = {}) {
       create: (name) => {
         const id = `doc${++g.seq}`;
         const doc = {id, name, body: new FakeBody(), saved: 0,
-          getId: () => id, getUrl: () => `https://docs.google.com/document/d/${id}/edit`, getBody: () => doc.body,
+          getId: () => id, getUrl: () => `https://docs.google.com/open?id=${id}`, getBody: () => doc.body, // a legacy form
           setName(n) { doc.name = n; return doc; }, saveAndClose() { doc.saved++; }};
         g.docs.set(id, doc);
         g.files.set(id, {trashed: false, parent: 'My Drive', description: null});
@@ -147,7 +148,7 @@ function fakeGoogle({secret = SECRET} = {}) {
     DriveApp: {
       getFileById: (id) => {
         const f = g.files.get(id);
-        if (!f) throw new Error('No item with the given ID could be found. Possibly because you have not edited this item or you do not have permission to access it.');
+        if (!f) throw new Error(g.notFound);
         return {isTrashed: () => f.trashed, getDescription: () => f.description,
           setDescription(d) { f.description = d; return this; },
           moveTo(folder) { f.parent = folder.getName() + '#' + folder.getId(); return this; }};
@@ -294,17 +295,22 @@ test('task.update leaves events it did not make alone', () => {
   assert.equal(g.primary.events.get(yours.id).title, 'Dentist');
 });
 
-test('quota and lock errors say whether a retry can help', () => {
+test('Google errors are retryable whatever their language; setup mistakes are not', () => {
   const g = fakeGoogle();
-  g.fail.createEvent = 'Service invoked too many times in a short time: calendar. Try Utilities.sleep(1000) between calls.';
-  assert.deepEqual(g.call('task.create', {...TASK, key: 'vs:a'}), {ok: false, error: g.fail.createEvent, retryable: true});
-  g.fail.createEvent = 'Service invoked too many times for one day: calendar.';
-  assert.equal(g.call('task.create', {...TASK, key: 'vs:a'}).retryable, false);
+  for (const message of [
+    'Service invoked too many times in a short time: calendar. Try Utilities.sleep(1000) between calls.',
+    'Exception : Le service a été appelé trop souvent en peu de temps : calendar.', // the account's language
+  ]) {
+    g.fail.createEvent = message;
+    assert.deepEqual(g.call('task.create', {...TASK, key: 'vs:a'}), {ok: false, error: message, retryable: true});
+  }
   assert.equal(g.locked, 0, 'the lock is released when the action throws');
   delete g.fail.createEvent;
   g.fail.lock = true;
   assert.equal(g.call('task.create', {...TASK, key: 'vs:a'}).retryable, true);
   assert.equal(g.primary.events.size, 0);
+  delete g.fail.lock;
+  assert.equal(g.call('task.create', {...TASK, calendar_id: 'nope@group.calendar.google.com'}).retryable, false);
 });
 
 // ---------------------------------------------------------------------- notes
@@ -378,7 +384,11 @@ test('pushing notes again with the Doc id renames and rewrites it; a deleted or 
   assert.notEqual(trashed.doc_id, doc_id);
   const gone = g.call('meeting.notes', {key: 'vs:d', doc: {...NOTES.doc, id: 'doc-deleted'}});
   assert.equal(gone.ok, true);
-  assert.equal(g.docs.size, 3);
+  g.notFound = 'Exception : Aucun élément ne correspond à l’identifiant fourni.'; // a French account
+  const goneFr = g.call('meeting.notes', {key: 'vs:e', doc: {...NOTES.doc, id: 'doc-deleted'}});
+  assert.equal(goneFr.ok, true);
+  assert.equal(goneFr.doc_url, `https://docs.google.com/document/d/${goneFr.doc_id}/edit`);
+  assert.equal(g.docs.size, 4);
 });
 
 test('meeting.notes never overwrites a Doc it did not make', () => {

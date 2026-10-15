@@ -22,6 +22,9 @@ from .base import rms_dbfs
 
 log = logging.getLogger(__name__)
 
+_Frame = tuple[float, np.ndarray, float, bool]
+"""(t, samples, dBFS, classified as speech)"""
+
 
 class VADSegmenter:
     """Synchronous, push-based segmenter (easy to test, cheap to run in the loop)."""
@@ -47,12 +50,13 @@ class VADSegmenter:
             maxlen=max(10, int(12.0 / self.frame_s))
         )
         self.noise_db = -60.0
-        self._pre_roll: collections.deque[tuple[float, np.ndarray, float]] = collections.deque(
+        # frames are (t, samples, db, is_speech); speech_seconds is counted from the frames an
+        # utterance finally keeps, so trimming and splitting can't inflate it
+        self._pre_roll: collections.deque[_Frame] = collections.deque(
             maxlen=max(1, int(self.cfg.pre_roll_s / self.frame_s))
         )
-        self._candidate: list[tuple[float, np.ndarray, float]] = []
-        self._active: list[tuple[float, np.ndarray, float]] = []  # (t, samples, db)
-        self._speech_frames = 0
+        self._candidate: list[_Frame] = []
+        self._active: list[_Frame] = []
         self._silence_run = 0
         self._held: Utterance | None = None
         self._webrtc = None
@@ -72,11 +76,15 @@ class VADSegmenter:
 
     def push(self, frame: AudioFrame) -> list[Utterance]:
         out: list[Utterance] = []
-        if self._buf_t is None or self._buf.size == 0:
+        if self._buf_t is None:
             self._buf_t = frame.t_start
         elif frame.t_start - (self._buf_t + self._buf.size / SAMPLE_RATE) > 0.5:
-            # discontinuity (device hiccup / dropped frames): restart timing
+            # discontinuity (device hiccup / dropped frames): audio can't be stitched across the gap,
+            # so close what was heard on the old time base, then restart timing
+            out.extend(self._break_at_gap())
             self._buf = np.zeros(0, dtype=np.int16)
+            self._buf_t = frame.t_start
+        elif self._buf.size == 0:
             self._buf_t = frame.t_start
         self._buf = np.concatenate([self._buf, frame.samples.astype(np.int16, copy=False)])
         while self._buf.size >= self.frame_len:
@@ -102,6 +110,17 @@ class VADSegmenter:
         return out
 
     # ----------------------------------------------------------------- internals
+
+    def _break_at_gap(self) -> list[Utterance]:
+        out: list[Utterance] = []
+        if self._active:
+            utt = self._close_active(trim=True)
+            if utt:
+                out.extend(self._hold_or_emit(utt))
+        # stale lead-in would give the next utterance a start on the old clock
+        self._candidate.clear()
+        self._pre_roll.clear()
+        return out
 
     def _is_speech(self, chunk: np.ndarray, db: float) -> bool:
         threshold = max(self.cfg.min_threshold_db, self.noise_db + self.cfg.margin_db)
@@ -134,26 +153,25 @@ class VADSegmenter:
         db, speech = self.classify(chunk)
         out: list[Utterance] = []
 
+        item = (t, chunk, db, speech)
         if not self._active:
             if speech:
-                self._candidate.append((t, chunk, db))
+                self._candidate.append(item)
                 if len(self._candidate) >= self.cfg.start_frames:
                     self._active = list(self._pre_roll) + self._candidate
                     self._pre_roll.clear()
-                    self._speech_frames = len(self._candidate)
                     self._silence_run = 0
                     self._candidate = []
             else:
                 # failed start: candidate frames become pre-roll
-                for item in self._candidate:
-                    self._pre_roll.append(item)
+                for cand in self._candidate:
+                    self._pre_roll.append(cand)
                 self._candidate = []
-                self._pre_roll.append((t, chunk, db))
+                self._pre_roll.append(item)
             return out
 
-        self._active.append((t, chunk, db))
+        self._active.append(item)
         if speech:
-            self._speech_frames += 1
             self._silence_run = 0
         else:
             self._silence_run += 1
@@ -170,35 +188,33 @@ class VADSegmenter:
         """Utterance hit max length: cut at the quietest frame in the last ~3 s."""
         look = min(len(self._active) - 1, int(3.0 / self.frame_s))
         tail = self._active[-look:]
-        idx = len(self._active) - look + int(np.argmin([db for _, _, db in tail]))
+        idx = len(self._active) - look + int(np.argmin([db for _, _, db, _ in tail]))
         head, rest = self._active[:idx], self._active[idx:]
         self._active = head
         utt = self._close_active(trim=False)
         self._active = rest
-        self._speech_frames = len(rest)
         self._silence_run = 0
         return self._hold_or_emit(utt) if utt else []
 
     def _close_active(self, trim: bool) -> Utterance | None:
         frames = self._active
-        speech_frames = self._speech_frames
         self._active = []
-        self._speech_frames = 0
         self._silence_run = 0
         if trim:
             keep_tail = max(1, int(0.2 / self.frame_s))
             # drop trailing silence beyond a short tail
             silent = 0
-            for _, _, db in reversed(frames):
+            for _, _, db, _ in reversed(frames):
                 if db > max(self.cfg.min_threshold_db, self.noise_db + self.cfg.margin_db):
                     break
                 silent += 1
             cut = max(0, silent - keep_tail)
             if cut:
                 frames = frames[:-cut]
+        speech_frames = sum(1 for *_, speech in frames if speech)
         if not frames or speech_frames * self.frame_s < self.cfg.min_speech_s:
             return None
-        samples = np.concatenate([c for _, c, _ in frames])
+        samples = np.concatenate([c for _, c, _, _ in frames])
         t0 = frames[0][0]
         return Utterance(
             source=self.source,

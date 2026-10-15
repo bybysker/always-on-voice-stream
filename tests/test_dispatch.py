@@ -223,11 +223,6 @@ async def test_edits_after_a_push_are_propagated_once(cfg: Config, meeting: Meet
     assert _events(bus, "item.pushed")[-1]["action"] == "update"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: _push records pushed_revision = item.revision after awaiting the sink, so an edit made while the "
-    "push was in flight is marked as pushed and never synced",
-)
 async def test_an_edit_made_while_a_push_is_in_flight_is_synced_afterwards(cfg: Config, meeting: Meeting) -> None:
     meeting.items["A1"] = _action("A1")
     sink = MemorySink(cfg)
@@ -384,5 +379,21 @@ async def test_notes_go_only_to_sinks_that_want_them(cfg: Config, meeting: Meeti
     assert yes.notes == ["# Notes"] and opted_out.notes == [] and unsupported.notes == [] and broken.notes == []
     assert meeting.notes_ref == {"memory": f"memory://notes/{meeting.id}"}
     assert [e["sink"] for e in _events(bus, "sink.error")] == ["broken"]
+    assert _events(bus, "sink.error")[0]["meeting_id"] == meeting.id  # like the item errors
     await d.finalize("")
     assert yes.notes == ["# Notes"]  # empty notes are not published
+
+
+async def test_the_slack_digest_gets_the_notes_last_so_it_can_link_the_others(cfg: Config, meeting: Meeting) -> None:
+    seen: dict[str, set[str]] = {}  # sink -> the notes refs it could link to
+
+    class Recorder(MemorySink):
+        async def push_notes(self, meeting: Meeting, notes_markdown: str) -> str | None:
+            seen[self.name] = set(meeting.notes_ref)
+            return await super().push_notes(meeting, notes_markdown)
+
+    sinks = [type(f"{n.title()}Recorder", (Recorder,), {"name": n})(cfg) for n in ("slack", "notion", "memory")]
+    d, _, _ = _dispatcher(cfg, meeting, *sinks)
+    await d.push_notes("# Notes")
+    assert list(seen) == ["notion", "memory", "slack"]  # otherwise in config order
+    assert seen["slack"] == {"notion", "memory"}

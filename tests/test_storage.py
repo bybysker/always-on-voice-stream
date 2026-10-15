@@ -118,7 +118,6 @@ def test_rename_with_title_keeps_the_folder_when_the_target_exists(tmp_path: Pat
     assert store.dir.name == _stamp() and store.dir.is_dir()
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: rename_with_title treats the '-2' collision suffix as an existing title slug")
 def test_rename_with_title_works_for_a_collision_folder(tmp_path: Path) -> None:
     SessionStore(tmp_path, _meeting()).save()
     second = SessionStore(tmp_path, _meeting(title="Design review"))

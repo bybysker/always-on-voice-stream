@@ -28,16 +28,19 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 from ..brain.llm import LLM, LLMError, text_block
 from ..config import AgentsConfig, Config
-from ..costs import CostMeter
+from ..costs import CostMeter, TokenUsage
 from ..events import EventBus
 from ..models import AgentStatus, Item, Meeting, utcnow
 
 log = logging.getLogger(__name__)
 
 RESULT_FILE = "RESULT.md"
+TASK_FILE = "TASK.md"
+"""The brief the runner writes into the workspace: input, never a deliverable."""
 SECRET_ENV_VARS = (
     "OPENAI_API_KEY",
     "DEEPGRAM_API_KEY",
@@ -47,8 +50,15 @@ SECRET_ENV_VARS = (
     "GITHUB_TOKEN",
     "SLACK_WEBHOOK_URL",
     "TODOIST_TOKEN",
+    "HUBSPOT_TOKEN",
+    "VOICESTREAM_WEBHOOK_URL",
     "VOICESTREAM_WEBHOOK_SECRET",
+    "VOICESTREAM_GOOGLE_URL",
+    "VOICESTREAM_GOOGLE_SECRET",
 )
+"""Always blanked for agents, set or not. :func:`scrubbed_env` adds anything else that looks secret."""
+_SECRET_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "WEBHOOK", "PRIVATE_KEY", "CREDENTIAL")
+_AGENT_NEEDS = ("ANTHROPIC_", "CLAUDE_")  # the agent's own Claude credentials and settings
 
 AGENT_SYSTEM = """\
 You are a background worker for {user}'s always-on meeting assistant. While {user} is still in \
@@ -92,11 +102,33 @@ class Engine(ABC):
     async def run(self, prompt: str, workspace: Path) -> EngineResult: ...
 
 
+def scrubbed_env(sinks: dict[str, dict[str, Any]] | None = None) -> dict[str, str]:
+    """Blank values for every credential an agent must not inherit from voicestream's environment.
+
+    That is :data:`SECRET_ENV_VARS`, every variable whose name looks secret, and every variable a sink
+    reads (its ``*_env`` fields: the registered sinks' defaults and the overrides in ``sinks``).
+    """
+    from ..sinks.base import REGISTRY, sink_class
+
+    names = set(SECRET_ENV_VARS)
+    names |= {k for k in os.environ if k.startswith("VOICESTREAM_") or any(m in k.upper() for m in _SECRET_MARKERS)}
+    sinks = sinks or {}
+    for name in {*REGISTRY, *sinks}:
+        try:
+            fields = sink_class(name).Config.model_fields
+        except Exception:  # unknown or broken sink: its configured names below still count
+            fields = {}
+        names |= {f.default for key, f in fields.items() if key.endswith("_env") and isinstance(f.default, str)}
+        names |= {v for key, v in (sinks.get(name) or {}).items() if key.endswith("_env") and isinstance(v, str)}
+    return {n: "" for n in sorted(names) if n and not n.upper().startswith(_AGENT_NEEDS)}
+
+
 def _workspace_files(workspace: Path) -> list[str]:
     files = []
     for p in sorted(workspace.rglob("*")):
-        if p.is_file() and not any(part.startswith(".") for part in p.relative_to(workspace).parts):
-            files.append(str(p.relative_to(workspace)))
+        rel = p.relative_to(workspace)
+        if p.is_file() and rel != Path(TASK_FILE) and not any(part.startswith(".") for part in rel.parts):
+            files.append(str(rel))
     return files[:50]
 
 
@@ -115,7 +147,7 @@ class AgentSDKEngine(Engine):
 
     name = "agent-sdk"
 
-    def __init__(self, cfg: AgentsConfig, user_name: str) -> None:
+    def __init__(self, cfg: AgentsConfig, user_name: str, sinks: dict[str, dict[str, Any]] | None = None) -> None:
         try:
             import claude_agent_sdk  # noqa: F401
         except ImportError as exc:
@@ -124,6 +156,7 @@ class AgentSDKEngine(Engine):
             ) from exc
         self.cfg = cfg
         self.user_name = user_name
+        self.sinks = sinks or {}
 
     def options(self, workspace: Path):  # -> ClaudeAgentOptions
         from claude_agent_sdk import ClaudeAgentOptions
@@ -143,7 +176,7 @@ class AgentSDKEngine(Engine):
                 "allowUnsandboxedCommands": False,
                 "failIfUnavailable": True,
             }
-        env = {name: "" for name in SECRET_ENV_VARS}
+        env = scrubbed_env(self.sinks)
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
         return ClaudeAgentOptions(
             cwd=str(workspace),
@@ -195,13 +228,21 @@ class ApiEngine(Engine):
 
     name = "api"
 
-    def __init__(self, cfg: AgentsConfig, llm: LLM, user_name: str) -> None:
+    def __init__(
+        self, cfg: AgentsConfig, llm: LLM, user_name: str, price: Callable[[TokenUsage], float] | None = None
+    ) -> None:
         self.cfg = cfg
         self.llm = llm
         self.user_name = user_name
-        self.last_cost = 0.0
+        self.price = price  # e.g. CostMeter.llm_cost: what the run costs the agent budget
 
     async def run(self, prompt: str, workspace: Path) -> EngineResult:
+        spent: list[float] = []
+
+        def bill(usage: TokenUsage) -> None:
+            # this call's tokens are agent spend, not extraction spend (the LLM's own on_usage)
+            spent.append(self.price(usage) if self.price else 0.0)
+
         try:
             text = await asyncio.wait_for(
                 self.llm.complete(
@@ -210,14 +251,15 @@ class ApiEngine(Engine):
                     content=[text_block(prompt)],
                     max_tokens=8000,
                     effort="low",
+                    usage_hook=bill,
                 ),
                 timeout=self.cfg.timeout_s,
             )
         except (LLMError, asyncio.TimeoutError) as exc:
-            return EngineResult(ok=False, error=str(exc) or type(exc).__name__)
+            return EngineResult(ok=False, error=str(exc) or type(exc).__name__, cost_usd=sum(spent))
         (workspace / RESULT_FILE).write_text(text + "\n", encoding="utf-8")
         summary = text.split("\n\n", 1)[0][:1500]
-        return EngineResult(ok=True, summary=summary, files=[RESULT_FILE])
+        return EngineResult(ok=True, summary=summary, cost_usd=sum(spent), files=[RESULT_FILE])
 
 
 def build_brief(item: Item, meeting: Meeting, user_name: str, today: date | None = None) -> str:
@@ -269,6 +311,7 @@ class AgentRunner:
         self._tasks: set[asyncio.Task[None]] = set()
         self._sem = asyncio.Semaphore(max(1, cfg.agents.max_concurrent))
         self._stopped = False
+        self._cancelled = False
         self.engine_error: str | None = None
 
     @property
@@ -280,9 +323,10 @@ class AgentRunner:
             if self.ac.engine == "api":
                 if self._llm is None:
                     raise RuntimeError("agents.engine = 'api' needs a Claude API key")
-                self._engine = ApiEngine(self.ac, self._llm, self.cfg.user_name)
+                price = self.costs.llm_cost if self.costs else None
+                self._engine = ApiEngine(self.ac, self._llm, self.cfg.user_name, price=price)
             else:
-                self._engine = AgentSDKEngine(self.ac, self.cfg.user_name)
+                self._engine = AgentSDKEngine(self.ac, self.cfg.user_name, self.cfg.sinks)
         return self._engine
 
     # ------------------------------------------------------------------ policy
@@ -303,7 +347,7 @@ class AgentRunner:
 
     def approve(self, item_id: str, prompt: str | None = None) -> bool:
         item = self.meeting.items.get(item_id)
-        if item is None or item.agent is None or self._stopped:
+        if item is None or item.agent is None or self._stopped or not self.enabled:
             return False
         if item.agent.status in (AgentStatus.QUEUED, AgentStatus.RUNNING):
             return False
@@ -331,6 +375,8 @@ class AgentRunner:
                 item_id = await asyncio.wait_for(self._queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
+            if self._cancelled:
+                break  # cancel_all() marks what is still queued as failed
             task = asyncio.ensure_future(self._guarded(item_id))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
@@ -356,7 +402,7 @@ class AgentRunner:
         run.started_at = utcnow()
         self._changed(item)
         brief = build_brief(item, self.meeting, self.cfg.user_name)
-        (workspace / "TASK.md").write_text(brief + "\n", encoding="utf-8")
+        (workspace / TASK_FILE).write_text(brief + "\n", encoding="utf-8")
         try:
             engine = self.engine()
             result = await engine.run(brief, workspace)
@@ -367,7 +413,7 @@ class AgentRunner:
         run.cost_usd += result.cost_usd
         if self.costs and result.cost_usd:
             self.costs.add_agent(result.cost_usd)
-        run.result_files = [str(workspace / f) for f in result.files if f != "TASK.md"]
+        run.result_files = [str(workspace / f) for f in result.files if f != TASK_FILE]
         run.result_summary = result.summary or None
         run.error = result.error
         run.status = AgentStatus.DONE if result.ok or (result.summary and run.result_files) else AgentStatus.FAILED
@@ -387,7 +433,7 @@ class AgentRunner:
         self._stopped = True
 
     async def cancel_all(self) -> None:
-        self._stopped = True
+        self._stopped = self._cancelled = True
         for t in list(self._tasks):
             t.cancel()
         for t in list(self._tasks):
@@ -395,6 +441,19 @@ class AgentRunner:
                 await t
             except BaseException:
                 pass
+        while not self._queue.empty():
+            self._queue.get_nowait()
+        # a cancelled run never reaches the end of execute(): don't leave it "running" for good
+        for item in self.meeting.items.values():
+            run = item.agent
+            if run is not None and run.status in (AgentStatus.QUEUED, AgentStatus.RUNNING):
+                if run.status == AgentStatus.RUNNING:
+                    run.finished_at = utcnow()
+                run.status = AgentStatus.FAILED
+                run.error = "cancelled"
+                item.revision += 1
+                item.updated_at = utcnow()
+                self._changed(item)
 
     @property
     def busy(self) -> bool:
