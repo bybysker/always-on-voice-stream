@@ -57,6 +57,7 @@ class _Utt:
     text: str | None = None
     done: bool = False
     partial: str = ""
+    committed_at: float | None = None
 
     @property
     def audio_seconds(self) -> float:
@@ -78,6 +79,7 @@ class OpenAIRealtimeTranscriber(Transcriber):
         on_partial: PartialCallback | None = None,
         connect: Callable[..., Any] | None = None,
         result_timeout_s: float = 20.0,
+        completion_timeout_s: float = 12.0,
     ) -> None:
         self.cfg = cfg or OpenAIRealtimeConfig()
         super().__init__(self.cfg.model, on_usage)
@@ -91,6 +93,7 @@ class OpenAIRealtimeTranscriber(Transcriber):
         self.on_level: Callable[[str, float, bool], None] | None = None
         self._connect = connect
         self.result_timeout_s = result_timeout_s
+        self.completion_timeout_s = completion_timeout_s
         self.reconnects = 0
 
     # ----------------------------------------------------------------- protocol
@@ -122,9 +125,7 @@ class OpenAIRealtimeTranscriber(Transcriber):
     async def _open(self) -> Any:
         connect = self._connect
         if connect is None:
-            import websockets
-
-            connect = websockets.connect
+            from websockets.asyncio.client import connect  # the top-level alias is legacy on websockets 13
         ws = await connect(
             self.cfg.url,
             additional_headers={"Authorization": f"Bearer {self.api_key}"},
@@ -156,6 +157,13 @@ class OpenAIRealtimeTranscriber(Transcriber):
             return float_to_int16(resampler.process(int16_to_float(samples))).astype("<i2").tobytes()
 
         def release_ready() -> None:
+            # some streaming models occasionally never send ``.completed``: fall back to the
+            # accumulated deltas so one lost result can't hold back every later transcript
+            now = time.monotonic()
+            for u in inflight:
+                if not u.done and u.committed_at is not None and now - u.committed_at > self.completion_timeout_s:
+                    log.warning("%s: no final transcript after %.0fs; using live deltas", source, self.completion_timeout_s)
+                    u.text, u.done = u.partial, True
             while inflight and inflight[0].done:
                 u = inflight.popleft()
                 if u.item_id:
@@ -220,6 +228,7 @@ class OpenAIRealtimeTranscriber(Transcriber):
                         self.reconnects += 1
                         await self._send_audio(ws, u.chunks)
                         await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                        u.committed_at = time.monotonic()
                         awaiting_ack.append(u)
                 cur = state["current"]
                 if cur is not None and cur.chunks:
@@ -276,6 +285,7 @@ class OpenAIRealtimeTranscriber(Transcriber):
                 await send({"type": "input_audio_buffer.commit"})
                 state["current"] = None
                 u.committed = True
+                u.committed_at = time.monotonic()
                 awaiting_ack.append(u)
                 self._bill(u.audio_seconds)
 
@@ -301,6 +311,12 @@ class OpenAIRealtimeTranscriber(Transcriber):
                 await close_ws()
                 out.put_nowait(None)
 
+        async def watchdog() -> None:
+            while True:
+                await asyncio.sleep(1.0)
+                release_ready()
+
+        dog = asyncio.ensure_future(watchdog())
         feeder = asyncio.ensure_future(feed())
         try:
             while True:
@@ -311,6 +327,7 @@ class OpenAIRealtimeTranscriber(Transcriber):
             if state["failed"] is not None:
                 raise state["failed"]
         finally:
+            dog.cancel()
             if not feeder.done():
                 feeder.cancel()
                 with contextlib.suppress(BaseException):

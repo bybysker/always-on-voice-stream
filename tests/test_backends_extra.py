@@ -312,3 +312,31 @@ def test_mactap_converts_buffers() -> None:
     fmt = types.SimpleNamespace(sample_rate=48000.0, num_channels=2, is_float=True)
     src._on_buffer(types.SimpleNamespace(format=fmt, data=stereo.tobytes()))
     assert got[0][1] == 48000 and got[0][0].shape == (2, 2)
+
+
+async def test_realtime_missing_completed_falls_back_to_deltas() -> None:
+    """gpt-live-transcribe sometimes never sends ``.completed``: later results must not wait for it."""
+    from voicestream.config import OpenAIRealtimeConfig
+    from voicestream.transcribe.openai_realtime import OpenAIRealtimeTranscriber
+
+    async def handler(ws: Any) -> None:
+        n = 0
+        async for raw in ws:
+            ev = json.loads(raw)
+            if ev["type"] != "input_audio_buffer.commit":
+                continue
+            n += 1
+            iid = f"item_{n}"
+            await ws.send(json.dumps({"type": "input_audio_buffer.committed", "item_id": iid}))
+            await ws.send(json.dumps({"type": "conversation.item.input_audio_transcription.delta", "item_id": iid, "delta": f"words {n}"}))
+            if n != 1:  # the first utterance never gets its final event
+                await ws.send(json.dumps({"type": "conversation.item.input_audio_transcription.completed", "item_id": iid, "transcript": f"final {n}"}))
+
+    async with websockets.serve(handler, "127.0.0.1", 0) as srv:
+        port = srv.sockets[0].getsockname()[1]
+        t = OpenAIRealtimeTranscriber(
+            OpenAIRealtimeConfig(url=f"ws://127.0.0.1:{port}/v1/realtime?intent=transcription"),
+            api_key="k", completion_timeout_s=0.5,
+        )
+        segs = [s async for s in t.stream("system", "Others", _frames(float_to_int16(bursts(3)), "system"))]
+    assert [s.text for s in segs] == ["words 1", "final 2", "final 3"]

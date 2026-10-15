@@ -17,6 +17,9 @@ from .base import SinkError
 log = logging.getLogger(__name__)
 
 RETRYABLE = {408, 429, 500, 502, 503, 504, 529}
+MAYBE_EXECUTED = {500, 502, 503, 504}
+"""A non-idempotent request that got one of these may have been applied: retrying could duplicate it.
+(429 and 529 "overloaded" are rejected before processing, so they're safe to retry.)"""
 IDEMPOTENT = {"GET", "HEAD", "DELETE", "PUT", "OPTIONS"}
 
 
@@ -72,7 +75,7 @@ class HttpSinkMixin:
             if resp.status_code in ok:
                 return resp
             retryable = resp.status_code in RETRYABLE
-            if retryable and resp.status_code >= 500 and method not in IDEMPOTENT and not write_safe:
+            if resp.status_code in MAYBE_EXECUTED and method not in IDEMPOTENT and not write_safe:
                 break  # don't risk creating duplicates
             if not retryable or attempt == retries:
                 break

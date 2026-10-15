@@ -153,8 +153,10 @@ class ClaudeLLM(LLM):
         try:
             return await self.client.messages.create(**kwargs)
         except Exception as exc:
-            if anthropic is not None and isinstance(exc, anthropic.AuthenticationError):
+            if anthropic is not None and isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
                 raise LLMUnavailable(f"Claude authentication failed: {exc}") from exc
+            if anthropic is not None and getattr(exc, "status_code", None) == 402:
+                raise LLMUnavailable(f"Claude billing error: {exc}") from exc
             if anthropic is not None and isinstance(exc, anthropic.BadRequestError):
                 # 400s are bugs or unsupported params: surface loudly, don't retry
                 log.error("Claude rejected the request: %s", getattr(exc, "message", exc))

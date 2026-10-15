@@ -108,9 +108,7 @@ class DeepgramTranscriber(Transcriber):
     async def _open(self) -> Any:
         connect = self._connect
         if connect is None:
-            import websockets
-
-            connect = websockets.connect
+            from websockets.asyncio.client import connect  # the top-level alias is legacy on websockets 13
         return await connect(
             self.url(), additional_headers={"Authorization": f"Token {self.api_key}"}, max_size=None, open_timeout=15
         )
