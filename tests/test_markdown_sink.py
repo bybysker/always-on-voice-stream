@@ -113,13 +113,13 @@ async def test_user_edits_to_the_file_are_preserved(cfg: Config) -> None:
     assert lines[3:] == ["- [ ] Water the plants", "", "Some notes I keep here."]
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a TODO.md holding only its header line gets new items inserted above the header")
 async def test_header_only_file_keeps_its_header_first(cfg: Config) -> None:
     sink = _sink(cfg)
     sink.todo.parent.mkdir(parents=True)
     sink.todo.write_text("# TODO\n", encoding="utf-8")
     await sink.push_item(_item(), _meeting())
-    assert _lines(sink)[0] == "# TODO"
+    lines = _lines(sink)
+    assert lines[:2] == ["# TODO", ""] and lines[2].startswith("- [ ] ")
 
 
 async def test_concurrent_pushes_lose_no_lines(cfg: Config) -> None:

@@ -9,7 +9,7 @@ from collections.abc import Callable
 
 from .config import Config
 from .events import EventBus
-from .models import Item, Meeting
+from .models import Item, ItemStatus, Meeting
 from .sinks.base import Sink, SinkError
 
 log = logging.getLogger(__name__)
@@ -37,7 +37,10 @@ class Dispatcher:
         self.now = now
         self.on_change = on_change
         self._changed_at: dict[str, tuple[int, float]] = {}  # item id -> (revision, first seen at)
-        self._attempts: dict[tuple[str, str], int] = {}
+        self._attempts: dict[tuple[str, str], tuple[int, int]] = {}
+        """(item id, sink) -> (item revision, failed attempts). Editing an item gives a failed push a
+        fresh start (e.g. after you granted a permission), except an uncertain create (see _push)."""
+        self.notes_retry_s = 5.0
         self._lock = asyncio.Lock()
         self._stopped = asyncio.Event()
 
@@ -52,7 +55,8 @@ class Dispatcher:
 
     def _todo(self, item: Item, sink: Sink) -> str | None:
         """'create' | 'update' | None"""
-        if (item.id, sink.name) in self._attempts and self._attempts[(item.id, sink.name)] >= MAX_ATTEMPTS:
+        rev, failures = self._attempts.get((item.id, sink.name), (item.revision, 0))
+        if failures >= MAX_ATTEMPTS and (rev == item.revision or rev < 0):
             return None
         if sink.name in item.pushed:
             if sink.supports_update and item.pushed_revision.get(sink.name, 0) < item.revision:
@@ -82,12 +86,20 @@ class Dispatcher:
             log.info("%s %s → %s", "pushed" if action == "create" else "updated", item.id, sink.name)
             return True
         except SinkError as exc:
-            self._attempts[key] = MAX_ATTEMPTS if not exc.retryable else self._attempts.get(key, 0) + 1
+            if exc.uncertain and action == "create":
+                # may exist already: only a manual push may try again (rev -1 never matches an edit)
+                self._attempts[key] = (-1, MAX_ATTEMPTS)
+            else:
+                self._attempts[key] = (revision, MAX_ATTEMPTS if not exc.retryable else self._failures(key, revision) + 1)
             self._report(item, sink, exc)
         except Exception as exc:  # network errors, bugs in a sink
-            self._attempts[key] = self._attempts.get(key, 0) + 1
+            self._attempts[key] = (revision, self._failures(key, revision) + 1)
             self._report(item, sink, exc)
         return False
+
+    def _failures(self, key: tuple[str, str], revision: int) -> int:
+        rev, failures = self._attempts.get(key, (revision, 0))
+        return failures if rev == revision else 0
 
     def _report(self, item: Item, sink: Sink, exc: Exception) -> None:
         log.warning("push %s → %s failed: %s", item.id, sink.name, exc)
@@ -125,6 +137,9 @@ class Dispatcher:
                     continue
                 self._attempts.pop((item.id, sink.name), None)
                 action = "update" if sink.name in item.pushed else "create"
+                if action == "create" and (item.dismissed or item.status == ItemStatus.CANCELLED):
+                    results[sink.name] = "skipped (dismissed or cancelled)"
+                    continue
                 if action == "update" and not sink.supports_update:
                     results[sink.name] = item.pushed[sink.name]
                     continue
@@ -169,17 +184,24 @@ class Dispatcher:
         for sink in sorted(self.sinks, key=lambda s: s.name in LINKS_OTHER_NOTES):
             if not (sink.supports_notes and sink.cfg.notes):
                 continue
-            try:
-                ref = await sink.push_notes(self.meeting, notes_markdown)
-                if ref:
-                    self.meeting.notes_ref[sink.name] = ref
-                    out[sink.name] = ref
+            for attempt in range(2):  # notes are pushed once per meeting: give a transient failure one more go
+                try:
+                    ref = await sink.push_notes(self.meeting, notes_markdown)
+                    if ref:
+                        self.meeting.notes_ref[sink.name] = ref
+                        out[sink.name] = ref
+                        if self.bus:
+                            self.bus.publish("notes.pushed", meeting_id=self.meeting.id, sink=sink.name, ref=ref)
+                    break
+                except Exception as exc:
+                    if attempt == 0 and isinstance(exc, SinkError) and exc.retryable:
+                        log.info("notes → %s failed (%s); retrying in %.0fs", sink.name, exc, self.notes_retry_s)
+                        await asyncio.sleep(self.notes_retry_s)
+                        continue
+                    log.warning("notes → %s failed: %s", sink.name, exc)
                     if self.bus:
-                        self.bus.publish("notes.pushed", meeting_id=self.meeting.id, sink=sink.name, ref=ref)
-            except Exception as exc:
-                log.warning("notes → %s failed: %s", sink.name, exc)
-                if self.bus:
-                    self.bus.publish("sink.error", meeting_id=self.meeting.id, sink=sink.name, error=str(exc))
+                        self.bus.publish("sink.error", meeting_id=self.meeting.id, sink=sink.name, error=str(exc))
+                    break
         if out and self.on_change:
             self.on_change()
         return out

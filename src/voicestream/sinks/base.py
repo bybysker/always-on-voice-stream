@@ -21,9 +21,11 @@ log = logging.getLogger(__name__)
 
 
 class SinkError(RuntimeError):
-    def __init__(self, message: str, *, retryable: bool = True):
+    def __init__(self, message: str, *, retryable: bool = True, uncertain: bool = False):
         super().__init__(message)
         self.retryable = retryable
+        self.uncertain = uncertain
+        """The action may have been applied before it failed: never re-send it automatically."""
 
 
 class SinkConfig(BaseModel):

@@ -70,8 +70,12 @@ class MarkdownSink(Sink):
                     continue
                 out.append(existing)
             if not found and line is not None:
-                # newest first, right after the header
-                insert_at = 2 if len(out) >= 2 and out[0].startswith("#") else 0
+                # newest first, right after the header (and the blank line under it)
+                insert_at = 0
+                if out and out[0].startswith("#"):
+                    if len(out) == 1 or out[1] != "":
+                        out.insert(1, "")
+                    insert_at = 2
                 out.insert(insert_at, line)
             atomic_write(self.todo, "\n".join(out).rstrip() + "\n")
 

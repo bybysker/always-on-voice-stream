@@ -81,7 +81,7 @@ class HttpSinkMixin:
                 resp = await self.client().request(method, url, **kw)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 if not resend_ok and not isinstance(exc, NOT_SENT):
-                    raise SinkError(f"{method} {url}: {exc!r} — {uncertain}", retryable=False) from exc
+                    raise SinkError(f"{method} {url}: {exc!r} — {uncertain}", retryable=False, uncertain=True) from exc
                 if attempt == retries:
                     raise SinkError(f"{method} {url}: {exc!r}", retryable=True) from exc
                 await asyncio.sleep(min(30.0, 2**attempt + random.random()))
@@ -90,7 +90,9 @@ class HttpSinkMixin:
                 return resp
             retryable = resp.status_code in RETRYABLE
             if resp.status_code in MAYBE_EXECUTED and not resend_ok:
-                raise SinkError(f"{method} {url} → HTTP {resp.status_code}: {resp.text[:400]} — {uncertain}", retryable=False)
+                raise SinkError(
+                    f"{method} {url} → HTTP {resp.status_code}: {resp.text[:400]} — {uncertain}", retryable=False, uncertain=True
+                )
             if not retryable or attempt == retries:
                 break
             await asyncio.sleep(min(60.0, retry_after(resp) or (2**attempt + random.random())))

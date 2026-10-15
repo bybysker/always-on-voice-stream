@@ -190,7 +190,7 @@ async def test_mine_only_sink(cfg: Config, meeting: Meeting) -> None:
     everyone = _named("team", cfg)
     d, _, _ = _dispatcher(cfg, meeting, mine, everyone)
     await d.finalize(None)
-    assert mine.created_ids == ["A1", "A2", "A3"]
+    assert mine.created_ids == ["A1", "A2"]  # "Alex Chen" may be a client who shares your first name
     assert everyone.created_ids == ["A1", "A2", "A3", "A4", "A5", "A6"]
 
 

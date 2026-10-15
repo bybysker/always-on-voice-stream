@@ -7,6 +7,7 @@ so it can be persisted to JSON and streamed to the dashboard unchanged.
 
 from __future__ import annotations
 
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -163,12 +164,15 @@ class Item(BaseModel):
     """Sink name -> item revision that was last pushed (to detect updates)."""
 
     def is_mine(self, user_name: str) -> bool:
-        owner, me = (self.owner or "").strip().lower(), user_name.strip().lower()
+        owner, me = _name_key(self.owner or ""), _name_key(user_name)
         if not owner:  # blank owners (hand-edited or imported meetings) are nobody's
             return False
-        if owner in {"me", "i", "myself"}:
+        if owner in {"me", "i", "myself", "moi"}:
             return True
-        return bool(me) and (owner == me or owner.split()[0] == me.split()[0])
+        if not me:
+            return False
+        # "Alex" is you when you're "Alex Martin"; "Alex Dupont" (a client) is not you when you're "Alex"
+        return owner == me or (" " not in owner and owner == me.split()[0])
 
     def one_line(self) -> str:
         bits = [self.title]
@@ -177,6 +181,12 @@ class Item(BaseModel):
         if self.due_date or self.due_text:
             bits.append(f"due {self.due_date or self.due_text}")
         return " — ".join(bits)
+
+
+def _name_key(name: str) -> str:
+    """Case- and accent-insensitive form of a person's name ("Élodie " == "elodie")."""
+    folded = unicodedata.normalize("NFKD", name.strip().lower())
+    return " ".join("".join(c for c in folded if not unicodedata.combining(c)).split())
 
 
 def next_item_id(kind: ItemKind, existing: set[str]) -> str:

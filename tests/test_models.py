@@ -19,8 +19,12 @@ def _item(owner: str | None) -> Item:
     [
         ("Alex", "Alex", True),
         ("alex ", "Alex", True),
-        ("Alex Martin", "Alex", True),  # first names match
-        ("Alex", "Alex Martin", True),
+        ("Alex Martin", "Alex", False),  # could be a client who shares your first name
+        ("Alex Dupont", "Alex Martin", False),
+        ("Alex", "Alex Martin", True),  # people say your first name
+        ("Alex Martin", "alex martin", True),
+        ("Élodie", "Elodie Durand", True),  # accents don't matter
+        ("Moi", "Alex", True),
         ("me", "Alex", True),
         ("Myself", "", True),
         ("Sam", "Alex", False),

@@ -78,7 +78,11 @@ def not_retried(exc: SinkError) -> SinkError:
     of a create would make a duplicate. A failure that can't have done anything is returned as is."""
     if not exc.retryable:
         return exc
-    return SinkError(f"{exc}. It may have gone through anyway, so it isn't retried: check, then push it again from the dashboard if it's missing", retryable=False)
+    return SinkError(
+        f"{exc}. It may have gone through anyway, so it isn't retried: check, then push it again from the dashboard if it's missing",
+        retryable=False,
+        uncertain=True,
+    )
 
 
 def require_macos(what: str) -> None:
