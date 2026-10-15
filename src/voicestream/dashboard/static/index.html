@@ -1,0 +1,1059 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<title>voicestream</title>
+<link rel="icon" href="data:,">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f4f5f7;
+  --panel: #ffffff;
+  --sunken: #eef0f3;
+  --border: #e0e3e8;
+  --text: #1a1d23;
+  --muted: #5d6877;
+  --faint: #8b95a3;
+  --accent: #3253d1;
+  --on-accent: #ffffff;
+  --me: #2c58cf;
+  --me-bg: #eef3ff;
+  --others: #9c5409;
+  --others-bg: #fdf5ea;
+  --ok: #1d7a43;
+  --ok-bg: #e4f4ea;
+  --warn: #965800;
+  --warn-bg: #fcf0d9;
+  --err: #b42318;
+  --err-bg: #fdeceb;
+  --info: #2c58cf;
+  --info-bg: #e9efff;
+  --violet: #6a3dcc;
+  --violet-bg: #f0eaff;
+  --shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 1px 3px rgb(16 24 40 / 7%);
+  --radius: 10px;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1014;
+    --panel: #161920;
+    --sunken: #1e222a;
+    --border: #2a2f39;
+    --text: #e5e7eb;
+    --muted: #a1a9b6;
+    --faint: #6e7784;
+    --accent: #7d97ff;
+    --on-accent: #0e1014;
+    --me: #92b1ff;
+    --me-bg: #18213a;
+    --others: #f1b86f;
+    --others-bg: #2a2115;
+    --ok: #63d091;
+    --ok-bg: #15281d;
+    --warn: #f1b86f;
+    --warn-bg: #2a2115;
+    --err: #ff8d84;
+    --err-bg: #331a19;
+    --info: #92b1ff;
+    --info-bg: #18213a;
+    --violet: #b8a0ff;
+    --violet-bg: #231c38;
+    --shadow: 0 1px 2px rgb(0 0 0 / 45%);
+  }
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 var(--sans);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button {
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 7px;
+  padding: 5px 11px;
+  white-space: nowrap;
+}
+button:hover:not(:disabled) { background: var(--sunken); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
+button.danger { color: var(--err); }
+button.small { padding: 2px 9px; font-size: 12.5px; }
+button.link {
+  border: 0; background: none; padding: 0; color: var(--accent);
+  text-decoration: underline; text-underline-offset: 2px; font-size: 12.5px;
+  white-space: normal; text-align: left; overflow-wrap: anywhere;
+}
+button.link:hover:not(:disabled) { background: none; }
+input, select, textarea {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  background: var(--panel);
+  min-width: 0;
+}
+textarea { width: 100%; min-height: 88px; resize: vertical; line-height: 1.4; }
+
+/* ---------------------------------------------------------------- header */
+.top {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.heading { flex: 1 1 240px; min-width: 0; }
+.heading h1 { font-size: 17px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sub { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; color: var(--muted); font-size: 12.5px; }
+.sub .sep { color: var(--faint); }
+.mono { font-family: var(--mono); font-size: 12px; }
+.conn { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+.conn.live { background: var(--ok); }
+.conn.retry { background: var(--warn); }
+.conn.dead { background: var(--err); }
+.meters { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.meter { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.meter .dot { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--faint); flex: none; }
+.meter.speech .dot { background: var(--ok); border-color: var(--ok); }
+.meter .bar { width: 76px; height: 6px; border-radius: 3px; background: var(--sunken); overflow: hidden; }
+.meter .fill { display: block; height: 100%; width: 0; background: var(--faint); transition: width .12s linear; }
+.meter.speech .fill { background: var(--ok); }
+.stats { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12.5px; }
+.pill {
+  border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px;
+  background: var(--sunken); color: var(--muted); white-space: nowrap;
+}
+.cost { display: flex; align-items: center; gap: 7px; }
+.cost .track { width: 56px; height: 5px; border-radius: 3px; background: var(--border); overflow: hidden; }
+.cost .track span { display: block; height: 100%; width: 0; background: var(--ok); }
+.cost.warn { color: var(--warn); }
+.cost.warn .track span { background: var(--warn); }
+.cost.over { color: var(--err); }
+.cost.over .track span { background: var(--err); }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.banner {
+  margin: 10px 16px 0; padding: 8px 12px; border-radius: 8px;
+  background: var(--info-bg); border: 1px solid var(--border);
+}
+.banner.error { background: var(--err-bg); color: var(--err); }
+
+/* ------------------------------------------------------------------ panes */
+main {
+  flex: 1; min-height: 0;
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px;
+  padding: 14px 16px 16px;
+}
+.pane {
+  position: relative;
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.pane-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 9px 14px; border-bottom: 1px solid var(--border);
+}
+.pane-head h2 { margin: 0; font-size: 12.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.pane-head label { font-size: 12.5px; color: var(--muted); display: flex; gap: 5px; align-items: center; }
+.scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.empty { color: var(--faint); text-align: center; padding: 28px 16px; margin: 0; }
+@media (min-width: 900px) {
+  body { height: 100vh; }
+}
+@media (max-width: 899px) {
+  .top { position: static; }
+  main { grid-template-columns: 1fr; }
+  #transcript { max-height: 60vh; }
+}
+
+/* ------------------------------------------------------------- transcript */
+#transcript { padding: 8px 10px 14px; }
+.seg { display: flex; gap: 10px; padding: 5px 10px; margin: 2px 0; border-left: 3px solid transparent; border-radius: 0 7px 7px 0; }
+.seg .ts { flex: none; width: 46px; padding-top: 1px; color: var(--faint); font: 11.5px/1.7 var(--mono); }
+.seg .body { min-width: 0; overflow-wrap: anywhere; }
+.seg .spk { font-weight: 600; margin-right: 6px; }
+.seg.me { background: var(--me-bg); border-left-color: var(--me); }
+.seg.me .spk { color: var(--me); }
+.seg.others { border-left-color: var(--others); }
+.seg.others .spk { color: var(--others); }
+.seg.screen { color: var(--muted); font-size: 13px; border-left-color: var(--violet); }
+.seg.screen .spk { color: var(--violet); }
+.seg.partial { background: none; }
+.seg.partial .txt { font-style: italic; color: var(--muted); }
+.jump {
+  position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 18%);
+}
+
+/* ------------------------------------------------------------------ items */
+form.add { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+form.add .grow { flex: 1 1 200px; }
+form.add .narrow { flex: 1 1 100px; }
+.group { padding: 2px 14px 10px; }
+.group h3 {
+  display: flex; align-items: center; gap: 7px; margin: 12px 0 4px;
+  font-size: 12.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted);
+}
+.count { background: var(--sunken); border-radius: 999px; padding: 0 7px; font-size: 11.5px; letter-spacing: 0; }
+.none { color: var(--faint); font-size: 12.5px; margin: 4px 0 6px; }
+.card { border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; margin: 7px 0; background: var(--panel); }
+.card.dismissed { display: none; opacity: .6; }
+.show-dismissed .card.dismissed { display: block; }
+.card.dismissed .title { text-decoration: line-through; }
+.card-top { display: flex; align-items: baseline; gap: 8px; }
+.card .id { flex: none; color: var(--faint); font: 11.5px var(--mono); }
+.card .title { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.conf { flex: none; color: var(--faint); font-size: 11px; }
+.conf.low { color: var(--warn); }
+.meta { display: flex; flex-wrap: wrap; gap: 3px 10px; margin-top: 3px; color: var(--muted); font-size: 12.5px; }
+.meta .prio-high { color: var(--err); }
+.badges { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.badge {
+  font-size: 11.5px; border-radius: 999px; padding: 1px 8px;
+  background: var(--ok-bg); color: var(--ok); text-decoration: none;
+}
+a.badge:hover { text-decoration: underline; }
+details.evidence { margin-top: 6px; font-size: 13px; }
+details.evidence summary { cursor: pointer; color: var(--muted); font-size: 12px; width: max-content; }
+details.evidence p { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+blockquote {
+  margin: 6px 0 0; padding: 3px 10px; border-left: 3px solid var(--border);
+  color: var(--muted); font-style: italic; overflow-wrap: anywhere;
+}
+.card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.agent { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.agent-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12.5px; }
+.hint { color: var(--muted); font-size: 12.5px; margin: 4px 0 0; }
+.chip { font-size: 11.5px; font-weight: 600; border-radius: 999px; padding: 1px 8px; }
+.chip.suggested { background: var(--violet-bg); color: var(--violet); }
+.chip.queued { background: var(--warn-bg); color: var(--warn); }
+.chip.running { background: var(--info-bg); color: var(--info); animation: pulse 1.4s ease-in-out infinite; }
+.chip.done { background: var(--ok-bg); color: var(--ok); }
+.chip.failed { background: var(--err-bg); color: var(--err); }
+.chip.rejected { background: var(--sunken); color: var(--faint); }
+@keyframes pulse { 50% { opacity: .5; } }
+@media (prefers-reduced-motion: reduce) { .chip.running { animation: none; } .meter .fill { transition: none; } }
+.summary {
+  margin-top: 6px; padding: 7px 9px; border-radius: 6px; background: var(--sunken);
+  font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow-y: auto;
+}
+.error-text { color: var(--err); font-size: 12.5px; margin: 6px 0 0; overflow-wrap: anywhere; }
+.files { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; margin-top: 6px; }
+form.edit, form.prompt { display: flex; flex-direction: column; gap: 6px; }
+form.edit .row { display: flex; flex-wrap: wrap; gap: 6px; }
+form.edit .row input { flex: 1 1 120px; }
+
+/* ------------------------------------------------------- toasts, viewer */
+#toasts {
+  position: fixed; right: 16px; bottom: 16px; z-index: 20;
+  display: flex; flex-direction: column; gap: 8px;
+  width: min(400px, calc(100vw - 32px));
+}
+.toast {
+  background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--info);
+  border-radius: 8px; padding: 9px 12px; font-size: 13px; cursor: pointer;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 16%); overflow-wrap: anywhere;
+}
+.toast strong { display: block; margin-bottom: 2px; }
+.toast a { color: var(--accent); margin-left: 6px; }
+.toast.ok { border-left-color: var(--ok); }
+.toast.warn { border-left-color: var(--warn); }
+.toast.error { border-left-color: var(--err); }
+dialog {
+  width: min(900px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 0;
+  color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+}
+dialog::backdrop { background: rgb(0 0 0 / 45%); }
+.viewer-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 9px 14px; border-bottom: 1px solid var(--border);
+}
+.viewer-head span { font: 12px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+dialog pre {
+  margin: 0; padding: 14px; max-height: calc(100vh - 120px); overflow: auto;
+  font: 13px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="heading">
+    <h1 id="title">voicestream</h1>
+    <div class="sub">
+      <span class="conn" id="conn"></span><span id="conn-text">connecting…</span>
+      <span class="sep">·</span><span id="phase"></span>
+      <span class="mono" id="elapsed"></span>
+    </div>
+  </div>
+  <div class="meters" id="meters" aria-label="Input levels"></div>
+  <div class="stats">
+    <span class="pill" id="mode">extraction</span>
+    <span class="pill cost" id="cost"><span id="cost-text">$0.000 today</span><span class="track"><span id="cost-fill"></span></span></span>
+  </div>
+  <div class="actions">
+    <button type="button" id="notes" hidden>View notes</button>
+    <button type="button" id="extract" disabled title="Look for new items in the transcript now">Extract now</button>
+    <button type="button" id="end" class="danger" disabled>End meeting</button>
+  </div>
+</header>
+<div class="banner" id="banner" role="status" hidden></div>
+
+<main>
+  <section class="pane" aria-labelledby="transcript-heading">
+    <div class="pane-head"><h2 id="transcript-heading">Transcript</h2></div>
+    <div class="scroll" id="transcript" role="log">
+      <p class="empty" id="transcript-empty">Listening. A meeting starts on the first speech.</p>
+      <div id="lines"></div>
+      <div id="partials" aria-hidden="true"></div>
+    </div>
+    <button type="button" class="jump small" id="jump" hidden>Jump to live</button>
+  </section>
+
+  <section class="pane" aria-labelledby="items-heading">
+    <div class="pane-head">
+      <h2 id="items-heading">Items</h2>
+      <label><input type="checkbox" id="show-dismissed" autocomplete="off"> Show dismissed</label>
+    </div>
+    <div class="scroll">
+      <form class="add" id="add-form" autocomplete="off">
+        <select id="add-kind" aria-label="Kind">
+          <option value="action">Action</option>
+          <option value="decision">Decision</option>
+          <option value="question">Question</option>
+          <option value="note">Note</option>
+        </select>
+        <input class="grow" id="add-title" placeholder="Add an item by hand…" aria-label="Title" required maxlength="200">
+        <input class="narrow" id="add-owner" placeholder="Owner" aria-label="Owner" maxlength="80">
+        <input class="narrow" id="add-due" placeholder="Due (e.g. Friday)" aria-label="Due" maxlength="80">
+        <button type="submit" id="add-submit" class="primary" disabled>Add</button>
+      </form>
+      <div id="groups"></div>
+    </div>
+  </section>
+</main>
+
+<div id="toasts" aria-live="polite"></div>
+<dialog id="viewer" aria-labelledby="viewer-name">
+  <div class="viewer-head"><span id="viewer-name"></span><button type="button" class="small" id="viewer-close">Close</button></div>
+  <pre id="viewer-body"></pre>
+</dialog>
+
+<script>
+'use strict';
+// Everything shown here (transcripts, item titles, agent output) is untrusted text, so the
+// page builds DOM nodes and assigns textContent only; no HTML strings are ever parsed.
+
+const KINDS = { action: 'Action items', decision: 'Decisions', question: 'Open questions', note: 'Notes' };
+const EVENT_TYPES = [
+  'state', 'assistant.started', 'assistant.stopped', 'meeting.started', 'meeting.updated', 'meeting.ending',
+  'meeting.ended', 'meeting.notes_updated', 'segment', 'transcript.partial', 'level', 'extraction', 'item.added',
+  'item.updated', 'agent.updated', 'item.pushed', 'sink.error', 'notes.pushed', 'cost', 'screen', 'source.error',
+  'agent.budget',
+];
+const MODES = { claude: 'Claude', llm: 'Claude', heuristic: 'offline', 'heuristic-budget': 'offline (budget reached)' };
+const PHASES = { idle: 'listening', live: 'in a meeting', ending: 'wrapping up…', ended: 'meeting ended' };
+const RUN_LABELS = { suggested: 'Run agent', failed: 'Retry', rejected: 'Run anyway', done: 'Run again' };
+const $ = (id) => document.getElementById(id);
+
+const S = {
+  token: takeToken(),
+  meeting: null,          // {id, title, started_at, ended_at}
+  phase: 'idle',
+  notes: null,            // notes.md of the meeting on screen, once it has ended
+  lastMeeting: null,
+  sinks: [],
+  stopped: false,
+  follow: true,           // keep the transcript scrolled to the newest line
+  items: new Map(),
+  cards: new Map(),
+  seen: new Set(),        // segment / screen-note ids already on screen
+  partials: new Map(),    // source -> {speaker, text, at}
+  meters: new Map(),      // source -> {el, fill, at}
+  editing: new Set(),     // item ids with an open form: left alone while you type
+  expanded: new Set(),    // item ids with their evidence open
+};
+
+// The CLI prints the URL with ?token=…; keep it for this tab and drop it from the address
+// bar so it doesn't show up in screen shares or browser history.
+function takeToken() {
+  const url = new URL(location.href);
+  let token = url.searchParams.get('token') || '';
+  try {
+    if (token) {
+      sessionStorage.setItem('voicestream-token', token);
+      url.searchParams.delete('token');
+      history.replaceState(null, '', url.pathname + url.search + url.hash);
+    } else {
+      token = sessionStorage.getItem('voicestream-token') || '';
+    }
+  } catch (_) { /* storage blocked: the token simply stays in the URL */ }
+  return token;
+}
+
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs || {})) {
+    if (value == null || value === false) continue;
+    if (key === 'class') el.className = value;
+    else if (key.startsWith('on')) el.addEventListener(key.slice(2), value);
+    else el.setAttribute(key, value === true ? '' : String(value));
+  }
+  for (const child of children.flat(Infinity)) {
+    if (child != null && child !== false && child !== '') el.append(child instanceof Node ? child : String(child));
+  }
+  return el;
+}
+
+// ------------------------------------------------------------------ formatting
+
+function fmtTs(seconds) {
+  const s = Math.max(0, Math.floor(seconds || 0));
+  const pad = (n) => String(n).padStart(2, '0');
+  const hh = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60), ss = s % 60;
+  return hh ? `${hh}:${pad(mm)}:${pad(ss)}` : `${pad(mm)}:${pad(ss)}`;
+}
+function fmtClock(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+function fmtDue(item) {
+  if (item.due_date) {
+    const d = new Date(item.due_date + 'T12:00:00');
+    if (!isNaN(d)) return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+  }
+  return item.due_text || '';
+}
+const money = (x) => '$' + (x || 0).toFixed((x || 0) < 1 ? 3 : 2);
+function safeUrl(ref) {
+  try {
+    const url = new URL(ref);
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : null;
+  } catch (_) { return null; }
+}
+const basename = (p) => String(p).split(/[\\/]/).pop();
+function joinPath(dir, name) {
+  const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/';
+  return dir.replace(/[\\/]+$/, '') + sep + name;
+}
+function relPath(file, workspace) {
+  return workspace && file.startsWith(workspace) ? file.slice(workspace.length).replace(/^[\\/]+/, '') : basename(file);
+}
+
+// ------------------------------------------------------------------------- api
+
+class ApiError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+
+async function api(method, path, body) {
+  const init = { method, cache: 'no-store', headers: { 'X-Voicestream-Token': S.token } };
+  if (body !== undefined) {
+    init.headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(body);
+  }
+  let res;
+  try { res = await fetch(path, init); } catch (_) { throw new ApiError(0, 'voicestream is not reachable'); }
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    if (res.status === 401) authFailed();
+    throw new ApiError(res.status, (data && data.error) || res.statusText);
+  }
+  return data;
+}
+
+function itemPath(item, action) {
+  const query = S.meeting ? '?meeting_id=' + encodeURIComponent(S.meeting.id) : '';
+  return '/api/items/' + encodeURIComponent(item.id) + (action ? '/' + action : '') + query;
+}
+
+// Runs a request for a button (disabled meanwhile); failures become toasts.
+async function act(button, fn) {
+  if (button) button.disabled = true;
+  try { return await fn(); }
+  catch (err) { toast(err.message, 'error'); }
+  finally { if (button) button.disabled = false; }
+}
+
+function toast(text, kind = 'info', title = '', href = null) {
+  const url = href && safeUrl(href);
+  const el = h('div', { class: 'toast ' + kind, role: kind === 'error' ? 'alert' : 'status' },
+    title && h('strong', {}, title), text,
+    url && h('a', { href: url, target: '_blank', rel: 'noopener noreferrer' }, 'Open'));
+  el.addEventListener('click', () => el.remove());
+  const box = $('toasts');
+  box.append(el);
+  while (box.children.length > 5) box.firstChild.remove();
+  setTimeout(() => el.remove(), kind === 'error' ? 12000 : 6000);
+}
+
+function banner(text, kind = '') {
+  $('banner').className = 'banner ' + kind;
+  $('banner').textContent = text;
+  $('banner').hidden = !text;
+}
+
+async function viewFile(path) {
+  try {
+    const res = await fetch('/api/file?path=' + encodeURIComponent(path), {
+      headers: { 'X-Voicestream-Token': S.token }, cache: 'no-store',
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error((data && data.error) || res.statusText);
+    }
+    $('viewer-body').textContent = await res.text();
+    $('viewer-name').textContent = path;
+    $('viewer').showModal();
+    $('viewer-body').scrollTop = 0;
+  } catch (err) {
+    toast(err.message, 'error', 'Cannot open ' + basename(path));
+  }
+}
+
+// ------------------------------------------------------------------ connection
+
+let source = null, retryMs = 1000, retryTimer = null;
+
+function setConn(cls, text) {
+  $('conn').className = 'conn ' + cls;
+  $('conn-text').textContent = text;
+}
+
+function connect() {
+  clearTimeout(retryTimer);
+  if (source) source.close();
+  const es = source = new EventSource('/api/events?token=' + encodeURIComponent(S.token));
+  const onMessage = (e) => {
+    let ev;
+    try { ev = JSON.parse(e.data); } catch (_) { return; }
+    try { handle(ev); } catch (err) { console.error('voicestream: cannot handle', ev.type, err); }
+  };
+  for (const type of EVENT_TYPES) es.addEventListener(type, onMessage);
+  es.onerror = () => {
+    if (S.stopped) return es.close();
+    setConn('retry', 'reconnecting…');
+    if (es.readyState !== EventSource.CLOSED) return;  // the browser retries by itself
+    // it gave up (server gone, or an HTTP error): check the token, then retry with backoff
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(async () => {
+      try { await api('GET', '/api/state'); } catch (err) { if (err.status === 401) return; }
+      retryMs = Math.min(retryMs * 2, 15000);
+      connect();
+    }, retryMs);
+  };
+}
+
+function authFailed() {
+  clearTimeout(retryTimer);
+  if (source) source.close();
+  setConn('dead', 'not connected');
+  banner('This page needs the dashboard link printed in the terminal: it carries a token that changes on every run.', 'error');
+}
+
+// ---------------------------------------------------------------------- events
+
+function handle(ev) {
+  const d = ev.data || {};
+  const otherMeeting = d.meeting_id !== undefined && (!S.meeting || d.meeting_id !== S.meeting.id);
+  if (otherMeeting && ev.type !== 'meeting.started') return;  // e.g. late agent results of an older meeting
+  switch (ev.type) {
+    case 'state':
+      retryMs = 1000;
+      setConn('live', 'live');
+      return applyState(d);
+    case 'assistant.started':
+      setMode(d.extraction);
+      setMeters(d.sources || []);
+      return;
+    case 'assistant.stopped':
+      S.stopped = true;
+      if (source) source.close();
+      setCost(d.cost);
+      setConn('dead', 'stopped');
+      renderHeader();
+      return banner('voicestream has stopped listening. Start it again from the terminal.');
+    case 'meeting.started':
+      if (S.meeting && S.meeting.id === d.meeting_id) return;
+      return startMeeting({ id: d.meeting_id, title: d.title, started_at: ev.ts });
+    case 'meeting.updated':
+      if (d.title) S.meeting.title = d.title;
+      return renderHeader();
+    case 'meeting.ending':
+      S.phase = 'ending';
+      return renderHeader();
+    case 'meeting.ended':
+      S.phase = 'ended';
+      S.notes = d.notes || null;
+      S.meeting.ended_at = ev.ts;
+      if (d.title) S.meeting.title = d.title;
+      renderHeader();
+      return toast(`${d.items || 0} items. The notes are written.`, 'ok', 'Meeting ended');
+    case 'meeting.notes_updated':
+      S.notes = d.notes || S.notes;
+      renderHeader();
+      return toast('The notes now include the late agent results.', 'ok', 'Notes updated');
+    case 'segment':
+      return addSegment(d.segment);
+    case 'screen':
+      return addScreen(d.note);
+    case 'transcript.partial':
+      if (d.text) S.partials.set(d.source, { speaker: d.speaker, text: d.text, at: Date.now() });
+      else S.partials.delete(d.source);
+      return renderPartials();
+    case 'level':
+      return setLevel(d);
+    case 'extraction':
+      return setMode(d.mode, d);
+    case 'item.added':
+    case 'item.updated':
+    case 'agent.updated':
+      return upsertItem(d.item);
+    case 'item.pushed': {
+      const item = S.items.get(d.item_id);
+      if (!item) return;
+      item.pushed = { ...item.pushed, [d.sink]: d.ref || '' };
+      return renderItem(item);
+    }
+    case 'notes.pushed':
+      return toast(d.sink, 'ok', 'Notes pushed', d.ref);
+    case 'sink.error':
+      return toast(d.error || 'unknown error', 'error', `${d.sink}${d.item_id ? ' (' + d.item_id + ')' : ''}: push failed`);
+    case 'source.error':
+      return toast(d.error || 'unknown error', 'error', `${d.source}: capture problem`);
+    case 'agent.budget':
+      return toast(`${d.item_id} was not started automatically. Run it yourself if it's worth it.`, 'warn', 'Daily agent budget reached');
+    case 'cost':
+      return setCost(d);
+  }
+}
+
+function applyState(st) {
+  S.sinks = st.sinks || [];
+  S.lastMeeting = st.last_meeting || null;
+  setMode(st.extraction);
+  setMeters(st.sources || []);
+  setCost(st.cost);
+  const m = st.meeting;
+  if (m) {
+    if (!S.meeting || S.meeting.id !== m.id) startMeeting(m);
+    else if (S.phase !== 'ending') S.phase = 'live';
+    S.meeting.title = m.title || S.meeting.title;
+    const timeline = [
+      ...(m.segments || []).map((s) => [s.t_start, () => addSegment(s)]),
+      ...(m.screen_notes || []).map((n) => [n.t, () => addScreen(n)]),
+    ].sort((a, b) => a[0] - b[0]);
+    for (const [, add] of timeline) add();
+    for (const item of Object.values(m.items || {})) upsertItem(item);
+  } else if (S.meeting && S.phase !== 'ended') {
+    // it ended while we were disconnected: keep it on screen
+    S.phase = 'ended';
+    if (S.lastMeeting && S.lastMeeting.id === S.meeting.id) S.notes = joinPath(S.lastMeeting.dir, 'notes.md');
+  }
+  for (const item of S.items.values()) renderItem(item);  // sinks may have changed
+  renderHeader();
+}
+
+function startMeeting(m) {
+  S.meeting = { id: m.id, title: m.title || null, started_at: m.started_at, ended_at: m.ended_at || null };
+  S.phase = 'live';
+  S.notes = null;
+  for (const set of [S.items, S.cards, S.seen, S.partials, S.editing, S.expanded]) set.clear();
+  $('lines').replaceChildren();
+  $('partials').replaceChildren();
+  for (const group of Object.values(GROUPS)) group.cards.replaceChildren();
+  S.follow = true;
+  $('jump').hidden = true;
+  renderCounts();
+  renderHeader();
+}
+
+// ------------------------------------------------------------------ transcript
+
+function line(cls, ts, title, speaker, text) {
+  return h('div', { class: 'seg ' + cls },
+    h('span', { class: 'ts', title }, ts),
+    h('div', { class: 'body' }, h('span', { class: 'spk' }, speaker), h('span', { class: 'txt' }, text)));
+}
+
+function append(el) {
+  $('lines').append(el);
+  $('transcript-empty').hidden = true;
+  stick();
+}
+
+function stick() {
+  if (S.follow) $('transcript').scrollTop = $('transcript').scrollHeight;
+  else $('jump').hidden = false;
+}
+
+function addSegment(seg) {
+  if (!seg || S.seen.has(seg.id)) return;
+  S.seen.add(seg.id);
+  const mine = seg.source === 'mic';
+  if (S.partials.delete(seg.source)) renderPartials();
+  append(line(mine ? 'me' : 'others', fmtTs(seg.t_start), fmtClock(seg.wall_time), seg.speaker || (mine ? 'Me' : 'Others'), seg.text));
+}
+
+function addScreen(note) {
+  if (!note || S.seen.has(note.id)) return;
+  S.seen.add(note.id);
+  append(line('screen', fmtTs(note.t), fmtClock(note.wall_time), 'Screen', note.description));
+}
+
+function renderPartials() {
+  $('partials').replaceChildren(...[...S.partials].map(([src, p]) =>
+    line('partial ' + (src === 'mic' ? 'me' : 'others'), '', '', p.speaker || src, p.text + '…')));
+  stick();
+}
+
+$('transcript').addEventListener('scroll', () => {
+  const t = $('transcript');
+  S.follow = t.scrollHeight - t.scrollTop - t.clientHeight < 40;
+  if (S.follow) $('jump').hidden = true;
+});
+$('jump').addEventListener('click', () => {
+  S.follow = true;
+  stick();
+  $('jump').hidden = true;
+});
+
+// ---------------------------------------------------------------------- header
+
+function setMeters(sources) {
+  for (const desc of sources) meter(String(desc).split(':')[0].trim(), String(desc));
+}
+
+function meter(name, desc) {
+  let m = S.meters.get(name);
+  if (!m) {
+    const fill = h('span', { class: 'fill' });
+    const el = h('div', { class: 'meter', title: desc || name },
+      h('span', { class: 'dot' }), h('span', {}, name), h('span', { class: 'bar' }, fill));
+    $('meters').append(el);
+    m = { el, fill, at: 0 };
+    S.meters.set(name, m);
+  } else if (desc) {
+    m.el.title = desc;
+  }
+  return m;
+}
+
+function setLevel(d) {
+  const m = meter(d.source);
+  const db = typeof d.db === 'number' ? d.db : -90;  // -inf arrives as null
+  m.fill.style.width = Math.round(Math.max(0, Math.min(1, (db + 60) / 60)) * 100) + '%';
+  m.el.classList.toggle('speech', !!d.speech);
+  m.at = Date.now();
+}
+
+function setMode(mode, extraction) {
+  if (mode) $('mode').textContent = 'Extraction: ' + (MODES[mode] || mode);
+  if (extraction) {
+    const added = (extraction.added || []).length, updated = (extraction.updated || []).length;
+    $('mode').title = `Last run ${fmtClock(new Date())} (${extraction.reason}): ${added} added, ${updated} updated`;
+  }
+}
+
+function setCost(c) {
+  if (!c || !c.today) return;
+  const t = c.today, run = c.session || {};
+  const spent = (t.stt_usd || 0) + (t.llm_usd || 0), budget = c.daily_budget_usd || 0;  // agents have their own cap
+  const frac = budget > 0 ? spent / budget : 0;
+  $('cost-text').textContent = `${money(spent)} of ${money(budget)} today`;
+  $('cost-fill').style.width = Math.min(100, frac * 100).toFixed(1) + '%';
+  $('cost').classList.toggle('warn', frac >= 0.8 && frac < 1);
+  $('cost').classList.toggle('over', frac >= 1);
+  $('cost').title = [
+    `Speech-to-text ${money(t.stt_usd)} (${(t.stt_minutes || 0).toFixed(1)} min)`,
+    `Claude ${money(t.llm_usd)}`,
+    `Agents ${money(t.agents_usd)} of ${money(c.agents_daily_budget_usd)}`,
+    `This run ${money(run.total_usd)}`,
+  ].join('\n');
+}
+
+function renderHeader() {
+  const m = S.meeting;
+  const title = m ? m.title || 'Untitled meeting' : 'Waiting for a meeting';
+  $('title').textContent = title;
+  document.title = (m ? title + ' · ' : '') + 'voicestream';
+  $('phase').textContent = PHASES[S.phase];
+  const live = S.phase === 'live' && !S.stopped;
+  $('end').disabled = $('extract').disabled = $('add-submit').disabled = !live;
+  const notes = S.phase === 'ended' ? S.notes : !m && S.lastMeeting ? joinPath(S.lastMeeting.dir, 'notes.md') : null;
+  $('notes').hidden = !notes;
+  $('notes').textContent = m ? 'View notes' : 'Last meeting notes';
+  $('notes').dataset.path = notes || '';
+  $('transcript-empty').textContent = m ? 'Nothing said yet.' : 'Listening. A meeting starts on the first speech.';
+  tick();
+}
+
+function tick() {
+  const m = S.meeting;
+  $('elapsed').textContent = m && m.started_at
+    ? fmtTs(((m.ended_at ? new Date(m.ended_at) : new Date()) - new Date(m.started_at)) / 1000)
+    : '';
+  const now = Date.now();
+  for (const mt of S.meters.values()) {
+    if (now - mt.at > 2500) { mt.fill.style.width = '0%'; mt.el.classList.remove('speech'); }
+  }
+  let stale = false;
+  for (const [src, p] of S.partials) {
+    if (now - p.at > 10000) { S.partials.delete(src); stale = true; }
+  }
+  if (stale) renderPartials();
+}
+
+// ----------------------------------------------------------------------- items
+
+const GROUPS = {};
+for (const [kind, label] of Object.entries(KINDS)) {
+  const cards = h('div', {}), count = h('span', { class: 'count' }, '0'), none = h('p', { class: 'none' }, 'None yet');
+  $('groups').append(h('section', { class: 'group' }, h('h3', {}, label, count), cards, none));
+  GROUPS[kind] = { cards, count, none };
+}
+
+function renderCounts() {
+  const all = $('show-dismissed').checked;
+  for (const [kind, g] of Object.entries(GROUPS)) {
+    const items = [...S.items.values()].filter((i) => i.kind === kind);
+    const live = items.filter((i) => !i.dismissed).length;
+    g.count.textContent = String(live);
+    g.none.hidden = (all ? items.length : live) > 0;
+  }
+}
+
+function upsertItem(item) {
+  if (!item || !item.id) return;
+  const old = S.items.get(item.id);
+  if (old && (item.revision || 0) < (old.revision || 0)) return;  // an older snapshot
+  S.items.set(item.id, item);
+  renderItem(item);
+}
+
+function renderItem(item) {
+  if (S.editing.has(item.id)) return;  // re-rendered when the form closes
+  const card = buildCard(item);
+  const old = S.cards.get(item.id);
+  if (old && old.isConnected) old.replaceWith(card);
+  else (GROUPS[item.kind] || GROUPS.note).cards.append(card);
+  S.cards.set(item.id, card);
+  renderCounts();
+}
+
+function closeForm(id) {
+  S.editing.delete(id);
+  const item = S.items.get(id);
+  if (item) renderItem(item);
+}
+
+function buildCard(item) {
+  const conf = Math.round((item.confidence ?? 0) * 100);
+  return h('article', { class: 'card' + (item.dismissed ? ' dismissed' : '') },
+    h('div', { class: 'card-top' },
+      h('span', { class: 'id' }, item.id),
+      h('span', { class: 'title' }, item.title),
+      h('span', { class: 'conf' + (conf < 60 ? ' low' : ''), title: 'How sure the extractor is' }, conf + '%')),
+    meta(item),
+    badges(item),
+    evidence(item),
+    item.agent && agentBlock(item),
+    actions(item));
+}
+
+function meta(item) {
+  const due = fmtDue(item);
+  const bits = [
+    item.owner && h('span', {}, '@' + item.owner),
+    due && h('span', { title: [item.due_text, item.due_date].filter(Boolean).join(' · ') }, 'due ' + due),
+    item.priority && h('span', { class: 'prio-' + item.priority }, item.priority + ' priority'),
+    item.status && item.status !== 'open' && h('span', {}, item.status),
+    item.dismissed && h('span', {}, 'dismissed'),
+  ].filter(Boolean);
+  return bits.length ? h('div', { class: 'meta' }, bits) : null;
+}
+
+function badges(item) {
+  const pushed = Object.entries(item.pushed || {});
+  if (!pushed.length) return null;
+  return h('div', { class: 'badges' }, pushed.map(([sink, ref]) => {
+    const url = safeUrl(ref);
+    return url
+      ? h('a', { class: 'badge', title: ref, href: url, target: '_blank', rel: 'noopener noreferrer' }, '✓ ' + sink)
+      : h('span', { class: 'badge', title: ref || sink }, '✓ ' + sink);
+  }));
+}
+
+function evidence(item) {
+  if (!item.evidence && !item.detail) return null;
+  const box = h('details', { class: 'evidence' },
+    h('summary', {}, item.evidence ? 'Evidence' : 'Details'),
+    item.detail && h('p', {}, item.detail),
+    item.evidence && h('blockquote', {}, '“' + item.evidence + '”'));
+  box.open = S.expanded.has(item.id);
+  box.addEventListener('toggle', () => (box.open ? S.expanded.add(item.id) : S.expanded.delete(item.id)));
+  return box;
+}
+
+function agentBlock(item) {
+  const a = item.agent, status = a.status;
+  const box = h('div', { class: 'agent' },
+    h('div', { class: 'agent-head' },
+      h('span', { class: 'hint' }, 'Agent'),
+      h('span', { class: 'chip ' + status }, status),
+      a.explicit && h('span', { class: 'hint' }, 'you asked for this'),
+      status === 'running' && a.started_at && h('span', { class: 'hint' }, 'since ' + fmtClock(a.started_at)),
+      a.cost_usd > 0 && h('span', { class: 'hint' }, money(a.cost_usd))),
+    status === 'suggested' && a.rationale && h('p', { class: 'hint' }, a.rationale),
+    a.result_summary && h('div', { class: 'summary' }, a.result_summary),
+    a.error && h('p', { class: 'error-text' }, a.error),
+    (a.result_files || []).length > 0 && h('div', { class: 'files' }, a.result_files.map((f) =>
+      h('button', { type: 'button', class: 'link', title: f, onclick: () => viewFile(f) }, relPath(f, a.workspace)))));
+  const buttons = [
+    RUN_LABELS[status] && h('button', {
+      type: 'button', class: 'small' + (status === 'suggested' ? ' primary' : ''), onclick: () => openPrompt(item, box),
+    }, RUN_LABELS[status] + '…'),
+    (status === 'suggested' || status === 'failed') && h('button', {
+      type: 'button', class: 'small', onclick: (e) => act(e.currentTarget, () => api('POST', itemPath(item, 'agent/reject'))),
+    }, 'Reject'),
+  ].filter(Boolean);
+  if (buttons.length) box.append(h('div', { class: 'card-actions' }, buttons));
+  return box;
+}
+
+function openPrompt(item, box) {
+  S.editing.add(item.id);
+  const brief = h('textarea', { 'aria-label': 'Brief for the agent' }, item.agent.prompt || '');
+  const run = h('button', { type: 'submit', class: 'small primary' }, 'Run');
+  const form = h('form', { class: 'prompt' },
+    h('span', { class: 'hint' }, 'What the agent will be asked to do (edit it first if you like):'),
+    brief,
+    h('div', { class: 'card-actions' }, run, h('button', { type: 'button', class: 'small', onclick: () => closeForm(item.id) }, 'Cancel')));
+  form.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeForm(item.id); });
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const current = (S.items.get(item.id) || item).agent || {};
+    const prompt = brief.value.trim();
+    act(run, async () => {
+      await api('POST', itemPath(item, 'agent/run'), prompt && prompt !== current.prompt ? { prompt } : {});
+      closeForm(item.id);
+    });
+  });
+  box.replaceChildren(form);
+  brief.focus();
+}
+
+function actions(item) {
+  const pushedTo = Object.keys(item.pushed || {});
+  return h('div', { class: 'card-actions' },
+    !item.dismissed && h('button', {
+      type: 'button', class: 'small', disabled: !S.sinks.length,
+      title: S.sinks.length ? 'Send to ' + S.sinks.join(', ') : 'No sinks are configured',
+      onclick: (e) => push(item, e.currentTarget),
+    }, pushedTo.length ? 'Push update' : 'Push'),
+    h('button', {
+      type: 'button', class: 'small',
+      onclick: (e) => act(e.currentTarget, () => api('POST', itemPath(item, item.dismissed ? 'restore' : 'dismiss'))),
+    }, item.dismissed ? 'Restore' : 'Dismiss'),
+    !item.dismissed && h('button', { type: 'button', class: 'small', onclick: () => openEdit(item) }, 'Edit'));
+}
+
+function push(item, button) {
+  act(button, async () => {
+    const { results } = await api('POST', itemPath(item, 'push'));
+    const entries = Object.entries(results || {});
+    const ok = entries.filter(([, ref]) => ref !== 'error').map(([sink]) => sink);
+    if (ok.length) toast(`${item.id} → ${ok.join(', ')}`, 'ok', 'Pushed');
+    else if (!entries.length) toast(`None of your sinks takes ${item.kind} items.`, 'warn');
+    // failures arrive as sink.error events, with the reason
+  });
+}
+
+function openEdit(item) {
+  const card = S.cards.get(item.id);
+  if (!card) return;
+  S.editing.add(item.id);
+  const title = h('input', { value: item.title, 'aria-label': 'Title', required: true, maxlength: 200 });
+  const owner = h('input', { value: item.owner || '', placeholder: 'Owner', 'aria-label': 'Owner', maxlength: 80 });
+  const due = h('input', { value: item.due_text || item.due_date || '', placeholder: 'Due (e.g. Friday)', 'aria-label': 'Due', maxlength: 80 });
+  const save = h('button', { type: 'submit', class: 'small primary' }, 'Save');
+  const form = h('form', { class: 'edit' },
+    title, h('div', { class: 'row' }, owner, due),
+    h('div', { class: 'card-actions' }, save, h('button', { type: 'button', class: 'small', onclick: () => closeForm(item.id) }, 'Cancel')));
+  form.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeForm(item.id); });
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const cur = S.items.get(item.id) || item;
+    const changes = {};
+    if (title.value.trim() !== cur.title) changes.title = title.value.trim();
+    if (owner.value.trim() !== (cur.owner || '')) changes.owner = owner.value.trim();
+    if (due.value.trim() !== (cur.due_text || cur.due_date || '')) changes.due_text = due.value.trim();
+    if (!Object.keys(changes).length) return closeForm(item.id);
+    act(save, async () => {
+      upsertItem(await api('PATCH', itemPath(item), changes));
+      closeForm(item.id);
+    });
+  });
+  card.replaceChildren(form);
+  title.focus();
+}
+
+// -------------------------------------------------------------------- controls
+
+$('add-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const form = e.currentTarget;
+  const body = { kind: $('add-kind').value, title: $('add-title').value.trim() };
+  if (!body.title) return;
+  const owner = $('add-owner').value.trim(), due = $('add-due').value.trim();
+  if (owner) body.owner = owner;
+  if (due) body.due_text = due;
+  act($('add-submit'), async () => {
+    upsertItem(await api('POST', '/api/items', body));
+    form.reset();
+    $('add-title').focus();
+  }).then(renderHeader);
+});
+
+$('end').addEventListener('click', (e) => {
+  if (!confirm('End this meeting now? voicestream writes the notes and pushes the items.')) return;
+  act(e.currentTarget, async () => {
+    await api('POST', '/api/meeting/end');
+    S.phase = 'ending';
+  }).then(renderHeader);
+});
+
+$('extract').addEventListener('click', (e) => {
+  act(e.currentTarget, async () => {
+    await api('POST', '/api/extract');
+    toast('Extraction finished.', 'ok');
+  }).then(renderHeader);
+});
+
+$('notes').addEventListener('click', () => viewFile($('notes').dataset.path));
+$('viewer-close').addEventListener('click', () => $('viewer').close());
+$('show-dismissed').addEventListener('change', (e) => {
+  document.body.classList.toggle('show-dismissed', e.currentTarget.checked);
+  renderCounts();
+});
+
+renderHeader();
+setInterval(tick, 1000);
+if (S.token) connect(); else authFailed();
+</script>
+</body>
+</html>
