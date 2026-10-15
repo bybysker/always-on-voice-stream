@@ -140,8 +140,9 @@ def origin(url: str) -> str:
 
 
 def redacted(exc: SinkError, url: str) -> SinkError:
-    """``exc`` with the secret ``url`` cut down to its origin."""
-    return SinkError(str(exc).replace(url, f"{origin(url)}/…"), retryable=exc.retryable)
+    """``exc`` with the secret ``url`` cut down to its origin (its flags kept: an uncertain create must
+    stay uncertain, or the dispatcher would send it again after the next edit)."""
+    return SinkError(str(exc).replace(url, f"{origin(url)}/…"), retryable=exc.retryable, uncertain=exc.uncertain)
 
 
 def delivery_id(*parts: str) -> str:

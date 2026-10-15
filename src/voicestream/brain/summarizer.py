@@ -8,6 +8,7 @@ from datetime import date, datetime
 
 from ..config import Config
 from ..models import FollowUpEmail, Item, ItemKind, ItemStatus, Meeting, fmt_ts
+from ..transcribe.echo import words
 from .llm import LLM, LLMError, text_block
 from .prompts import SUMMARY_SYSTEM, meeting_context, render_items, render_screen, render_segment
 from .schema import WireSummary, wire_new_to_item, wire_update_to_update
@@ -57,6 +58,10 @@ async def summarize(
                 max_tokens=8000,
                 effort=cfg.brain.summary_effort,
             )
+            if wire.participants:
+                # the whole meeting tells who took part better than the live pass, which may have kept
+                # someone who was only mentioned (and sinks like HubSpot file the notes on these people)
+                meeting.participants = []
             tracker.apply(
                 ExtractionResult(
                     # found after the fact: never a live voice command that may auto-run an agent
@@ -70,14 +75,42 @@ async def summarize(
                 meeting.title = wire.title.strip()[:120]
             meeting.tldr = wire.tldr.strip() or None
             meeting.notes_body = wire.notes_markdown.strip() or None
-            meeting.language = (wire.language or "").strip().lower()[:5] or meeting.language
+            if cfg.brain.language == "auto":  # a forced language stays, whatever was spoken
+                meeting.language = (wire.language or "").strip().lower()[:5] or meeting.language
             if wire.followup_subject.strip() and wire.followup_body.strip():
                 meeting.followup_email = FollowUpEmail(
                     subject=wire.followup_subject.strip()[:200], body_markdown=wire.followup_body.strip()
                 )
         except LLMError as exc:
             log.warning("summary failed (%s); writing basic notes", exc)
+    if not meeting.language:  # no model summary (offline, over budget, failed): still French notes for a French meeting
+        meeting.language = detect_language(" ".join(s.text for s in meeting.segments))
     return rerender(meeting, cfg.user_name)
+
+
+def known_language(cfg: Config) -> str | None:
+    """The meeting language when the config fixes it (``brain.language``, else ``transcription.language``)."""
+    for lang in (cfg.brain.language, cfg.transcription.language):
+        if lang and lang.lower() != "auto":
+            return lang.lower()[:5]
+    return None
+
+
+_STOPWORDS = {
+    "fr": {"le", "la", "les", "un", "une", "des", "et", "est", "je", "tu", "nous", "vous", "on", "que", "qui",
+           "pas", "pour", "dans", "avec", "sur", "ce", "c'est", "il", "elle", "du", "de", "au", "mais", "oui"},
+    "en": {"the", "a", "an", "and", "is", "are", "i", "you", "we", "they", "that", "this", "to", "of", "in",
+           "for", "with", "on", "it", "not", "be", "will", "can", "but", "yes", "so", "have", "do"},
+}  # fmt: skip
+
+
+def detect_language(text: str) -> str | None:
+    """French or English by stop-word counts (enough to label the notes); ``None`` when unclear."""
+    ws = words(text)
+    counts = {lang: sum(w in stop for w in ws) for lang, stop in _STOPWORDS.items()}
+    best = max(counts, key=lambda k: counts[k])
+    other = min(counts.values())
+    return best if counts[best] >= 3 and counts[best] > 1.5 * other else None
 
 
 def rerender(meeting: Meeting, user_name: str) -> str:
@@ -101,6 +134,22 @@ _LABELS = {
 _FR_DAYS = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
 _FR_MONTHS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre",
               "octobre", "novembre", "décembre"]  # fmt: skip
+
+
+_FR_HEADINGS = {"summary": "Résumé", "key points": "Points clés", "decisions": "Décisions",
+                "open questions": "Questions ouvertes", "notes": "Notes"}  # fmt: skip
+
+
+def _localize_headings(body: str, lang: str) -> str:
+    """The model sometimes keeps the prompt's English section names in French notes."""
+    if lang != "fr":
+        return body
+    out = []
+    for line in body.split("\n"):
+        if line.startswith("#") and (name := line.lstrip("#").strip().lower()) in _FR_HEADINGS:
+            line = f"{line[: len(line) - len(line.lstrip('#'))]} {_FR_HEADINGS[name]}"
+        out.append(line)
+    return "\n".join(out)
 
 
 def _lang(meeting: Meeting) -> str:
@@ -137,7 +186,7 @@ def render_notes(meeting: Meeting, tldr: str, body: str, user_name: str) -> str:
         lines.append("")
 
     if body:
-        lines += [body, ""]
+        lines += [_localize_headings(body, lang), ""]
     else:
         for kind, key in ((ItemKind.DECISION, "decisions"), (ItemKind.QUESTION, "questions"), (ItemKind.NOTE, "notes")):
             its = meeting.items_of(kind)

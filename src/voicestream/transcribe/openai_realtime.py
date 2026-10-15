@@ -32,7 +32,7 @@ from typing import Any
 
 import numpy as np
 
-from ..audio.base import StreamResampler, float_to_int16, int16_to_float
+from ..audio.base import StreamResampler, aclose_quietly, float_to_int16, int16_to_float
 from ..audio.vad import SpeechGate
 from ..config import OpenAIRealtimeConfig, VADConfig
 from ..models import AudioFrame, TranscriptSegment
@@ -58,6 +58,8 @@ class _Utt:
     done: bool = False
     partial: str = ""
     committed_at: float | None = None
+    conn: int = 0
+    """The connection it was (last) committed on: only that one can still deliver its transcript."""
 
     @property
     def audio_seconds(self) -> float:
@@ -150,7 +152,10 @@ class OpenAIRealtimeTranscriber(Transcriber):
         awaiting_ack: deque[_Utt] = deque()  # committed on the current socket, waiting for item_id
         by_item: dict[str, _Utt] = {}
         out: asyncio.Queue[TranscriptSegment | None] = asyncio.Queue()
-        state: dict[str, Any] = {"ws": None, "opened": 0.0, "rx": None, "current": None, "failed": None, "reconnect": None}
+        state: dict[str, Any] = {
+            "ws": None, "opened": 0.0, "rx": None, "current": None, "failed": None, "reconnect": None, "gen": 0,
+            "closing": False,
+        }  # fmt: skip
         resampler = StreamResampler(16_000, RATE)
 
         def to24k(samples: np.ndarray) -> bytes:
@@ -158,10 +163,19 @@ class OpenAIRealtimeTranscriber(Transcriber):
 
         def release_ready() -> None:
             # some streaming models occasionally never send ``.completed``: fall back to the
-            # accumulated deltas so one lost result can't hold back every later transcript
+            # accumulated deltas so one lost result can't hold back every later transcript. Only while
+            # the socket it was committed on is up: during a reconnect nothing can deliver it, and giving
+            # up then would drop it instead of re-sending it on the new socket.
             now = time.monotonic()
+            live = state["ws"] is not None
             for u in inflight:
-                if not u.done and u.committed_at is not None and now - u.committed_at > self.completion_timeout_s:
+                if (
+                    live
+                    and u.conn == state["gen"]
+                    and not u.done
+                    and u.committed_at is not None
+                    and now - u.committed_at > self.completion_timeout_s
+                ):
                     log.warning("%s: no final transcript after %.0fs; using live deltas", source, self.completion_timeout_s)
                     u.text, u.done = u.partial, True
             while inflight and inflight[0].done:
@@ -224,6 +238,7 @@ class OpenAIRealtimeTranscriber(Transcriber):
                         await asyncio.sleep(delay)
                         delay = min(delay * 2, 30.0)
                 state["ws"], state["opened"] = ws, time.monotonic()
+                state["gen"] += 1
                 state["rx"] = asyncio.ensure_future(receiver(ws))
                 awaiting_ack.clear()
                 # re-send whatever the previous socket lost: committed utterances still
@@ -237,7 +252,7 @@ class OpenAIRealtimeTranscriber(Transcriber):
                         u.partial = ""
                         await self._send_audio(ws, u.chunks)
                         await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-                        u.committed_at = time.monotonic()
+                        u.committed_at, u.conn = time.monotonic(), state["gen"]
                         awaiting_ack.append(u)
                         self._bill(u.audio_seconds)  # committed (and billed) once more
                 cur = state["current"]
@@ -298,7 +313,7 @@ class OpenAIRealtimeTranscriber(Transcriber):
                 await send({"type": "input_audio_buffer.commit"})
                 state["current"] = None
                 u.committed = True
-                u.committed_at = time.monotonic()
+                u.committed_at, u.conn = time.monotonic(), state["gen"]
                 awaiting_ack.append(u)
                 self._bill(u.audio_seconds)
 
@@ -321,14 +336,21 @@ class OpenAIRealtimeTranscriber(Transcriber):
             except Exception as exc:
                 state["failed"] = exc
             finally:
+                state["closing"] = True
                 if state["reconnect"] is not None:
                     state["reconnect"].cancel()  # don't let a late reconnect reopen what we close
                 await close_ws()
+                await aclose_quietly(frames)  # a failure above leaves the capture open otherwise
                 out.put_nowait(None)
 
         async def watchdog() -> None:
             while True:
                 await asyncio.sleep(1.0)
+                reconnecting = state["reconnect"] is not None and not state["reconnect"].done()
+                waiting = any(u.committed and not u.done for u in inflight)
+                if state["ws"] is None and waiting and not reconnecting and not state["closing"]:
+                    # the socket went away without the receiver noticing (a failed send): fetch the results
+                    state["reconnect"] = asyncio.ensure_future(_reconnect_quietly())
                 release_ready()
 
         dog = asyncio.ensure_future(watchdog())

@@ -188,3 +188,16 @@ async def test_summary_sets_language_and_followup_email(cfg, tmp_path) -> None:
     assert m.language == "fr" and "Réunion" not in notes and notes.startswith("# Point devis")
     assert m.followup_email is not None and m.followup_email.subject == "Récap : point devis"
     assert "enregistrées" in notes  # French labels for a French meeting
+
+
+def test_french_notes_get_french_section_headings() -> None:
+    m = Meeting(title="Point devis", language="fr")
+    body = "## Summary\n- Devis validé\n\n### Key points\n- Envoi vendredi\n\n## Summary of costs\n- 3 k€"
+    notes = summarizer_mod.render_notes(m, "", body, "Alex")
+    assert "## Résumé\n" in notes and "### Points clés\n" in notes
+    assert "## Summary of costs" in notes  # only the standard headings are translated
+    assert summarizer_mod.render_notes(Meeting(language="en"), "", body, "Alex").count("## Summary") == 2
+
+
+def test_summary_prompt_asks_for_headings_in_the_notes_language() -> None:
+    assert "Points clés" in SUMMARY_SYSTEM

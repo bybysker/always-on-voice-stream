@@ -156,3 +156,20 @@ def test_parser_has_all_commands() -> None:
     actions = next(a for a in parser._actions if a.dest == "command")  # noqa: SLF001
     assert set(actions.choices) >= {"run", "replay", "import", "devices", "doctor", "init", "sessions", "summarize", "push", "cost"}
     json.dumps(sorted(actions.choices))
+
+
+def test_imported_meeting_is_dated_by_when_it_took_place(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    cfgp = _write_cfg(tmp_path)
+    p = tmp_path / "zoom.vtt"
+    p.write_text(VTT)
+    assert cli.main(["-c", str(cfgp), "import", str(p), "--date", "2026-03-02T14:30"]) == 0
+    capsys.readouterr()
+    (folder,) = list_sessions(tmp_path / "data")
+    assert not folder.name.startswith("2026-03-02")  # filed when imported, so `push last` finds it
+    assert (folder / "transcript.md").read_text().startswith("# Transcript — 2026-03-02 14:30")
+    assert cli.main(["-c", str(cfgp), "sessions"]) == 0
+    assert "2026-03-02 14:30" in capsys.readouterr().out
+    assert cli.main(["-c", str(cfgp), "push", "last"]) == 0
+    assert "already up to date" in capsys.readouterr().out

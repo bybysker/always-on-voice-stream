@@ -110,24 +110,36 @@ def sink_class(name: str) -> type[Sink]:
     return getattr(importlib.import_module(module), cls)
 
 
+def build_sink(name: str, raw: dict[str, Any] | None, app: Config) -> Sink | None:
+    """The sink for one ``[sinks.<name>]`` table, ``None`` if it is off. Raises when it is misconfigured
+    (``KeyError``/``ImportError``, pydantic ``ValidationError``, ``SinkError``)."""
+    raw = dict(raw or {})
+    if not raw.get("enabled", name == "markdown"):
+        return None
+    raw.setdefault("enabled", True)
+    cls = sink_class(name)
+    return cls(cls.Config.model_validate(raw), app)
+
+
+def describe_config_error(name: str, exc: ValidationError) -> str:
+    """``[sinks.reminders] list: Extra inputs are not permitted`` (the first problem)."""
+    e = exc.errors()[0]
+    return f"[sinks.{name}] {'.'.join(map(str, e['loc'])) or name}: {e['msg']}"
+
+
 def build_sinks(app: Config, only: list[str] | None = None) -> list[Sink]:
     """Instantiate every enabled sink from ``app.sinks``; misconfigured ones are skipped loudly."""
     sinks: list[Sink] = []
     for name, raw in app.sinks.items():
         if only is not None and name not in only:
             continue
-        raw = dict(raw or {})
-        if not raw.get("enabled", name == "markdown"):
-            continue
-        raw.setdefault("enabled", True)
         try:
-            cls = sink_class(name)
-            cfg = cls.Config.model_validate(raw)
-            sinks.append(cls(cfg, app))
+            if (sink := build_sink(name, raw, app)) is not None:
+                sinks.append(sink)
         except (KeyError, ImportError) as exc:
             log.error("sink %s unavailable: %s", name, exc)
         except ValidationError as exc:
-            log.error("sink %s misconfigured: %s", name, exc)
+            log.error("sink %s misconfigured: %s", name, describe_config_error(name, exc))
         except SinkError as exc:
             log.error("sink %s disabled: %s", name, exc)
     return sinks

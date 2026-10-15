@@ -11,6 +11,12 @@ from voicestream.config import Config  # noqa: E402
 from voicestream.models import Meeting  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _private_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """load_config() also reads ~/.voicestream/.env: never let a developer's real keys into a test."""
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
+
+
 @pytest.fixture
 def cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
     """Isolated config: data in tmp, offline extraction, no agents, no auto-split."""

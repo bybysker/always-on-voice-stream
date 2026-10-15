@@ -25,6 +25,7 @@ from ..events import EventBus
 from ..models import Item, Meeting, ScreenNote, TranscriptSegment
 from .heuristic import extract_heuristic
 from .llm import LLM, LLMError, LLMUnavailable, text_block
+from .phrases import find_phrase
 from .prompts import EXTRACTION_SYSTEM, meeting_context, render_items, render_screen, render_segment
 from .schema import WireExtraction, wire_to_result
 from .tracker import ExtractionResult, ItemTracker
@@ -71,13 +72,12 @@ class Extractor:
     # ------------------------------------------------------------------ inputs
 
     def on_segment(self, seg: TranscriptSegment) -> None:
-        low = seg.text.lower()
         now = self.now()
         self._last_seg_seen = now
-        if seg.source in self.bc.commands_from and any(w in low for w in self.bc.wake_phrases):
+        if seg.source in self.bc.commands_from and find_phrase(seg.text, self.bc.wake_phrases):
             # someone addressed the assistant: answer fast (short delay to catch the rest)
             self._trigger_at = min(self._trigger_at or now + 3.0, now + 3.0)
-        elif any(p in low for p in self.bc.trigger_phrases):
+        elif find_phrase(seg.text, self.bc.trigger_phrases):
             at = now + self.bc.trigger_delay_s
             self._trigger_at = min(self._trigger_at or at, at)
         self._wake.set()
@@ -183,7 +183,7 @@ class Extractor:
             # allow references to earlier lines too (updates often cite them)
             for i in range(max(0, pending[0][0] - 200), pending[0][0]):
                 refs[i] = self.meeting.segments[i].id
-            self._enforce_command_sources(result)
+            self._enforce_command_sources(result, pending)
             added, updated = self.tracker.apply(result, refs)
             self.processed_upto = upto
             self._screens_upto += len(screens)
@@ -200,15 +200,15 @@ class Extractor:
                 )
             return added, updated
 
-    def _enforce_command_sources(self, result: ExtractionResult) -> None:
-        """Only speech from ``brain.commands_from`` (your mic) may count as a direct request to the
-        assistant — whatever the model says — so other participants can't trigger auto-run agents."""
-        segs = self.meeting.segments
+    def _enforce_command_sources(self, result: ExtractionResult, pending: list[tuple[int, TranscriptSegment]]) -> None:
+        """A direct request to the assistant counts only if one of the lines the item cites is new this
+        round, comes from ``brain.commands_from`` (your mic) and contains a wake phrase — whatever the model
+        says — so other participants can't trigger auto-run agents: neither by getting you to answer "yeah
+        sure" to their "Hey Claude…" nor by the model citing an old command of yours."""
+        allowed = set(self.bc.commands_from)
+        commands = {i for i, s in pending if s.source in allowed and find_phrase(s.text, self.bc.wake_phrases)}
         for item in result.new_items:
-            if not item.explicit_request:
-                continue
-            sources = {segs[r].source for r in item.segment_refs if 0 <= r < len(segs)}
-            if not sources & set(self.bc.commands_from):
+            if item.explicit_request and not commands.intersection(item.segment_refs):
                 item.explicit_request = False
 
     def _blocks_with(self, pending: list[tuple[int, TranscriptSegment]], screens: list[ScreenNote]) -> list[str]:

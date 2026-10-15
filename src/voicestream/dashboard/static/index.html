@@ -363,7 +363,7 @@ const EVENT_TYPES = [
   'state', 'assistant.started', 'assistant.stopped', 'meeting.started', 'meeting.updated', 'meeting.ending',
   'meeting.ended', 'meeting.notes_updated', 'segment', 'transcript.partial', 'level', 'extraction', 'item.added',
   'item.updated', 'agent.updated', 'item.pushed', 'sink.error', 'notes.pushed', 'cost', 'screen', 'source.error',
-  'agent.budget',
+  'agent.budget', 'agent.held',
 ];
 const MODES = { claude: 'Claude', llm: 'Claude', heuristic: 'offline', 'heuristic-budget': 'offline (budget reached)' };
 const PHASES = { idle: 'listening', live: 'in a meeting', ending: 'wrapping up…', ended: 'meeting ended' };
@@ -637,6 +637,8 @@ function handle(ev) {
       return toast(d.error || 'unknown error', 'error', `${d.source}: capture problem`);
     case 'agent.budget':
       return toast(`${d.item_id} was not started automatically. Run it yourself if it's worth it.`, 'warn', 'Daily agent budget reached');
+    case 'agent.held':
+      return toast(`${d.item_id} waits for your OK: system audio is silent, so this "Hey Claude" may have come from the call.`, 'warn', 'Command not started');
     case 'cost':
       return setCost(d);
   }
@@ -648,10 +650,16 @@ function applyState(st) {
   setMode(st.extraction);
   setMeters(st.sources || []);
   setCost(st.cost);
-  const m = st.meeting;
+  // between meetings a fresh page shows the last one (ended) so it can still be reviewed, edited and pushed
+  const prev = !st.meeting && !S.meeting ? st.previous : null;
+  const m = st.meeting || prev;
   if (m) {
     if (!S.meeting || S.meeting.id !== m.id) startMeeting(m);
     else if (S.phase !== 'ending') S.phase = 'live';
+    if (prev) {
+      S.phase = 'ended';
+      if (S.lastMeeting && S.lastMeeting.id === prev.id) S.notes = joinPath(S.lastMeeting.dir, 'notes.md');
+    }
     S.meeting.title = m.title || S.meeting.title;
     const timeline = [
       ...(m.segments || []).map((s) => [s.t_start, () => addSegment(s)]),

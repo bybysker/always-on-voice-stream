@@ -27,7 +27,10 @@ def build_source(spec: str, cfg: Config, clock: Clock, *, speed: float = 1.0) ->
         from .ffmpeg import FFmpegSource
 
         args, name = _split_name(spec[7:])
-        return FFmpegSource(name=name or "system", input_args=args, clock=clock)
+        src = FFmpegSource(name=name or "system", input_args=args, clock=clock)
+        # "-f pulse -i …", "-f avfoundation -i …" capture a device; a bare "-i meeting.mp4" plays a file to its end
+        src.live = "-f" in src.input_args
+        return src
     if spec == "mic":
         from .mic import MicSource
 

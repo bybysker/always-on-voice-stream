@@ -12,8 +12,9 @@ import os
 import tomllib
 from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 
 class _Section(BaseModel):
@@ -247,7 +248,7 @@ class AgentsConfig(_Section):
 
 
 class BudgetConfig(_Section):
-    daily_usd: float = 2.0
+    daily_usd: float = 3.0
     """Soft cap on Claude extraction/summary + transcription spend per day. When hit,
     extraction falls back to the offline heuristic and screenshots stop."""
     agents_daily_usd: float = 5.0
@@ -321,6 +322,16 @@ class Config(_Section):
     )
     """Per-sink settings, validated by each sink (see ``voicestream.sinks``)."""
 
+    @field_validator("timezone")
+    @classmethod
+    def _known_timezone(cls, v: str | None) -> str | None:
+        if v:
+            try:
+                ZoneInfo(v)
+            except (ZoneInfoNotFoundError, ValueError):
+                raise ValueError(f"unknown time zone {v!r} (use a name like 'Europe/Amsterdam')") from None
+        return v
+
     @property
     def data_path(self) -> Path:
         # absolute, so paths handed to the dashboard and sinks don't depend on the working directory
@@ -348,20 +359,37 @@ def candidate_paths(explicit: str | os.PathLike[str] | None = None) -> list[Path
     return paths
 
 
+class ConfigError(ValueError):
+    """The config file can't be read or doesn't validate (the message names the file and the setting)."""
+
+
 def load_config(path: str | os.PathLike[str] | None = None, *, load_env: bool = True) -> Config:
     """Load config from the first existing candidate path (or defaults)."""
     data: dict[str, Any] = {}
+    found: Path | None = None
     for p in candidate_paths(path):
         if p.is_file():
-            with p.open("rb") as fh:
-                data = tomllib.load(fh)
+            found = p
+            try:
+                with p.open("rb") as fh:
+                    data = tomllib.load(fh)
+            except tomllib.TOMLDecodeError as exc:
+                raise ConfigError(f"{p}: {exc} (text values need quotes, e.g. list_name = \"Réunions\")") from None
             break
         if path and p == Path(path).expanduser():
             raise FileNotFoundError(f"config file not found: {p}")
-    cfg = Config.model_validate(data)
+    try:
+        cfg = Config.model_validate(data)
+    except ValidationError as exc:
+        problems = "; ".join(f"{'.'.join(map(str, e['loc'])) or 'config'}: {e['msg']}" for e in exc.errors()[:5])
+        raise ConfigError(f"{found or 'config'}: {problems}") from None
     if load_env:
+        # never overrides what is already set, so the first file to define a key wins
         load_dotenv(Path.cwd() / ".env")
+        if found is not None:
+            load_dotenv(found.parent / ".env")  # where `voicestream init` puts it, next to the config
         load_dotenv(cfg.data_path / ".env")
+        load_dotenv(Path("~/.voicestream/.env").expanduser())  # also when data_dir points elsewhere
     return cfg
 
 

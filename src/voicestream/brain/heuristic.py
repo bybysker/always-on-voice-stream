@@ -10,9 +10,11 @@ peer of the LLM extractor.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Sequence
 
 from ..models import ItemKind, TranscriptSegment
+from .phrases import find_phrase
 from .tracker import ExtractedItem, ExtractionResult
 
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
@@ -95,6 +97,18 @@ _SKIP_TASKS = re.compile(
 )
 
 
+def split_due(text: str) -> tuple[str, str | None]:
+    """``"Call Sam by Friday"`` → ``("Call Sam", "by Friday")``: the last deadline phrase is split off."""
+    text = " ".join(text.split())
+    m = None
+    for m in _DUE.finditer(text):
+        pass
+    if m is None:
+        return text, None
+    title = " ".join((text[: m.start()] + text[m.end() :]).split()).strip(" ,;:-–—")
+    return (title or text), m.group("due")
+
+
 def _clean_task(task: str) -> str:
     task = task.replace("’", "'").strip().strip(":;,-–—").rstrip(".!?").strip()
     task = _DUE.sub("", task).strip().rstrip(",;").strip()
@@ -113,17 +127,15 @@ def extract_heuristic(
 ) -> ExtractionResult:
     """``segments`` are ``(ref, segment)`` pairs; refs are echoed in ``segment_refs``."""
     items: list[ExtractedItem] = []
-    wake = [w.lower() for w in wake_phrases]
     for ref, seg in segments:
         is_me = seg.source == "mic"
-        text = seg.text.strip().replace("’", "'")
-        low = text.lower()
+        text = unicodedata.normalize("NFC", seg.text.strip()).replace("’", "'")
 
-        # Direct commands to the assistant: "Hey Claude, draft a ..."
+        # Direct commands to the assistant: "Hey Claude, draft a ...", "Dis, Claude, prépare…"
         if seg.source in commands_from:
-            hit = next((w for w in wake if w in low), None)
+            hit = find_phrase(text, wake_phrases)
             if hit:
-                cmd = text[low.index(hit) + len(hit):].lstrip(" ,.:;-")
+                cmd = text[hit.end():].lstrip(" ,.:;-")
                 if len(cmd.split()) >= 2:
                     items.append(
                         ExtractedItem(

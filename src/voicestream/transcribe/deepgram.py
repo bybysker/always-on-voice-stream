@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode
 
-from ..audio.base import pcm16_bytes
+from ..audio.base import aclose_quietly, pcm16_bytes
 from ..audio.vad import SpeechGate
 from ..config import DeepgramConfig, VADConfig
 from ..models import SAMPLE_RATE, AudioFrame, TranscriptSegment
@@ -50,6 +50,8 @@ class _Utt:
     finals: list[str] = field(default_factory=list)
     confidences: list[float] = field(default_factory=list)
     done: bool = False
+    conn: int = 0
+    """The connection its Finalize was (last) sent on: only that one can still answer it."""
 
     @property
     def seconds(self) -> float:
@@ -123,13 +125,18 @@ class DeepgramTranscriber(Transcriber):
         gate = SpeechGate(source, self.vad_cfg, on_level=level_cb)
         inflight: deque[_Utt] = deque()
         out: asyncio.Queue[TranscriptSegment | None] = asyncio.Queue()
-        st: dict[str, Any] = {"ws": None, "rx": None, "ka": None, "sent": 0.0, "last_send": 0.0, "current": None, "failed": None}
+        st: dict[str, Any] = {
+            "ws": None, "rx": None, "ka": None, "sent": 0.0, "last_send": 0.0, "current": None, "failed": None,
+            "reconnect": None, "gen": 0,
+        }  # fmt: skip
         lock = asyncio.Lock()
 
         def release() -> None:
             now = time.monotonic()
+            live = st["ws"] is not None
             for u in inflight:  # stragglers: Finalize answered but nothing marked it done
-                if not u.done and u.ended_at is not None and now - u.ended_at > FINALIZE_WAIT_S:
+                # only on the connection that got its Finalize: while reconnecting, nothing can answer it yet
+                if live and u.conn == st["gen"] and not u.done and u.ended_at is not None and now - u.ended_at > FINALIZE_WAIT_S:
                     u.done = True
             while inflight and inflight[0].done:
                 u = inflight.popleft()
@@ -192,6 +199,20 @@ class DeepgramTranscriber(Transcriber):
             finally:
                 if st["ws"] is ws:
                     st["ws"] = None
+                    reconnect_if_waiting()
+
+        def reconnect_if_waiting() -> None:
+            # finished utterances whose results died with the socket: reconnect now and re-send them,
+            # rather than waiting for the next speech (keep a reference: the loop only holds tasks weakly)
+            pending = st["reconnect"] is not None and not st["reconnect"].done()
+            if not pending and any(u.stream_end is not None and not u.done for u in inflight):
+                st["reconnect"] = asyncio.ensure_future(_reconnect_quietly())
+
+        async def _reconnect_quietly() -> None:
+            try:
+                await connected()
+            except Exception as exc:  # noqa: BLE001 - surfaced when the stream ends, like a feed error
+                st["failed"] = exc
 
         async def keepalive() -> None:
             while True:
@@ -203,6 +224,8 @@ class DeepgramTranscriber(Transcriber):
                         st["last_send"] = time.monotonic()
                     except Exception:
                         st["ws"] = None
+                if st["ws"] is None:
+                    reconnect_if_waiting()
                 release()
 
         async def connected() -> Any:
@@ -222,6 +245,7 @@ class DeepgramTranscriber(Transcriber):
                         await asyncio.sleep(delay)
                         delay = min(delay * 2, 30.0)
                 st["ws"], st["sent"], st["last_send"] = ws, 0.0, time.monotonic()
+                st["gen"] += 1
                 if st["rx"] is not None:
                     st["rx"].cancel()
                 st["rx"] = asyncio.ensure_future(receiver(ws))
@@ -240,7 +264,7 @@ class DeepgramTranscriber(Transcriber):
                     if u.stream_end is not None:
                         u.stream_end = st["sent"]
                         await ws.send(json.dumps({"type": "Finalize"}))
-                        u.ended_at = time.monotonic()
+                        u.ended_at, u.conn = time.monotonic(), st["gen"]
                 st["last_send"] = time.monotonic()
                 return ws
 
@@ -281,6 +305,7 @@ class DeepgramTranscriber(Transcriber):
                 u.ended_at = time.monotonic()
                 self._bill(u.seconds)
                 await send(json.dumps({"type": "Finalize"}))
+                u.conn = st["gen"]
 
         async def feed() -> None:
             st["ka"] = asyncio.ensure_future(keepalive())
@@ -303,6 +328,8 @@ class DeepgramTranscriber(Transcriber):
                 st["failed"] = exc
             finally:
                 st["ka"].cancel()
+                if st["reconnect"] is not None:
+                    st["reconnect"].cancel()  # don't let a late reconnect reopen what we close
                 ws = st["ws"]
                 st["ws"] = None
                 if ws is not None:
@@ -311,6 +338,7 @@ class DeepgramTranscriber(Transcriber):
                         await ws.close()
                 if st["rx"] is not None:
                     st["rx"].cancel()
+                await aclose_quietly(frames)  # a failure above leaves the capture open otherwise
                 out.put_nowait(None)
 
         feeder = asyncio.ensure_future(feed())

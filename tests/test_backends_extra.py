@@ -295,7 +295,7 @@ async def test_ffmpeg_source_decodes_lavfi_tone(tmp_path) -> None:
 
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg not installed")
-    src = FFmpegSource("system", "-f lavfi -i sine=frequency=440:duration=1.5:sample_rate=44100")
+    src = FFmpegSource("system", "-f lavfi -i sine=frequency=440:duration=1.5:sample_rate=44100", live=False)
     frames = [f async for f in src.frames()]
     total = sum(f.samples.size for f in frames)
     assert abs(total - 1.5 * SAMPLE_RATE) < SAMPLE_RATE * 0.05

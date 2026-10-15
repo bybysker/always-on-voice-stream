@@ -50,7 +50,10 @@ class WireExtraction(BaseModel):
     new_items: list[WireNewItem]
     updates: list[WireUpdate]
     meeting_title: str = Field(description="Short title for the meeting if it has become clear and none is set; else ''.")
-    participants: list[str] = Field(description="Names of other participants newly mentioned; [] if none.")
+    participants: list[str] = Field(
+        description="Names of people newly found to be taking part in this meeting (speaking, or addressed as "
+        "present); never people who are only talked about; [] if none."
+    )
 
 
 class WireSummary(BaseModel):
@@ -62,7 +65,10 @@ class WireSummary(BaseModel):
     )
     updates: list[WireUpdate] = Field(description="Corrections to existing items after reading the whole meeting.")
     missing_items: list[WireNewItem] = Field(description="Important items the live pass missed; [] if none.")
-    participants: list[str]
+    participants: list[str] = Field(
+        description="Everyone who took part (spoke, or was addressed as present), the user excepted; never people "
+        "who were only talked about."
+    )
     language: str = Field(description="ISO-639-1 code of the language most of the meeting was spoken in, e.g. 'fr' or 'en'.")
     followup_subject: str = Field(description="Subject of a short follow-up email to the other participants; '' if pointless (e.g. solo).")
     followup_body: str = Field(

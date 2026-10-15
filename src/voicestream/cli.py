@@ -9,11 +9,16 @@ import os
 import shutil
 import sys
 import webbrowser
+from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import __version__
-from .config import Config, load_config
+from .config import Config, ConfigError, load_config
+
+if TYPE_CHECKING:
+    from .models import TranscriptSegment
 
 log = logging.getLogger("voicestream")
 
@@ -54,7 +59,9 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
     return cfg
 
 
-async def _run_assistant(assistant, cfg: Config, *, transcript=None, speed: float = 0.0) -> int:  # noqa: ANN001
+async def _run_assistant(  # noqa: ANN001
+    assistant, cfg: Config, *, transcript=None, speed: float = 0.0, started_at=None, keep_open: bool = False
+) -> int:
     from .console import ConsolePrinter, command_loop, install_signal_handlers
 
     printer = ConsolePrinter()
@@ -73,10 +80,12 @@ async def _run_assistant(assistant, cfg: Config, *, transcript=None, speed: floa
             printer.emit(printer.s.dim("  (dashboard needs: pip install 'voicestream[dashboard]')"))
         except OSError as exc:
             printer.emit(printer.s(f"  dashboard failed to start: {exc}", "31"))
+    # import/replay --dashboard: the point is to review the meeting there, so don't close it at the end
+    assistant.keep_open = keep_open and server_task is not None
     commands = asyncio.ensure_future(command_loop(assistant, printer))
     try:
         if transcript is not None:
-            await assistant.replay_transcript(transcript, speed=speed)
+            await assistant.replay_transcript(transcript, speed=speed, started_at=started_at)
         else:
             await assistant.run()
     finally:
@@ -127,7 +136,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
     assistant = Assistant(cfg, source_specs=specs, title=args.title, always_on=False, replay_speed=args.speed)
     try:
-        return asyncio.run(_run_assistant(assistant, cfg))
+        return asyncio.run(_run_assistant(assistant, cfg, keep_open=args.dashboard))
     except TranscriptionError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -138,33 +147,55 @@ def cmd_import(args: argparse.Namespace) -> int:
     from .transcript_import import parse_transcript
 
     cfg = _apply_overrides(load_config(args.config), args)
-    segments = parse_transcript(args.file, cfg.user_name)
+    segments = parse_transcript(args.file, cfg.user_name, me=args.me)
     if not segments:
         print(f"error: no transcript lines found in {args.file}", file=sys.stderr)
         return 2
     if not args.dashboard:
         cfg.dashboard.enabled = False
-    print(f"importing {len(segments)} lines from {args.file}")
+    try:
+        started_at = _meeting_start(args.date, Path(args.file), segments)
+    except ValueError as exc:
+        print(f"error: --date {args.date!r}: {exc} (use e.g. 2026-10-12 or 2026-10-12T14:30)", file=sys.stderr)
+        return 2
+    print(f"importing {len(segments)} lines from {args.file} (meeting of {started_at.astimezone():%Y-%m-%d %H:%M})")
     assistant = Assistant(cfg, sources=[], title=args.title, always_on=False)
-    return asyncio.run(_run_assistant(assistant, cfg, transcript=segments, speed=args.speed))
+    return asyncio.run(
+        _run_assistant(assistant, cfg, transcript=segments, speed=args.speed, started_at=started_at, keep_open=args.dashboard)
+    )
+
+
+def _meeting_start(when: str | None, path: Path, segments: list[TranscriptSegment]) -> datetime:
+    """When an imported meeting started: ``--date`` (local time), else the file's time minus its length
+    (meeting tools write the transcript when the call ends)."""
+    if when:
+        start = datetime.fromisoformat(when)
+        return (start if start.tzinfo else start.astimezone()).astimezone(UTC)
+    length = max((s.t_end for s in segments), default=0.0)
+    return datetime.fromtimestamp(path.stat().st_mtime, UTC) - timedelta(seconds=length)
 
 
 def cmd_devices(args: argparse.Namespace) -> int:
     try:
         from .audio.mic import describe_devices
+
+        text = describe_devices()  # imports sounddevice itself
     except ImportError as exc:
         print(f"audio capture libraries missing: {exc}\n  pip install 'voicestream[audio]'")
         return 1
-    print(describe_devices())
+    print(text)
     return 0
 
 
 def cmd_init(args: argparse.Namespace) -> int:
+    from .storage import private_dir
+
     target = Path(args.path).expanduser() if args.path else Path("~/.voicestream/voicestream.toml").expanduser()
     if target.exists() and not args.force:
         print(f"{target} already exists (use --force to overwrite)")
         return 1
-    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.parent == Path("~/.voicestream").expanduser() or not target.parent.exists():
+        private_dir(target.parent)  # it also holds the .env, and by default every transcript
     template = resources.files("voicestream").joinpath("config.example.toml").read_text(encoding="utf-8")
     target.write_text(template, encoding="utf-8")
     env = target.parent / ".env"
@@ -172,6 +203,19 @@ def cmd_init(args: argparse.Namespace) -> int:
         env.write_text(resources.files("voicestream").joinpath("env.example").read_text(encoding="utf-8"), encoding="utf-8")
         os.chmod(env, 0o600)
     print(f"wrote {target}\nwrote {env} (put your API keys there)\nnext: voicestream doctor")
+    return 0
+
+
+def cmd_google_bridge(args: argparse.Namespace) -> int:
+    """Print the Apps Script bridge (``voicestream google-bridge | pbcopy``), or a fresh secret for it."""
+    if args.secret:
+        import secrets
+
+        print(secrets.token_urlsafe(32))
+        return 0
+    from .sinks.google import BRIDGE_SOURCE
+
+    sys.stdout.write(BRIDGE_SOURCE.read_text(encoding="utf-8"))
     return 0
 
 
@@ -185,6 +229,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     print(f"voicestream {__version__} · python {sys.version.split()[0]} · {sys.platform}")
     print(f"data dir: {cfg.data_path}")
+    for p in (cfg.data_path, cfg.data_path / ".env", Path("~/.voicestream/.env").expanduser()):
+        try:
+            if p.exists() and p.stat().st_mode & 0o077:
+                line("warn", f"{p} is readable by other accounts on this computer", f"chmod {'700' if p.is_dir() else '600'} '{p}'")
+        except OSError:
+            pass
     # transcription
     be = cfg.transcription.backend
     need = {"openai": "OPENAI_API_KEY", "openai-realtime": "OPENAI_API_KEY", "deepgram": "DEEPGRAM_API_KEY"}.get(be)
@@ -222,16 +272,23 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         line("fail", "audio capture", f"{exc} — pip install 'voicestream[audio]'")
     line("ok" if shutil.which("ffmpeg") else "warn", "ffmpeg", shutil.which("ffmpeg") or "not found (needed for non-WAV replay and ffmpeg capture)")
     # agents
+    has_key = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
     if cfg.agents.mode != "off":
         if cfg.agents.engine == "agent-sdk":
             try:
                 import claude_agent_sdk
 
-                line("ok", f"agents: {cfg.agents.mode} via Agent SDK {claude_agent_sdk.__version__}", cfg.agents.model)
+                if has_key:
+                    line("ok", f"agents: {cfg.agents.mode} via Agent SDK {claude_agent_sdk.__version__}", cfg.agents.model)
+                else:
+                    line("warn", f"agents: {cfg.agents.mode} via Agent SDK {claude_agent_sdk.__version__}",
+                         "ANTHROPIC_API_KEY not set: agents only run if Claude Code is logged in on this computer")
             except ImportError:
                 line("warn", "agents: claude-agent-sdk not installed", "pip install 'voicestream[agents]' or set agents.engine = 'api'")
-        else:
+        elif has_key:
             line("ok", f"agents: {cfg.agents.mode} via single API calls", cfg.agents.model)
+        else:
+            line("warn", f"agents: {cfg.agents.mode} via single API calls", "ANTHROPIC_API_KEY not set: agents can't run")
     else:
         line("ok", "agents: off")
     # dashboard
@@ -243,12 +300,26 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             line("ok", f"dashboard: http://{cfg.dashboard.host}:{cfg.dashboard.port}")
         except ImportError:
             line("warn", "dashboard disabled", "pip install 'voicestream[dashboard]'")
-    # sinks
-    from .sinks.base import build_sinks
+    # sinks: every enabled one gets a line, also those whose settings don't validate (they'd be skipped)
+    from pydantic import ValidationError
+
+    from .sinks.base import SinkError, build_sink, describe_config_error
 
     async def check_sinks() -> None:
         nonlocal ok
-        for sink in build_sinks(cfg):
+        for name, raw in cfg.sinks.items():
+            try:
+                sink = build_sink(name, raw, cfg)
+            except ValidationError as exc:
+                ok = False
+                line("fail", f"sink {name}", f"{describe_config_error(name, exc)} — it would be skipped")
+                continue
+            except (KeyError, ImportError, SinkError) as exc:
+                ok = False
+                line("fail", f"sink {name}", str(exc))
+                continue
+            if sink is None:
+                continue
             try:
                 line("ok", f"sink {sink.name}", await sink.check())
             except Exception as exc:  # noqa: BLE001
@@ -275,8 +346,20 @@ def cmd_sessions(args: argparse.Namespace) -> int:
         except Exception:  # noqa: BLE001
             continue
         actions = len([i for i in m.items.values() if i.kind.value == "action" and not i.dismissed])
-        print(f"{d.name:<48} {m.title or '(untitled)':<40} {len(m.segments):>4} lines {actions:>3} actions")
+        # the folder name is what `push`/`summarize` take; the date is when the meeting took place
+        # (an imported meeting is filed when you import it)
+        when = m.started_at.astimezone().strftime("%Y-%m-%d %H:%M")
+        print(f"{d.name:<24} {when:<17} {m.title or '(untitled)':<40} {len(m.segments):>4} lines {actions:>3} actions")
     return 0
+
+
+def _in_progress(folder: Path) -> bool:
+    from .storage import load_meeting
+
+    try:
+        return load_meeting(folder)[0].ended_at is None
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _resolve_session(cfg: Config, ref: str) -> Path:
@@ -287,6 +370,10 @@ def _resolve_session(cfg: Config, ref: str) -> Path:
         return p
     if ref in ("last", "latest"):
         sessions = list_sessions(cfg.data_path)
+        # the newest *finished* meeting: `voicestream run` keeps the one it is recording in the list too
+        for d in sessions:
+            if not _in_progress(d):
+                return d
         if sessions:
             return sessions[0]
     for d in list_sessions(cfg.data_path):
@@ -326,29 +413,57 @@ def cmd_summarize(args: argparse.Namespace) -> int:
 
 def cmd_push(args: argparse.Namespace) -> int:
     from .dispatch import Dispatcher
+    from .events import EventBus
+    from .models import Event
     from .sinks.base import build_sinks
     from .storage import atomic_write, load_meeting
 
     cfg = load_config(args.config)
     meeting, folder = load_meeting(_resolve_session(cfg, args.session))
+    if meeting.ended_at is None and not args.force:
+        print(f"error: {folder.name} is still in progress (is `voicestream run` recording it?). "
+              "End the meeting first, or pass --force.", file=sys.stderr)
+        return 2
     sinks = build_sinks(cfg, only=args.sink or None)
     if not sinks:
         print("no enabled sinks (configure [sinks.<name>] in voicestream.toml)")
         return 1
     cfg.dispatch.mode = "end"
+    bus = EventBus()
+    failures: list[str] = []
+
+    def on_event(ev: Event) -> None:
+        if ev.type == "sink.error":
+            failures.append(f"{ev.data.get('item_id') or 'notes'} → {ev.data.get('sink')}: {ev.data.get('error')}")
+
+    bus.listen(on_event)
+
+    def save() -> None:
+        atomic_write(folder / "meeting.json", meeting.model_dump_json(indent=1))
 
     async def go() -> None:
-        d = Dispatcher(cfg, meeting, sinks)
-        n = await d.sync(require_stable=False)
-        print(f"pushed/updated {n} item(s)")
-        if meeting.summary_markdown and not args.no_notes:
-            refs = await d.push_notes(meeting.summary_markdown)
-            for name, ref in refs.items():
-                print(f"notes → {name}: {ref}")
-        await d.aclose()
+        # saved after every push: an interrupted run (Ctrl+C on a slow sink) keeps the refs of what it created
+        d = Dispatcher(cfg, meeting, sinks, bus, on_change=save)
+        try:
+            n = await d.sync(require_stable=False)
+            synced = n == 0 and any(i.pushed for i in meeting.items.values())
+            print(f"pushed/updated {n} item(s)" + (" (the rest were already up to date)" if synced else ""))
+            if meeting.summary_markdown and not args.no_notes:
+                refs = await d.push_notes(meeting.summary_markdown)
+                for name, ref in refs.items():
+                    print(f"notes → {name}: {ref}")
+        finally:
+            await d.aclose()
 
-    asyncio.run(go())
-    atomic_write(folder / "meeting.json", meeting.model_dump_json(indent=1))
+    try:
+        asyncio.run(go())
+    finally:
+        save()
+    if failures:
+        print(f"{len(failures)} push(es) failed:", file=sys.stderr)
+        for f in failures:
+            print(f"  {f}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -409,18 +524,23 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("files", nargs="+")
     rp.add_argument("--as", dest="as_source", choices=["mic", "system"], help="treat the (first) file as this source")
     rp.add_argument("--speed", type=float, default=0.0, help="0 = as fast as possible (default), 1 = real time")
-    rp.add_argument("--dashboard", action="store_true", help="also serve the dashboard while replaying")
+    rp.add_argument("--dashboard", action="store_true", help="also serve the dashboard (it stays open until Ctrl+C)")
     rp.set_defaults(func=cmd_replay)
 
     im = sub.add_parser("import", help="process an existing transcript (.vtt/.srt from Zoom/Meet/Teams, 'Name: text' .txt)")
     common(im)
     im.add_argument("file")
+    im.add_argument("--me", help="your name exactly as the transcript labels you, e.g. 'Alex Martin' (default: user_name)")
     im.add_argument("--speed", type=float, default=0.0, help="replay speed (0 = all at once)")
-    im.add_argument("--dashboard", action="store_true")
+    im.add_argument("--date", help="when the meeting started, e.g. 2026-10-12T14:30 (default: the file's time minus its length)")
+    im.add_argument("--dashboard", action="store_true", help="also serve the dashboard (it stays open until Ctrl+C)")
     im.set_defaults(func=cmd_import)
 
     sub.add_parser("devices", help="list audio devices and system-audio options").set_defaults(func=cmd_devices)
     sub.add_parser("doctor", help="check keys, devices, sinks and budget").set_defaults(func=cmd_doctor)
+    gb = sub.add_parser("google-bridge", help="print the Google Apps Script bridge to paste (… | pbcopy)")
+    gb.add_argument("--secret", action="store_true", help="print a new random secret for the bridge instead")
+    gb.set_defaults(func=cmd_google_bridge)
 
     i = sub.add_parser("init", help="write a starter voicestream.toml and .env")
     i.add_argument("path", nargs="?")
@@ -439,6 +559,7 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("session", help="folder, name prefix, or 'last'")
     ps.add_argument("--sink", action="append", help="only this sink (repeatable)")
     ps.add_argument("--no-notes", action="store_true")
+    ps.add_argument("--force", action="store_true", help="also push a meeting that is still in progress")
     ps.set_defaults(func=cmd_push)
 
     c = sub.add_parser("cost", help="today's spend and a daily estimate")
@@ -451,13 +572,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
+    # everything voicestream writes (transcripts, notes, TODO.md, agent work) is for your eyes only
+    umask = os.umask(0o077)
     try:
         return int(args.func(args) or 0)
     except KeyboardInterrupt:
         return 130
-    except FileNotFoundError as exc:
+    except BrokenPipeError:  # `voicestream sessions | head`: the reader left; stop quietly
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())  # so exit's flush can't fail again
+        return 141
+    except (FileNotFoundError, ConfigError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    finally:
+        os.umask(umask)
 
 
 if __name__ == "__main__":  # pragma: no cover

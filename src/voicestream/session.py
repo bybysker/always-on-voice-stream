@@ -18,17 +18,20 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import time
 from collections.abc import AsyncIterator, Callable
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .agents.runner import AgentRunner, Engine
 from .audio import AudioSource, CaptureSetupError, Clock, build_source
+from .audio.base import aclose_quietly
 from .brain.extractor import Extractor
 from .brain.llm import LLM, ClaudeLLM, LLMUnavailable
-from .brain.summarizer import rerender, summarize
+from .brain.summarizer import known_language, rerender, summarize
 from .brain.tracker import ItemTracker
 from .config import Config
 from .costs import CostMeter
@@ -36,11 +39,18 @@ from .dispatch import Dispatcher
 from .events import EventBus
 from .models import AudioFrame, Event, ItemKind, Meeting, ScreenNote, TranscriptSegment, utcnow
 from .sinks.base import Sink, build_sinks
-from .storage import SessionStore
+from .storage import SessionStore, private_dir
 from .transcribe import Transcriber, TranscriptionError, build_transcriber
 from .transcribe.echo import EchoFilter
 
 log = logging.getLogger(__name__)
+
+LATE_AGENT_SLACK_S = 30.0
+"""Extra wait for agents still working after a meeting, on top of their own time limits."""
+SILENT_SYSTEM_AFTER_S = 120.0
+"""Your speech heard while system audio has been nothing but digital silence before we warn about it."""
+RESTART_DELAY_S = 2.0
+"""First wait before restarting a failed live capture; doubles on each failure in a row, up to a minute."""
 
 
 def _moved(path: str, old: Path, new: Path) -> str:
@@ -51,14 +61,29 @@ def _moved(path: str, old: Path, new: Path) -> str:
 class MeetingSession:
     """Everything scoped to one meeting."""
 
-    def __init__(self, app: Assistant, t0: float, title: str | None = None) -> None:
+    wrapup_wait_s = 10.0
+    """How long :meth:`finish` waits for the extraction and push loops before the final pass."""
+
+    def __init__(self, app: Assistant, t0: float, title: str | None = None, started_at: datetime | None = None) -> None:
         self.app = app
         cfg = app.cfg
         self.t0 = t0
-        self.meeting = Meeting(title=title)
-        self.store = SessionStore(cfg.data_path, self.meeting, store_audio=cfg.capture.store_audio)
-        self.tracker = ItemTracker(self.meeting, app.bus, cfg.user_name)
-        self.extractor = Extractor(cfg, self.meeting, self.tracker, app.llm, app.costs, app.bus)
+        self.meeting = Meeting(title=title, language=known_language(cfg))
+        filed_at = self.meeting.started_at
+        if started_at is not None:
+            self.meeting.started_at = started_at
+        self.store = SessionStore(cfg.data_path, self.meeting, store_audio=cfg.capture.store_audio, filed_at=filed_at)
+        self.replayed_at = started_at
+        """When an imported transcript's meeting took place (the folder keeps the import time)."""
+        day: date | None = None
+        if started_at is not None:
+            # "d'ici vendredi" means the Friday after the meeting, not after the import
+            day = started_at.astimezone(ZoneInfo(cfg.timezone) if cfg.timezone else None).date()
+        self.day = day
+        self.tracker = ItemTracker(self.meeting, app.bus, cfg.user_name, today=day)
+        self.extractor = Extractor(
+            cfg, self.meeting, self.tracker, app.llm, app.costs, app.bus, today=(lambda: day) if day else date.today
+        )
         self.dispatcher = Dispatcher(cfg, self.meeting, app.sinks, app.bus, on_change=self.save_soon)
         self.agents = AgentRunner(
             cfg,
@@ -69,6 +94,7 @@ class MeetingSession:
             engine=app.agent_engine,
             llm=app.llm,
             on_change=self.save_soon,
+            commands_trusted=lambda: not app.echo_unprotected,
         )
         self.last_speech = t0
         self.finished = False
@@ -129,6 +155,12 @@ class MeetingSession:
         self._save_handle = None
         self.store.save()
 
+    def flush_save(self) -> None:
+        """Write a pending :meth:`save_soon` now (shutting down: the loop won't run it)."""
+        if self._save_handle is not None:
+            self._save_handle.cancel()
+            self._save_now()
+
     async def finish(self, reason: str = "ended") -> Path | None:
         """Final extraction, summary, push, notes. Idempotent."""
         if self.finished:
@@ -138,9 +170,11 @@ class MeetingSession:
         self.app.bus.publish("meeting.ending", meeting_id=self.meeting.id, reason=reason)
         self.extractor.stop()
         self.dispatcher.stop()
-        for t in self._tasks[:2]:
-            with contextlib.suppress(BaseException):
-                await asyncio.wait_for(t, 10)
+        if self._tasks:
+            # Wait, but never cancel: a push cancelled mid-request may exist in the sink without a ref here,
+            # and finalize() would create it again (it takes the dispatcher's lock, so it waits for a round
+            # still in flight); flush() likewise waits for an extraction call that is already paid for.
+            await asyncio.wait(self._tasks[:2], timeout=self.wrapup_wait_s)
         if not self.meeting.segments and not self.meeting.items:
             await self._shutdown_tasks()
             self._unlisten()
@@ -156,13 +190,18 @@ class MeetingSession:
         if self.agents.busy and cfg.agents.finish_wait_s > 0:
             log.info("waiting up to %.0fs for running agents…", cfg.agents.finish_wait_s)
             await self.agents.drain(cfg.agents.finish_wait_s)
-        self.meeting.ended_at = utcnow()
+        if self.replayed_at is not None:
+            spoken = max((s.t_end for s in self.meeting.segments), default=0.0)
+            self.meeting.ended_at = self.replayed_at + timedelta(seconds=spoken)
+        else:
+            self.meeting.ended_at = utcnow()
         try:
             notes = await summarize(
                 cfg,
                 self.meeting,
                 self.tracker,
                 self.app.llm if cfg.brain.provider == "anthropic" else None,
+                today=self.day,
                 budget_ok=not self.app.costs.over_budget(),
             )
         except Exception:
@@ -170,11 +209,13 @@ class MeetingSession:
             notes = rerender(self.meeting, cfg.user_name)
         if self._rename():
             notes = rerender(self.meeting, cfg.user_name)  # the agents' files moved with the folder
-        self.store.save_notes(notes)
+        self._save_notes(notes)
         try:
             await self.dispatcher.finalize(notes)
         except Exception:
             log.exception("final push failed")
+        # a transient failure at wrap-up (Wi-Fi still reconnecting after the Mac woke up…) gets more goes
+        self.app.track(asyncio.ensure_future(self.dispatcher.retry_failed()))
         self.store.save()
         notes_path = self.store.dir / "notes.md"
         self.app.bus.publish(
@@ -194,11 +235,27 @@ class MeetingSession:
         self.store.close()
         return notes_path
 
+    def _save_notes(self, notes: str) -> None:
+        try:
+            self.store.save_notes(notes)
+        except OSError:
+            # the sinks don't need the local copy: keep wrapping up (push, events, shutdown)
+            log.exception("could not write notes.md")
+
     async def _late_agents(self) -> None:
-        await self.agents.drain(self.app.cfg.agents.timeout_s + 30)
+        ac = self.app.cfg.agents
+        while self.agents.busy:
+            # agents run max_concurrent at a time, each within its own time limit: wait for the whole queue
+            finished = self.agents.finished
+            waves = math.ceil(self.agents.pending / max(1, ac.max_concurrent))
+            await self.agents.drain(waves * ac.timeout_s + LATE_AGENT_SLACK_S)
+            if self.agents.busy and self.agents.finished == finished:
+                break  # none of them finished in time
+        if self.agents.busy:
+            await self.agents.cancel_all()  # marked failed ("cancelled") rather than "running" for good
         self._rename()  # held back while the agents were writing into the folder
         notes = rerender(self.meeting, self.app.cfg.user_name)
-        self.store.save_notes(notes)
+        self._save_notes(notes)
         self.store.save()
         await self.dispatcher.sync(require_stable=False, only={i.id for i in self.meeting.items.values() if i.pushed})
         await self._shutdown_tasks()
@@ -268,6 +325,7 @@ class Assistant:
         replay_speed: float = 1.0,
     ) -> None:
         self.cfg = cfg
+        private_dir(cfg.data_path)
         self.bus = bus or EventBus()
         self.costs = costs or CostMeter(cfg, self.bus)
         self.clock = Clock()
@@ -294,6 +352,12 @@ class Assistant:
         self.screen_watcher: Any = None
         self._last_level_pub: dict[str, float] = {}
         self.idle_poll_s = 5.0
+        self._system_live = False
+        self._system_sound = False  # system audio has delivered something other than digital silence
+        self._mic_speech_s = 0.0  # your speech heard while it hadn't
+        self._silent_warned = False
+        self.keep_open = False
+        """After a replay/import, keep running (the dashboard) until :meth:`stop`."""
 
     # ----------------------------------------------------------------- setup
 
@@ -344,6 +408,7 @@ class Assistant:
             raise RuntimeError("no audio sources configured")
         names = [s.name for s in self.sources]
         self.echo.system_active = "system" in names and "mic" in names
+        self._system_live = any(s.name == "system" and s.live for s in self.sources)
         for src in self.sources:
             self.transcribers[src.name] = self._make_transcriber(src.name)
         self.bus.publish(
@@ -382,8 +447,8 @@ class Assistant:
             await self.end_meeting("stopped")
             if self._background:
                 log.info("waiting for background work (agents) to finish… Ctrl+C again to abort")
-                with contextlib.suppress(BaseException):
-                    await asyncio.wait(self._background, timeout=self.cfg.agents.timeout_s + 60)
+            await self._finish_background()
+            await self._linger()
             for t in self.transcribers.values():
                 with contextlib.suppress(Exception):
                     await t.aclose()
@@ -401,12 +466,41 @@ class Assistant:
     def stop(self) -> None:
         self._stop.set()
 
-    async def replay_transcript(self, segments: list[TranscriptSegment], speed: float = 0.0) -> Path | None:
+    async def _linger(self) -> None:
+        if self.keep_open and not self._stop.is_set():
+            self.bus.publish("assistant.waiting")
+            await self._stop.wait()
+            await self._finish_background()  # pushes and agents started from the dashboard meanwhile
+
+    async def _finish_background(self) -> None:
+        """Shutting down: give late agents (and push retries) a bounded time, then settle what's left so no
+        agent stays "running" for good and the notes and sinks get their final state."""
+        for s in self.finished_meetings:
+            s.dispatcher.hurry()
+        if self._background:
+            with contextlib.suppress(BaseException):
+                await asyncio.wait(self._background, timeout=self.cfg.agents.timeout_s + 2 * LATE_AGENT_SLACK_S)
+        for s in self.finished_meetings:
+            if s.agents.busy:
+                await s.agents.cancel_all()
+                s.store.save()  # now, not in a debounced save the closing loop would never run
+        if self._background:  # _late_agents now writes the notes and syncs
+            with contextlib.suppress(BaseException):
+                await asyncio.wait(self._background, timeout=LATE_AGENT_SLACK_S)
+        for s in self.finished_meetings:
+            s.flush_save()
+
+    async def replay_transcript(
+        self, segments: list[TranscriptSegment], speed: float = 0.0, started_at: datetime | None = None
+    ) -> Path | None:
         """Run one meeting from an existing transcript (no audio): extraction, notes, pushes, agents.
 
         ``speed`` > 0 replays in (scaled) real time so the live extraction loop and
-        dashboard behave as in a real meeting; 0 feeds everything at once.
+        dashboard behave as in a real meeting; 0 feeds everything at once. ``started_at`` is when the
+        meeting took place (default: it just ended), for the notes' date, CRM logs and relative deadlines.
         """
+        if started_at is None:
+            started_at = utcnow() - timedelta(seconds=max((s.t_end for s in segments), default=0.0))
         self.bus.publish(
             "assistant.started",
             sources=["transcript import"],
@@ -415,7 +509,7 @@ class Assistant:
             agents=self.cfg.agents.mode,
             always_on=False,
         )
-        session = await self._ensure_meeting(0.0)
+        session = await self._ensure_meeting(0.0, started_at=started_at)
         session.t0 = 0.0
         prev = 0.0
         for seg in sorted(segments, key=lambda s: s.t_start):
@@ -429,10 +523,10 @@ class Assistant:
             if speed <= 0:
                 await asyncio.sleep(0)
         path = await self.end_meeting("replayed")
-        if self._background:
-            await asyncio.wait(self._background, timeout=self.cfg.agents.timeout_s + 60)
-            if path is not None:
-                path = session.store.dir / path.name  # late agents may have let the folder be renamed
+        await self._finish_background()
+        if path is not None:
+            path = session.store.dir / path.name  # late agents may have let the folder be renamed
+        await self._linger()
         if self.llm:
             await self.llm.aclose()
         for sink in self.sinks:
@@ -441,30 +535,70 @@ class Assistant:
         self.bus.publish("assistant.stopped", cost=self.costs.snapshot())
         return path
 
+    @property
+    def echo_unprotected(self) -> bool:
+        """System audio is captured but has only ever been digital silence while you talked — most likely
+        macOS withholds it (no System Audio Recording permission yet). The echo filter then has nothing to
+        compare with, so the speakers' sound picked up by your mic passes as you, wake phrases included."""
+        return self._system_live and self.echo.system_active and not self._system_sound and self._mic_speech_s >= SILENT_SYSTEM_AFTER_S
+
+    def _check_system_audio(self, seg: TranscriptSegment) -> None:
+        if seg.source != "mic" or self._system_sound or not self._system_live:
+            return
+        self._mic_speech_s += max(0.0, seg.t_end - seg.t_start)
+        if self.echo_unprotected and not self._silent_warned:
+            self._silent_warned = True
+            msg = (f"system audio has been pure digital silence while you talked for {SILENT_SYSTEM_AFTER_S / 60:.0f} min. "
+                   "On a call, macOS is probably withholding it: allow this terminal under Privacy & Security → "
+                   "Screen & System Audio Recording, then restart the terminal. Until system audio comes through, "
+                   "the others' voices from your speakers count as yours and 'Hey Claude' commands wait for your OK.")
+            log.warning(msg)
+            self.bus.publish("source.error", source="system", error=msg)
+
     async def _tee(self, src: AudioSource) -> AsyncIterator[AudioFrame]:
         zero_s, warned = 0.0, False
-        async for frame in src.frames():
-            if self.current is not None and self.cfg.capture.store_audio:
-                self.current.store.write_audio(frame)
-            if src.name == "mic" and src.live and not warned:
-                # a denied macOS microphone permission yields exact digital silence, not an error
-                zero_s = zero_s + frame.duration if not frame.samples.any() else 0.0
-                if zero_s >= 10.0:
-                    warned = True
-                    msg = "microphone delivers only digital silence — check the OS microphone permission for this terminal"
-                    log.warning(msg)
-                    self.bus.publish("source.error", source=src.name, error=msg)
-            yield frame
+        # owns the capture: closing this generator (a failed transcriber, a restart) stops the device
+        frames = src.frames()
+        try:
+            async for frame in frames:
+                if self.current is not None and self.cfg.capture.store_audio:
+                    self.current.store.write_audio(frame)
+                if src.name == "system" and not self._system_sound and frame.samples.any():
+                    self._system_sound = True
+                    if self._silent_warned:
+                        log.warning("system audio is coming through now")
+                if src.name == "mic" and src.live and not warned:
+                    # a denied macOS microphone permission yields exact digital silence, not an error
+                    zero_s = zero_s + frame.duration if not frame.samples.any() else 0.0
+                    if zero_s >= 10.0:
+                        warned = True
+                        msg = "microphone delivers only digital silence — check the OS microphone permission for this terminal"
+                        log.warning(msg)
+                        self.bus.publish("source.error", source=src.name, error=msg)
+                yield frame
+        finally:
+            await aclose_quietly(frames)
+
+    async def _transcribe(self, src: AudioSource, transcriber: Transcriber, label: str) -> None:
+        frames = self._tee(src)
+        segments = transcriber.stream(src.name, label, frames)
+        try:
+            async for seg in segments:
+                await self._merge_q.put(seg)
+        finally:
+            # a streaming backend that fails mid-way leaves its frames unfinished: close them, or the
+            # capture keeps running and the restart stacks a second one on the same queue
+            await aclose_quietly(segments)
+            await aclose_quietly(frames)
 
     async def _pipe(self, src: AudioSource) -> None:
         transcriber = self.transcribers[src.name]
         label = self.cfg.source_label(src.name)
-        retry = 2.0
+        retry = RESTART_DELAY_S
         while not self._stop.is_set():
             started = time.monotonic()
             try:
-                async for seg in transcriber.stream(src.name, label, self._tee(src)):
-                    await self._merge_q.put(seg)
+                await self._transcribe(src, transcriber, label)
                 return  # source ended normally (file replay, device closed)
             except asyncio.CancelledError:
                 raise
@@ -478,7 +612,7 @@ class Assistant:
                 if not src.live or fatal or self._stop.is_set():
                     raise
                 if time.monotonic() - started > 60:
-                    retry = 2.0
+                    retry = RESTART_DELAY_S
                 await asyncio.sleep(retry)
                 retry = min(retry * 2, 60.0)
                 src.reset()
@@ -489,27 +623,42 @@ class Assistant:
                 seg = await asyncio.wait_for(self._merge_q.get(), timeout=0.5)
             except asyncio.TimeoutError:
                 for s in self.echo.tick(time.monotonic()):
-                    await self._route(s)
+                    await self._route_safely(s)
                 continue
             if seg is None:
                 for s in self.echo.flush():
-                    await self._route(s)
+                    await self._route_safely(s)
                 return
-            for s in self.echo.add(seg, time.monotonic()):
-                await self._route(s)
+            try:
+                ready = self.echo.add(seg, time.monotonic())
+            except Exception:
+                log.exception("echo filter failed; keeping the segment")
+                ready = [seg]
+            for s in ready:
+                await self._route_safely(s)
             for s in self.echo.tick(time.monotonic()):
-                await self._route(s)
+                await self._route_safely(s)
+
+    async def _route_safely(self, seg: TranscriptSegment) -> None:
+        # one failure (a full disk when the next meeting's folder is created…) must cost this segment, not
+        # stop routing for the rest of the day while the transcribers keep running and billing
+        try:
+            await self._route(seg)
+        except Exception as exc:
+            log.exception("could not record a transcript segment")
+            self.bus.publish("source.error", source=seg.source, error=f"could not record the transcript: {exc}")
 
     async def _route(self, seg: TranscriptSegment) -> None:
+        self._check_system_audio(seg)
         session = await self._ensure_meeting(seg.t_start)
         session.last_speech = self.clock.now()
         session.add_segment(seg)
 
-    async def _ensure_meeting(self, t_first: float) -> MeetingSession:
+    async def _ensure_meeting(self, t_first: float, started_at: datetime | None = None) -> MeetingSession:
         async with self._meeting_lock:
             if self.current is None or self.current.finished:
                 t0 = max(0.0, min(t_first, self.clock.now()) - 0.5)
-                self.current = MeetingSession(self, t0=t0, title=self.title)
+                self.current = MeetingSession(self, t0=t0, title=self.title, started_at=started_at)
                 self.title = None  # only the first meeting gets the CLI title
                 self.current.start()
             return self.current
@@ -586,6 +735,8 @@ class Assistant:
             "meeting": cur.meeting.model_dump(mode="json") if cur else None,
             "meeting_dir": str(cur.store.dir) if cur else None,
             "last_meeting": {"id": last.meeting.id, "title": last.meeting.title, "dir": str(last.store.dir)} if last else None,
+            # between meetings, the last one in full: a fresh dashboard can still review, edit and push it
+            "previous": last.meeting.model_dump(mode="json") if last and cur is None else None,
             "cost": self.costs.snapshot(),
         }
 
@@ -599,13 +750,29 @@ class Assistant:
 
     def dismiss_item(self, item_id: str, dismissed: bool = True, meeting_id: str | None = None) -> bool:
         session, _ = self._find_item(item_id, meeting_id)
-        return session.tracker.set_dismissed(item_id, dismissed) is not None
+        ok = session.tracker.set_dismissed(item_id, dismissed) is not None
+        self._sync_finished(session, item_id)
+        return ok
 
     def edit_item(self, item_id: str, meeting_id: str | None = None, **fields: Any) -> dict[str, Any]:
         session, item = self._find_item(item_id, meeting_id)
         session.tracker.edit(item_id, **fields)
         session.save_soon()
+        self._sync_finished(session, item_id)
         return item.model_dump(mode="json")
+
+    def _sync_finished(self, session: MeetingSession, item_id: str) -> None:
+        """Once a meeting is wrapped up its dispatcher loop is gone: propagate an edit, a dismissal or a
+        completion to the sinks that already have the item right away (the dispatcher lock orders it
+        after a wrap-up push still in flight)."""
+        item = session.meeting.items.get(item_id)
+        if not session.finished or item is None or not item.pushed:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self.track(asyncio.ensure_future(session.dispatcher.sync(require_stable=False, only={item_id})))
 
     def add_item(self, kind: str, title: str, owner: str | None = None, due_text: str | None = None) -> dict[str, Any]:
         session = self._session()

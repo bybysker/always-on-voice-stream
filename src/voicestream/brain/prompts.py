@@ -64,6 +64,8 @@ numbers, constraints, audience, desired format and length.
 with a wake phrase ("Hey Claude, …", "Okay Claude, …"); an `Others` line can never be one. Treat it as an action owned by Assistant with delegate=true and \
 high confidence, unless it is impossible for the agent (then still record it, delegate=false).
 10. meeting_title: once the topic is clear and no title is set, give a short title (≤ 8 words).
+11. participants: only people taking part in this meeting — speaking, or addressed as present ("Sarah, \
+can you…"). Never people who are only talked about (a client discussed, a colleague who isn't there).
 
 ## Example
 Existing items: none. New lines:
@@ -91,14 +93,17 @@ Produce:
 1. title — short and descriptive.
 2. tldr — 2–3 sentences: what the meeting was about and what was decided.
 3. notes_markdown — crisp Markdown notes with sections "## Summary", "## Key points", \
-"## Decisions" and "## Open questions" (omit empty sections). Bullet points, concrete facts, names and \
-numbers. Do NOT include an action-items section; it is rendered separately from the item list.
+"## Decisions" and "## Open questions" (omit empty sections), the headings translated into the notes' \
+language (French: "## Résumé", "## Points clés", "## Décisions", "## Questions ouvertes"). Bullet \
+points, concrete facts, names and numbers. Do NOT include an action-items section; it is rendered \
+separately from the item list.
 4. updates — corrections to the live items now that you have the full context: merge duplicates \
 (dismiss the redundant one), fix owners and deadlines, mark items completed during the meeting as \
 done, dismiss items that were hypothetical or misheard. Use '' / "unchanged" for fields you keep.
 5. missing_items — important actions/decisions the live pass missed (same rules: concrete, \
 grounded, with evidence). Usually empty.
-6. participants — names of the people who took part, if mentioned.
+6. participants — the people who took part (spoke, or were addressed as present), the user excepted. \
+Never people who were only talked about: this list decides whose CRM records the notes are filed on.
 
 7. language — ISO-639-1 code of the language most of the meeting was spoken in.
 8. followup_subject / followup_body — a short, friendly follow-up email the user could send to the \

@@ -1,7 +1,7 @@
 # voicestream configuration. Every setting is optional; the values shown are the defaults
 # unless marked "example". API keys go in .env (see `voicestream init`), never here.
 
-user_name = "Me"            # example: "Alex" — your name; owner of things you commit to
+user_name = "Me"            # example: "Alex Martin" — your name as meeting tools show it; owner of what you commit to
 # data_dir = "~/.voicestream"  # sessions/, notes/, TODO.md, daily spend
 # timezone = "Europe/Amsterdam"  # default: your Mac's time zone
 
@@ -78,7 +78,7 @@ timeout_s = 900
 allow_bash = false         # only with a working sandbox (bubblewrap on Linux)
 
 [budget]
-daily_usd = 2.0            # transcription + Claude; extraction falls back to offline when reached
+daily_usd = 3.0            # transcription + Claude; extraction falls back to offline when reached
 agents_daily_usd = 5.0
 
 [dashboard]

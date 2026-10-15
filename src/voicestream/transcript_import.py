@@ -6,14 +6,16 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
-from .models import TranscriptSegment
+from .models import TranscriptSegment, _name_key
 
 _TS = r"(?:(\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?"
 _CUE = re.compile(rf"^\s*{_TS}\s*-->\s*{_TS}")
 _BRACKET_TS = re.compile(r"^\s*[\[(]?\s*((?:\d+:)?\d{1,2}:\d{2}(?:[.,]\d+)?)\s*[\])]?\s*[-–]?\s*")
-_SPEAKER = re.compile(r"^\s*(?P<name>[A-Z][\w .'-]{0,40}?)\s*:\s+(?P<text>.+)$")
+# any letter opens a name ("Élodie Durand:", "Çağla:"); _speaker() checks it is a capital
+_SPEAKER = re.compile(r"^\s*(?P<name>[^\W\d_][\w .'’-]{0,40}?)\s*:\s+(?P<text>.+)$")
 _VTT_VOICE = re.compile(r"<v(?:\.[^ >]+)?\s+([^>]+)>")
 _TAGS = re.compile(r"</?[^>]+>")
 
@@ -31,8 +33,31 @@ def _parse_clock(text: str) -> float:
     return total
 
 
-def _make(speaker: str, text: str, t0: float, t1: float, me_names: set[str]) -> TranscriptSegment:
-    is_me = speaker.strip().lower() in me_names
+def _speaker(line: str) -> re.Match[str] | None:
+    m = _SPEAKER.match(line)
+    return m if m is not None and m["name"][0].isupper() else None
+
+
+def _me_keys(user_name: str, speakers: Iterable[str], me: str | None = None) -> set[str]:
+    """Name keys (see ``_name_key``) of the speaker labels that are you."""
+    keys = {"me", "i", "moi"}
+    if me and _name_key(me):
+        return keys | {_name_key(me)}  # given exactly (``import --me``)
+    user = _name_key(user_name)
+    if not user:
+        return keys
+    keys |= {user, user.split()[0]}
+    if " " not in user:
+        # user_name = "Alex" while the meeting tool labels you "Alex Martin": that is you, unless
+        # two speakers share the first name (then nobody is, rather than the wrong one)
+        same = {k for k in map(_name_key, speakers) if k.split()[:1] == [user]}
+        if len(same) == 1:
+            keys |= same
+    return keys
+
+
+def _make(speaker: str, text: str, t0: float, t1: float, me_keys: set[str]) -> TranscriptSegment:
+    is_me = _name_key(speaker) in me_keys
     return TranscriptSegment(
         source="mic" if is_me else "system",
         speaker="Me" if is_me else (speaker.strip() or "Others"),
@@ -43,20 +68,24 @@ def _make(speaker: str, text: str, t0: float, t1: float, me_names: set[str]) -> 
     )
 
 
-def parse_transcript(path: str | Path, user_name: str = "Me") -> list[TranscriptSegment]:
+Line = tuple[str, str, float, float]
+"""(speaker label as written, text, start, end)"""
+
+
+def parse_transcript(path: str | Path, user_name: str = "Me", me: str | None = None) -> list[TranscriptSegment]:
+    """``me``: your name exactly as the transcript labels you (default: matched from ``user_name``)."""
     p = Path(path)
     raw = p.read_text(encoding="utf-8-sig", errors="replace")
-    me = {"me", "i", user_name.strip().lower(), user_name.strip().split()[0].lower() if user_name.strip() else "me"}
     suffix = p.suffix.lower()
     if suffix == ".jsonl":
         return [TranscriptSegment.model_validate_json(line) for line in raw.splitlines() if line.strip()]
-    if suffix in (".vtt", ".srt") or "-->" in raw[:2000]:
-        return _parse_cues(raw, me)
-    return _parse_plain(raw, me)
+    lines = _parse_cues(raw) if suffix in (".vtt", ".srt") or "-->" in raw[:2000] else _parse_plain(raw)
+    keys = _me_keys(user_name, {spk for spk, *_ in lines}, me)
+    return [_make(spk, text, t0, t1, keys) for spk, text, t0, t1 in lines]
 
 
-def _parse_cues(raw: str, me: set[str]) -> list[TranscriptSegment]:
-    out: list[TranscriptSegment] = []
+def _parse_cues(raw: str) -> list[Line]:
+    out: list[Line] = []
     blocks = re.split(r"\n\s*\n", raw.replace("\r\n", "\n"))
     for block in blocks:
         lines = [ln for ln in block.split("\n") if ln.strip()]
@@ -71,20 +100,20 @@ def _parse_cues(raw: str, me: set[str]) -> list[TranscriptSegment]:
             if v := _VTT_VOICE.search(text):
                 speaker = v.group(1)
             text = _TAGS.sub("", text).strip()
-            if sm := _SPEAKER.match(text):
+            if sm := _speaker(text):
                 speaker, text = sm["name"], sm["text"]
             if text:
                 # merge consecutive cues from the same speaker (captions are split mid-sentence)
-                if out and out[-1].speaker == ("Me" if speaker.lower() in me else speaker) and t0 - out[-1].t_end < 1.5 and len(out[-1].text) < 400:
-                    out[-1] = out[-1].model_copy(update={"text": f"{out[-1].text} {text}", "t_end": t1})
+                if out and _name_key(out[-1][0]) == _name_key(speaker) and t0 - out[-1][3] < 1.5 and len(out[-1][1]) < 400:
+                    out[-1] = (out[-1][0], f"{out[-1][1]} {text}", out[-1][2], t1)
                 else:
-                    out.append(_make(speaker, text, t0, t1, me))
+                    out.append((speaker, text, t0, t1))
             break
     return out
 
 
-def _parse_plain(raw: str, me: set[str]) -> list[TranscriptSegment]:
-    out: list[TranscriptSegment] = []
+def _parse_plain(raw: str) -> list[Line]:
+    out: list[Line] = []
     t = 0.0
     speaker = "Others"
     for line in raw.splitlines():
@@ -95,14 +124,14 @@ def _parse_plain(raw: str, me: set[str]) -> list[TranscriptSegment]:
         if m := _BRACKET_TS.match(line):
             stamp = _parse_clock(m.group(1))
             line = line[m.end() :]
-        if sm := _SPEAKER.match(line):
+        if sm := _speaker(line):
             speaker, text = sm["name"], sm["text"]
         else:
             text = line
         if stamp is not None:
             t = stamp
         dur = max(1.0, len(text.split()) / 2.5)  # ~150 words per minute
-        out.append(_make(speaker, text, t, t + dur, me))
+        out.append((speaker, text.strip(), t, t + dur))
         t += dur
     return out
 

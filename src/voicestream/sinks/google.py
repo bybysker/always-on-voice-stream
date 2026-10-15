@@ -10,10 +10,9 @@ permissions, and voicestream only knows its URL and a shared secret.
 Setup (once, about five minutes):
 
 1. Go to https://script.google.com → **New project**. Name it "voicestream bridge".
-2. Copy the script to the clipboard with voicestream's Python:
-   ``python -c "from voicestream.sinks.google import BRIDGE_SOURCE as p; print(p.read_text())" | pbcopy``.
+2. Copy the script to the clipboard: ``voicestream google-bridge | pbcopy``.
    Select everything in the editor, paste over it, and save (⌘S).
-3. Make a secret: ``python3 -c "import secrets; print(secrets.token_urlsafe(32))"``. In
+3. Make a secret: ``voicestream google-bridge --secret``. In
    the editor's left bar click **Project Settings** (⚙), scroll to **Script Properties**
    → **Add script property**, Property ``SECRET``, Value the secret →
    **Save script properties**.
@@ -323,7 +322,8 @@ class GoogleSink(HttpSinkMixin, Sink):
         if data.get("version") != BRIDGE_VERSION:
             raise SinkError(
                 f"google: the deployed bridge is v{data.get('version')} but this voicestream needs v{BRIDGE_VERSION}: paste "
-                f"{BRIDGE_SOURCE} into the script, then Deploy → Manage deployments → Edit → Version: New version → Deploy",
+                "the output of `voicestream google-bridge` into the script, then Deploy → Manage deployments → Edit → "
+                "Version: New version → Deploy",
                 retryable=False,
             )
         parts = [f"bridge v{BRIDGE_VERSION} runs as {data.get('email')}"]

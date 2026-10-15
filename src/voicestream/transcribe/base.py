@@ -15,6 +15,7 @@ implement :meth:`Transcriber.stream` directly.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 from abc import ABC, abstractmethod
@@ -188,6 +189,10 @@ class ChunkTranscriber(Transcriber):
         finally:
             if not feeder.done():
                 feeder.cancel()
+                # let the cancellation close the frames before anyone else tries to (aclose() on a
+                # generator still running in the feeder would fail)
+                with contextlib.suppress(BaseException):
+                    await feeder
             for t in list(utterances):
                 t.cancel()
 

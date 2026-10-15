@@ -19,9 +19,9 @@ English, and has Claude turn it into action items, decisions and notes.
  audio                                               └─ transcript.md · notes.md · TODO.md (local, always)
 ```
 
-It costs **about $1–2 per day for 8 hours of meetings**: roughly $1.40 for speech-to-text and
-$0.10–0.50 for live extraction, plus a few cents per meeting for summaries. Agent work is extra
-and has its own budget.
+It costs **about $2 per day for 8 hours of meetings**: roughly $1.40 for speech-to-text,
+$0.10–0.50 for live extraction and $0.05–0.15 per meeting for the wrap-up notes (`voicestream cost`
+shows the estimate for your settings). Agent work is extra and has its own budget.
 
 ---
 
@@ -45,9 +45,9 @@ and has its own budget.
 These steps assume a Mac with macOS 14.2 or later.
 
 ```bash
-brew install python@3.12 ffmpeg
-python3.12 -m pip install "voicestream[all] @ git+https://github.com/bybysker/always-on-voice-stream"
-#   or, from a clone:  python3.12 -m pip install -e ".[all]"
+brew install uv ffmpeg
+uv tool install --python 3.12 "voicestream[all] @ git+https://github.com/bybysker/always-on-voice-stream"
+#   or, from a clone:  uv venv --python 3.12 && uv pip install -e ".[all]" && source .venv/bin/activate
 
 voicestream init            # writes ~/.voicestream/voicestream.toml and ~/.voicestream/.env
 open -e ~/.voicestream/.env # ANTHROPIC_API_KEY=…  OPENAI_API_KEY=…
@@ -55,8 +55,13 @@ voicestream doctor          # checks keys, microphone, system audio, your tools,
 voicestream run             # start listening (Ctrl+C to stop)
 ```
 
-In `~/.voicestream/voicestream.toml`, set `user_name` to your own name. The assistant then
-knows that "je m'en occupe" in your microphone means *you* own that task. Then switch on the
+Homebrew's Python refuses a plain `pip install` (it is "externally managed"), which is why the
+install goes through `uv tool` (or `pipx`), or a virtual environment for a clone. Either way the
+`voicestream` command is the only thing you need afterwards.
+
+In `~/.voicestream/voicestream.toml`, set `user_name` to your own name, ideally as your meeting
+tools show it (`"Alex Martin"`). The assistant then knows that "je m'en occupe" in your microphone
+means *you* own that task. Then switch on the
 tools you want under [Sending items to your tools](#sending-items-to-your-tools). The
 [example for a Mac + Google + HubSpot setup](#example-mac--google--hubspot--reminders) is a
 good start.
@@ -123,7 +128,10 @@ files:
 | **Linux** | PulseAudio/PipeWire monitor of your output (`soundcard`, or ffmpeg) | Nothing in most cases. Otherwise set `capture.system.method = "ffmpeg"`. |
 
 If a permission is missing, macOS hands over silence instead of an error. voicestream notices a
-microphone that only ever delivers digital silence and tells you to check the permission.
+microphone that only ever delivers digital silence and tells you to check the permission. It also
+warns when system audio has stayed digitally silent for two minutes while you talked: on a call,
+that usually means the System Audio Recording permission is missing, and until it comes through
+your mic's copy of the others counts as you, so "Hey Claude" commands wait for your OK.
 `voicestream devices` lists every input and prints the instructions for your OS.
 
 Wear headphones if you can. The echo filter handles speaker bleed, but clean channels give
@@ -177,10 +185,12 @@ Every sink has these filters:
 |---|---|
 | `end` (default) | Push once, deduplicated, when the meeting ends. |
 | `immediate` | Push as soon as an item is confident and has stopped changing for `stable_s`. |
-| `manual` | Push only from the dashboard, or with `voicestream push last`. |
+| `manual` | Push only from the dashboard, or with `voicestream push last` (the newest finished meeting). |
 
 Items that were already pushed stay in sync. Later edits, completion and dismissal are propagated
-where the tool's API allows.
+where the tool's API allows, also after the meeting has ended. A push that fails for a passing
+reason (the network still coming back after the Mac wakes up) is retried a few times over the next
+minute.
 
 ### Your tools
 
@@ -188,7 +198,7 @@ where the tool's API allows.
 |---|---|---|
 | `google` | Your tasks become Google Calendar reminders at 09:00 on their due date. Each meeting gets a Google Doc in a "Meeting notes" folder. Gmail sends a recap to you and saves a follow-up **draft** for the attendees; drafts are never sent. | [Google bridge](#google-calendar-docs-and-gmail) |
 | `reminders` | Your tasks go into an Apple Reminders list ("Meetings"), with due date and alert. | `enabled = true`, then allow Automation once. |
-| `hubspot` | The meeting is logged on the contacts and companies that were in it. Your follow-ups become HubSpot tasks. | [HubSpot key](#hubspot) |
+| `hubspot` | The meeting is logged on the contacts and companies that took part in it. Your follow-ups become HubSpot tasks. | [HubSpot key](#hubspot) |
 | `shortcuts` | Runs a macOS Shortcut per task or meeting, with the data as JSON. Use it for any app with Shortcuts actions, such as Promethee. | [Apps on your Mac](#promethee-and-other-apps-on-your-mac) |
 | `command` | Runs a command or opens a URL scheme per task, e.g. `open "promethee://add?title={title_url}"`. | [Apps on your Mac](#promethee-and-other-apps-on-your-mac) |
 | `markdown` | Keeps `~/.voicestream/TODO.md` and `notes/` locally. Works with Obsidian or any editor. | On by default |
@@ -206,13 +216,13 @@ paste it once. There is no Google Cloud project, no OAuth client and no token th
    (⌘S):
 
    ```bash
-   python3 -c "from voicestream.sinks.google import BRIDGE_SOURCE as p; print(p.read_text())" | pbcopy
+   voicestream google-bridge | pbcopy
    ```
 
 3. Make a secret:
 
    ```bash
-   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+   voicestream google-bridge --secret
    ```
 
 4. In the editor, open **Project Settings** (⚙) and find **Script Properties**. Click **Add
@@ -240,7 +250,8 @@ How the bridge stays safe:
 - The recap goes only to your own address.
 - Follow-ups are drafts.
 
-To update the bridge later, paste the new code, then use **Deploy** → **Manage deployments** →
+To update the bridge later, paste the new code (`voicestream google-bridge | pbcopy`), then use
+**Deploy** → **Manage deployments** →
 ✎ → **New version** → **Deploy**. The URL stays the same.
 
 ### HubSpot
@@ -256,8 +267,9 @@ To update the bridge later, paste the new code, then use **Deploy** → **Manage
 3. Add `HUBSPOT_TOKEN=…` to `~/.voicestream/.env`.
 4. Set `owner_email` in `[sinks.hubspot]` to your HubSpot login, so tasks are assigned to you.
 
-Participants are matched to HubSpot contacts and companies by name, accents ignored. A record is
-associated only when the match is unique, and contacts are never created.
+Participants are matched to HubSpot contacts and companies by name, accents ignored. Only people
+who took part count, not people who were merely talked about. A record is associated only when the
+match is unique, and contacts are never created.
 
 ### Promethee and other apps on your Mac
 
@@ -292,7 +304,7 @@ argument, and no shell is ever used, so meeting text can't inject commands.
 ### Example: Mac + Google + HubSpot + Reminders
 
 ```toml
-user_name = "Alex"                 # your first name, as people say it in meetings
+user_name = "Alex Martin"          # your name as Zoom/Meet/Teams show it ("Alex" works for live meetings too)
 timezone = "Europe/Amsterdam"
 
 [brain]
@@ -328,7 +340,8 @@ set `calendar = false` under `[sinks.google]` if you prefer Reminders.
 
 On first use, check these on your Mac:
 
-- Run `VOICESTREAM_TEST_REMINDERS=1 python -m pytest tests/test_sink_mac.py -k real`. It creates,
+- From a clone with the `dev` extra, run
+  `VOICESTREAM_TEST_REMINDERS=1 .venv/bin/python -m pytest tests/test_sink_mac.py -k real`. It creates,
   completes and deletes one test reminder.
 - Make sure your Promethee shortcut doesn't ask questions. A shortcut waiting for input is
   stopped after `timeout_s` and not retried.
@@ -369,14 +382,18 @@ meeting", and in `agents/<id>-…/`. This often happens before the meeting is ov
 **Safety.** Meeting speech is untrusted input: anyone on the call can say anything. The
 safeguards:
 
-- Wake-phrase commands count only from **your** microphone (`brain.commands_from`). Other
-  participants cannot trigger agents.
+- Wake-phrase commands count only from **your** microphone (`brain.commands_from`), and only a line
+  in which you say the wake phrase yourself: answering "sure" to someone else's "Hey Claude…" is
+  not a command. Other participants cannot trigger agents. While system audio is silent (see
+  [Capturing system audio](#capturing-system-audio-what-the-others-say)), commands wait for your OK.
 - Agents run in `dontAsk` permission mode with `--restricted`. File tools are confined to the
   task's workspace and edits are allowed only under `./`.
 - No Bash unless you enable it, and then only inside a sandbox that must be available
   (`failIfUnavailable`).
 - No user or project settings and no MCP servers are loaded.
-- Your other tools' API tokens are scrubbed from the agent's environment.
+- Your other tools' API tokens are scrubbed from the agent's environment, and agents may not read
+  voicestream's `.env` files. What an agent leaves in its folder is only picked up if it is a real
+  file inside that folder, never a link to something outside it.
 - Each run is capped by turns, dollars and wall-clock time. All agents together are capped per
   day by `budget.agents_daily_usd`.
 - Agents cannot email, schedule or message anyone. They prepare drafts and say what's left for
@@ -392,7 +409,8 @@ The dashboard (`dashboard.enabled`, bound to 127.0.0.1 and protected by a per-ru
 - agent progress and results
 - today's spend against your budget
 
-You can also add items by hand or end the meeting from it.
+You can also add items by hand or end the meeting from it. Between meetings it shows the last one,
+so you can still edit, push or dismiss its items after it ended.
 
 In the terminal, type `help`, or one of these:
 
@@ -402,7 +420,7 @@ In the terminal, type `help`, or one of these:
 | `reject A3` | Decline the agent for A3 |
 | `dismiss A2` / `restore A2` | Hide a wrong item / undo |
 | `push A1` | Push A1 to your sinks now |
-| `add Call Sam by Friday` | Add an action item by hand |
+| `add Call Sam by Friday` | Add an action item for you, due Friday (`add Send the deck @Sam` gives it to Sam) |
 | `extract` | Run extraction now |
 | `end` | End the meeting (summary and push) |
 | `status` | Show current items and spend |
@@ -414,14 +432,26 @@ In the terminal, type `help`, or one of these:
 voicestream replay meeting.m4a                  # one file = you (any format ffmpeg reads)
 voicestream replay me.wav others.wav            # two files = mic + system, with echo filtering
 voicestream import zoom_transcript.vtt          # .vtt/.srt from Zoom/Meet/Teams, or "Name: text" .txt
+voicestream import call.vtt --me "Alex Martin" --date 2026-10-12T14:00
 voicestream sessions                            # list recorded meetings
 voicestream summarize last                      # re-run the notes
 voicestream push last --sink notion             # push a saved meeting
 ```
 
 `replay` runs as fast as possible by default. Use `--speed 1` for real time, which also shows it
-live on the dashboard with `--dashboard`. Use `run --store-audio` to keep the raw audio of live
+live on the dashboard with `--dashboard`; the dashboard then stays open after the end, to review,
+edit and push, until you press Ctrl+C. Use `run --store-audio` to keep the raw audio of live
 meetings for later replay.
+
+`import` treats the lines labelled with your name as yours. A first name in `user_name` matches
+your full display name ("Alex" → "Alex Martin") unless two speakers share it; `--me` gives the
+label exactly. The meeting is dated from the file's time minus its length (meeting tools write the
+transcript when the call ends), or from `--date`, so deadlines like "d'ici vendredi" are counted
+from the meeting day.
+
+`push last` takes the newest *finished* meeting. It refuses one that is still being recorded
+(`--force` overrides), records each push as soon as it is made, so an interrupted push never
+creates an item twice, and exits with status 1 when a push failed.
 
 ## Costs and budget
 
@@ -436,7 +466,7 @@ of meetings, with about 60% speech:
 | Screen descriptions (optional) | `claude-haiku-5-5` | ≈ $0.05 |
 | Agents (optional) | `claude-opus-5-5` | ≈ $0.02–0.30 per task, capped |
 
-`budget.daily_usd` (default $2) is a soft cap on transcription plus Claude. When it's reached,
+`budget.daily_usd` (default $3) is a soft cap on transcription plus Claude. When it's reached,
 extraction falls back to an offline rule-based extractor and screenshots stop. Spend is tracked
 per day in `~/.voicestream/spend/`.
 
@@ -447,7 +477,8 @@ per day in `~/.voicestream/spend/`.
 - Audio is never stored unless you pass `--store-audio`. Only speech segments are sent to your
   speech-to-text provider, and only text is sent to Claude. Screenshots are off by default and are
   described once, never stored unless `screen.save_images` is set.
-- Transcripts, notes and items live in `~/.voicestream/` on your machine.
+- Transcripts, notes and items live in `~/.voicestream/` on your machine. voicestream keeps that
+  folder readable by your account only, and `voicestream doctor` warns if it isn't.
 - Use `transcription.backend = "local"` to keep audio fully offline.
 
 ## Configuration reference
@@ -461,8 +492,10 @@ looked up in this order:
 3. `./voicestream.toml`
 4. `~/.voicestream/voicestream.toml`
 
-Secrets are read only from the environment or a `.env` file in the current directory or
-`~/.voicestream/`.
+Secrets are read only from the environment or a `.env` file: in the current directory, next to
+the config file, in `data_dir` and in `~/.voicestream/` (the first one that sets a key wins). A
+mistake in the config file is reported with the file and the setting, e.g.
+`error: ~/.voicestream/voicestream.toml: brain.langage: Extra inputs are not permitted`.
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -478,7 +511,7 @@ Secrets are read only from the environment or a `.env` file in the current direc
 | `agents.engine` | `agent-sdk` | Full agent, or `api` for a single call |
 | `agents.model` | `claude-opus-5-5` | Model for agent tasks |
 | `agents.max_budget_usd` | `1.0` | Cap per agent task |
-| `budget.daily_usd` | `2.0` | Soft daily cap on transcription plus Claude |
+| `budget.daily_usd` | `3.0` | Soft daily cap on transcription plus Claude |
 | `budget.agents_daily_usd` | `5.0` | Daily cap on all agents together |
 | `always_on.idle_split_minutes` | `10` | Silence that ends a meeting |
 | `screen.enabled` | `false` | Describe shared slides when they change |
@@ -487,8 +520,8 @@ Secrets are read only from the environment or a `.env` file in the current direc
 ## Development
 
 ```bash
-pip install -e ".[dev,agents]"
-pytest
+uv venv --python 3.12 && uv pip install -e ".[dev,agents]"
+.venv/bin/python -m pytest
 ```
 
 Everything is tested offline. The tests use synthetic audio, mock HTTP transports, local

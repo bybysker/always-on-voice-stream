@@ -123,18 +123,27 @@ def scrubbed_env(sinks: dict[str, dict[str, Any]] | None = None) -> dict[str, st
     return {n: "" for n in sorted(names) if n and not n.upper().startswith(_AGENT_NEEDS)}
 
 
+def _own_file(p: Path, workspace: Path) -> bool:
+    """A regular file of the workspace itself. An agent with Bash can plant a symlink (RESULT.md →
+    ~/.voicestream/.env): voicestream, which isn't sandboxed, must never follow it and publish the target."""
+    try:
+        return not p.is_symlink() and p.is_file() and p.resolve().is_relative_to(workspace.resolve())
+    except OSError:
+        return False
+
+
 def _workspace_files(workspace: Path) -> list[str]:
     files = []
     for p in sorted(workspace.rglob("*")):
         rel = p.relative_to(workspace)
-        if p.is_file() and rel != Path(TASK_FILE) and not any(part.startswith(".") for part in rel.parts):
+        if rel != Path(TASK_FILE) and not any(part.startswith(".") for part in rel.parts) and _own_file(p, workspace):
             files.append(str(rel))
     return files[:50]
 
 
 def _read_summary(workspace: Path, fallback: str | None) -> str:
     p = workspace / RESULT_FILE
-    if p.is_file():
+    if _own_file(p, workspace):
         try:
             return p.read_text(encoding="utf-8", errors="replace").strip()[:4000]
         except OSError:
@@ -142,12 +151,23 @@ def _read_summary(workspace: Path, fallback: str | None) -> str:
     return (fallback or "").strip()[:4000]
 
 
+def secret_files(cfg: Config) -> list[Path]:
+    """The ``.env`` files voicestream reads keys from (see :func:`~voicestream.config.load_config`)."""
+    return list(dict.fromkeys(p / ".env" for p in (Path.cwd(), cfg.data_path, Path("~/.voicestream").expanduser())))
+
+
 class AgentSDKEngine(Engine):
     """Full Claude agent (claude-agent-sdk): web search/fetch + files in a private workspace."""
 
     name = "agent-sdk"
 
-    def __init__(self, cfg: AgentsConfig, user_name: str, sinks: dict[str, dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        cfg: AgentsConfig,
+        user_name: str,
+        sinks: dict[str, dict[str, Any]] | None = None,
+        secrets: list[Path] | None = None,
+    ) -> None:
         try:
             import claude_agent_sdk  # noqa: F401
         except ImportError as exc:
@@ -157,6 +177,8 @@ class AgentSDKEngine(Engine):
         self.cfg = cfg
         self.user_name = user_name
         self.sinks = sinks or {}
+        self.secrets = secrets or []
+        """Files no tool may read: the sandbox lets Bash read the whole disk unless Read deny rules say otherwise."""
 
     def options(self, workspace: Path):  # -> ClaudeAgentOptions
         from claude_agent_sdk import ClaudeAgentOptions
@@ -184,6 +206,8 @@ class AgentSDKEngine(Engine):
             system_prompt=AGENT_SYSTEM.format(user=self.user_name, result=RESULT_FILE),
             tools=tools,
             allowed_tools=allowed,
+            # "//" starts an absolute path in a permission rule; Read deny rules also bind sandboxed Bash
+            disallowed_tools=[f"Read(/{p.resolve().as_posix()})" for p in self.secrets],
             permission_mode="dontAsk",
             extra_args={"restricted": None},
             setting_sources=[],
@@ -283,7 +307,9 @@ def build_brief(item: Item, meeting: Meeting, user_name: str, today: date | None
 
 
 def _slug(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "task"
+    from ..storage import fold
+
+    return re.sub(r"[^a-z0-9]+", "-", fold(text).lower()).strip("-")[:40] or "task"
 
 
 class AgentRunner:
@@ -297,10 +323,13 @@ class AgentRunner:
         engine: Engine | None = None,
         llm: LLM | None = None,
         on_change: Callable[[], None] | None = None,
+        commands_trusted: Callable[[], bool] | None = None,
     ) -> None:
         self.cfg = cfg
         self.ac = cfg.agents
         self.meeting = meeting
+        self.commands_trusted = commands_trusted or (lambda: True)
+        """False while a mic line can't be told apart from the call (see ``Assistant.echo_unprotected``)."""
         self.root = Path(os.path.expanduser(cfg.agents.workspace_root)) if cfg.agents.workspace_root else workspace_root
         self.bus = bus
         self.costs = costs
@@ -313,6 +342,8 @@ class AgentRunner:
         self._stopped = False
         self._cancelled = False
         self.engine_error: str | None = None
+        self.finished = 0
+        """Runs that ended (done, failed or crashed)."""
 
     @property
     def enabled(self) -> bool:
@@ -326,7 +357,7 @@ class AgentRunner:
                 price = self.costs.llm_cost if self.costs else None
                 self._engine = ApiEngine(self.ac, self._llm, self.cfg.user_name, price=price)
             else:
-                self._engine = AgentSDKEngine(self.ac, self.cfg.user_name, self.cfg.sinks)
+                self._engine = AgentSDKEngine(self.ac, self.cfg.user_name, self.cfg.sinks, secrets=secret_files(self.cfg))
         return self._engine
 
     # ------------------------------------------------------------------ policy
@@ -338,6 +369,10 @@ class AgentRunner:
             return
         auto = self.ac.mode == "auto" or (self.ac.mode == "commands" and run.explicit)
         if not auto:
+            return
+        if self.ac.mode == "commands" and not self.commands_trusted():
+            log.warning("system audio isn't coming through, so a 'Hey Claude' may be the call: %s waits for your OK", item.id)
+            self._publish("agent.held", item_id=item.id)
             return
         if self.costs and self.costs.agents_over_budget(self.ac.max_budget_usd):
             log.warning("agent budget for today reached; %s waits for manual approval", item.id)
@@ -387,6 +422,8 @@ class AgentRunner:
                 await self.execute(item_id)
             except Exception:
                 log.exception("agent task %s crashed", item_id)
+            finally:
+                self.finished += 1
 
     async def execute(self, item_id: str) -> None:
         item = self.meeting.items.get(item_id)
@@ -458,6 +495,11 @@ class AgentRunner:
     @property
     def busy(self) -> bool:
         return bool(self._tasks) or not self._queue.empty()
+
+    @property
+    def pending(self) -> int:
+        """Queued and running runs."""
+        return len(self._tasks) + self._queue.qsize()
 
     def _changed(self, item: Item) -> None:
         self._publish("agent.updated", item=item.model_dump(mode="json"))

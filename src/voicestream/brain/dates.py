@@ -65,6 +65,11 @@ _FR_RULES: list[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]]] = 
     (re.compile(r"\b(?:le )?mois prochain\b"), "next month"),
     (re.compile(rf"\b(?:dans|d ici) {_FR_NUM} (jours?|semaines?|mois)\b"), _in_n),
     (re.compile(rf"\b({_WD_FR}) prochaine?\b"), r"\1"),  # "vendredi prochain" = the coming Friday
+    # "mardi en huit": the Tuesday a week after the coming one ("en quinze": two weeks after)
+    (re.compile(rf"\b({_WD_FR}) en (huit|quinze)\b"), lambda m: f"{m[1]} plus{1 if m[2] == 'huit' else 2}week"),
+    (re.compile(r"\b(?:la )?fin (?:de )?l annee\b"), "end of year"),
+    (re.compile(rf"\b(?:la )?fin (?:de |d )?(?=(?:{'|'.join(_FR_MONTHS)})\b)"), "end of "),  # "fin novembre"
+    (re.compile(rf"\bmi[- ](?=(?:{'|'.join(_FR_MONTHS)})\b)"), "mid "),  # "mi-novembre"
     (re.compile(r"\b1er\b"), "1st"),
     # "mon" is also French for "my" ("avant mon départ"): keep it as Mon(day) only before a time or number
     (re.compile(r"\bmon (?!\d|(?:morning|afternoon|evening|night|eod|end)\b)(?=[a-z])"), ""),
@@ -151,8 +156,14 @@ def resolve_due(text: str | None, base: date | None = None) -> str | None:
         nxt = (base.replace(day=28) + timedelta(days=4)).replace(day=1)
         return nxt.isoformat()
 
+    # an explicit date wins over the weekday said with it: "lundi 2 novembre", "Friday the 23rd"
+    if (explicit := _explicit_date(s, tokens, named_day, base)) is not None:
+        return explicit
+
     if named_day is not None:
         i, wd = named_day
+        if (later := re.fullmatch(r"plus(\d)week", " ".join(tokens[i + 1 : i + 2]))) is not None:
+            return (_next_weekday(base, wd) + timedelta(days=7 * int(later[1]))).isoformat()  # "mardi en huit"
         # "next Friday", "next week Friday", "Friday (of) next week": the Friday of next week
         next_week = (
             tokens[i - 1 : i] == ["next"]
@@ -166,34 +177,55 @@ def resolve_due(text: str | None, base: date | None = None) -> str | None:
     if re.search(r"\bnext week\b", s):
         return (base + timedelta(days=7 - base.weekday())).isoformat()  # next Monday
 
-    # "October 20th", "20 Oct", "the 20th"
-    month_re = "|".join(sorted(set(MONTHS) | set(_MONTH_ABBR), key=len, reverse=True))
-    m = re.search(rf"\b({month_re}) (\d{{1,2}})(?:st|nd|rd|th)?\b", s) or None
-    day_first = re.search(rf"\b(\d{{1,2}})(?:st|nd|rd|th)? (?:of )?({month_re})\b", s)
-    month = day = None
-    if m:
-        month, day = _month_num(m[1]), int(m[2])
-    elif day_first:
-        month, day = _month_num(day_first[2]), int(day_first[1])
-    elif m2 := re.search(r"\bthe (\d{1,2})(?:st|nd|rd|th)\b", s):
-        month, day = base.month, int(m2[1])
-        if day < base.day:
-            month = month % 12 + 1
-    if month and day:
-        year = base.year
-        try:
-            d = date(year, month, day)
-            if d < base - timedelta(days=7):
-                d = date(year + 1, month, day)
-            return d.isoformat()
-        except ValueError:
-            return None
     if m := re.search(r"\b(\d{1,2})/(\d{1,2})\b", s):  # ambiguous; assume month/day
         try:
             d = date(base.year, int(m[1]), int(m[2]))
             return d.isoformat()
         except ValueError:
             return None
+    return None
+
+
+_MONTH_RE = "|".join(sorted(set(MONTHS) | set(_MONTH_ABBR), key=len, reverse=True))
+_NOT_A_DAY = r"(?!\s*(?:am|pm|h|hours?|heures?|o clock)\b)"  # "Friday 10 am" is a time, not the 10th
+
+
+def _explicit_date(s: str, tokens: list[str], named_day: tuple[int, int] | None, base: date) -> str | None:
+    """A date given by month and/or day of month ("October 20th", "20 Oct", "the 20th", "Friday 23",
+    "end of November", "mid-November", "end of the year")."""
+
+    def upcoming(month: int, day: int) -> str | None:
+        try:
+            d = date(base.year, month, day)
+            if d < base - timedelta(days=7):
+                d = date(base.year + 1, month, day)
+            return d.isoformat()
+        except ValueError:
+            return None
+
+    if re.search(r"\bend of (?:the )?year\b", s):
+        return date(base.year, 12, 31).isoformat()
+    if m := re.search(rf"\b(?:end of|late) ({_MONTH_RE})\b", s):
+        month = _month_num(m[1])
+        last = (date(base.year, month, 28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        return upcoming(month, last.day)
+    if m := re.search(rf"\bmid[- ]?({_MONTH_RE})\b", s):
+        return upcoming(_month_num(m[1]), 15)
+    month = day = None
+    if m := re.search(rf"\b({_MONTH_RE}) (\d{{1,2}})(?:st|nd|rd|th)?\b{_NOT_A_DAY}", s):
+        month, day = _month_num(m[1]), int(m[2])
+    elif m := re.search(rf"\b(\d{{1,2}})(?:st|nd|rd|th)? (?:of )?({_MONTH_RE})\b", s):
+        month, day = _month_num(m[2]), int(m[1])
+    else:
+        m = re.search(r"\bthe (\d{1,2})(?:st|nd|rd|th)\b", s)
+        if m is None and named_day is not None:  # "vendredi 23", "Friday 23rd"
+            m = re.match(rf"(\d{{1,2}})(?:st|nd|rd|th)?\b{_NOT_A_DAY}", " ".join(tokens[named_day[0] + 1 :]))
+        if m is not None:
+            month, day = base.month, int(m[1])
+            if day < base.day:
+                month = month % 12 + 1
+    if month and day:
+        return upcoming(month, day)
     return None
 
 

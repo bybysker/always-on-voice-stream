@@ -8,11 +8,13 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import shlex
 import sys
 import threading
 from typing import TYPE_CHECKING, Any, TextIO
 
+from .brain.heuristic import split_due
 from .models import Event, fmt_ts
 
 if TYPE_CHECKING:
@@ -24,7 +26,7 @@ HELP = """commands:
   run <id> [prompt…]   approve/run the agent for an item      reject <id>   decline it
   dismiss <id>         hide a wrong item                       restore <id>  undo dismiss
   push <id>            push an item to your sinks now          extract       extract now
-  add <text>           add an action item ("add Call Sam by Friday")
+  add <text>           add your action item ("add Call Sam by Friday"; "@Sam" makes it Sam's)
   end                  end the current meeting (summary + push)
   status               show current items and spend            quit          stop listening
 """
@@ -119,6 +121,9 @@ class ConsolePrinter:
             self.emit(s(f"   ⚠ {what}: {d.get('error')}", "31"))
         elif t == "agent.budget":
             self.emit(s(f"   ⚠ daily agent budget reached; {d.get('item_id')} needs manual approval", "33"))
+        elif t == "agent.held":
+            self.emit(s(f"   ⚠ {d.get('item_id')} waits for your OK ('run {d.get('item_id')}'): system audio is silent, "
+                        "so this 'Hey Claude' may have come from the call", "33"))
         elif t == "screen":
             self.emit(s.dim(f"   🖥  {d['note']['description'][:160]}"))
         elif t == "meeting.ending":
@@ -128,6 +133,8 @@ class ConsolePrinter:
         elif t == "meeting.ended":
             self.emit(s.bold(f"── meeting ended: {d.get('title') or 'untitled'} · {d.get('items', 0)} items ──"))
             self.emit(f"   notes: {d.get('notes')}")
+        elif t == "assistant.waiting":
+            self.emit(s.bold("● done · the dashboard stays open to review, edit and push · Ctrl+C to quit"))
         elif t == "meeting.notes_updated":
             self.emit(s.dim(f"   notes updated with late agent results: {d.get('notes')}"))
         elif t == "assistant.stopped":
@@ -149,8 +156,26 @@ async def command_loop(assistant: Assistant, printer: ConsolePrinter, stream: Te
     if not stream.isatty() and stream is sys.stdin:
         return
     loop = asyncio.get_running_loop()
+    lines: asyncio.Queue[str] = asyncio.Queue()
+
+    def read() -> None:
+        # A daemon thread, not the default executor: cancelling can't interrupt a blocked readline, and
+        # asyncio.run (then the interpreter) would wait for that executor thread until you press Enter.
+        while True:
+            try:
+                line = stream.readline()
+            except (OSError, ValueError):  # stdin closed
+                line = ""
+            try:
+                loop.call_soon_threadsafe(lines.put_nowait, line)
+            except RuntimeError:  # the loop is gone: we're exiting
+                return
+            if not line:
+                return
+
+    threading.Thread(target=read, name="voicestream-stdin", daemon=True).start()
     while True:
-        line = await loop.run_in_executor(None, stream.readline)
+        line = await lines.get()
         if not line:
             return
         try:
@@ -191,13 +216,28 @@ async def handle_command(assistant: Assistant, printer: ConsolePrinter, line: st
         res = await assistant.push_item(args[0].upper())
         emit(f"   pushed: {res or 'no sink accepted it'}")
     elif cmd == "add" and args:
-        it = assistant.add_item("action", " ".join(args))
-        emit(f"   added {it['id']}")
+        title, owner, due = parse_add(" ".join(args), assistant.cfg.user_name)
+        it = assistant.add_item("action", title, owner=owner, due_text=due)
+        emit(f"   added {it['id']}: {it['title']}" + (f" — @{it['owner']}" if it.get("owner") else "")
+             + (f" — due {it.get('due_date') or it.get('due_text')}" if it.get("due_date") or it.get("due_text") else ""))
     elif cmd == "status":
         _print_status(assistant, printer)
     else:
         emit(f"   unknown command {cmd!r} — type 'help'")
     return None
+
+
+_OWNER = re.compile(r"(?:^|\s)@(?P<owner>[^\s@]+)")
+
+
+def parse_add(text: str, user_name: str) -> tuple[str, str | None, str | None]:
+    """``add Call Sam by Friday`` → ("Call Sam", you, "by Friday"); ``@Sam`` hands it to someone else."""
+    owner = user_name  # you typed it: your task unless you say whose
+    if m := _OWNER.search(text):
+        owner = m["owner"]
+        text = text[: m.start()] + text[m.end() :]
+    title, due = split_due(text)
+    return title[:1].upper() + title[1:], owner, due
 
 
 def _print_status(assistant: Assistant, printer: ConsolePrinter) -> None:
