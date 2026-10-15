@@ -1,8 +1,11 @@
-"""Resolve spoken due dates ("by Friday", "end of next week", "tomorrow EOD") to ISO dates."""
+"""Resolve spoken due dates ("by Friday", "end of next week", "tomorrow EOD", and the French
+"d'ici vendredi", "fin de la semaine prochaine", "le 20 octobre"…) to ISO dates."""
 
 from __future__ import annotations
 
 import re
+import unicodedata
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -23,6 +26,57 @@ DUE_PHRASE = re.compile(
     r"[^.?!,;]{0,40}",
     re.I,
 )
+
+
+# French → English rewrites applied before parsing (accents already stripped). Order matters:
+# longer phrases first. Every left-hand side is French-only, so English input is untouched.
+_FR_NUM = r"(\d+|un|une|deux|trois|quatre|cinq|six|sept|huit|neuf|dix|quinze|quelques)"
+_FR_NUM_VALUES = {
+    "un": "1", "une": "1", "deux": "2", "trois": "3", "quatre": "4", "cinq": "5", "six": "6",
+    "sept": "7", "huit": "8", "neuf": "9", "dix": "10", "quinze": "15", "quelques": "3",
+}  # fmt: skip
+_FR_WEEKDAYS = {"lundi": "monday", "mardi": "tuesday", "mercredi": "wednesday", "jeudi": "thursday",
+                "vendredi": "friday", "samedi": "saturday", "dimanche": "sunday"}  # fmt: skip
+_FR_MONTHS = {"janvier": "january", "fevrier": "february", "mars": "march", "avril": "april", "mai": "may",
+              "juin": "june", "juillet": "july", "aout": "august", "septembre": "september",
+              "octobre": "october", "novembre": "november", "decembre": "december"}  # fmt: skip
+_WD_FR = "|".join(_FR_WEEKDAYS)
+_FR_UNITS = {"jour": "day", "jours": "days", "semaine": "week", "semaines": "weeks", "mois": "months"}
+
+
+def _in_n(m: re.Match[str]) -> str:  # "dans trois jours" → "in 3 days"
+    return f"in {_FR_NUM_VALUES.get(m[1], m[1])} {_FR_UNITS[m[2]]}"
+
+
+_FR_RULES: list[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]]] = [
+    (re.compile(r"\bapres[- ]demain\b"), "day after tomorrow"),
+    (re.compile(r"\baujourd hui\b"), "today"),
+    (re.compile(r"\b(?:en )?fin de (?:la )?journee\b"), "end of day"),
+    (re.compile(r"\bce soir\b"), "tonight"),
+    (re.compile(r"\bdemain\b"), "tomorrow"),
+    (re.compile(r"\bfin de la semaine prochaine\b"), "end of next week"),
+    (re.compile(rf"\b({_WD_FR}) de la semaine prochaine\b"), r"next \1"),
+    (re.compile(r"\b(?:la )?fin de (?:la )?semaine\b|\bcette semaine\b"), "end of week"),
+    (re.compile(r"\b(?:la )?semaine prochaine\b"), "next week"),
+    (re.compile(r"\bfin (?:du|de) mois\b"), "end of month"),
+    (re.compile(r"\b(?:le )?mois prochain\b"), "next month"),
+    (re.compile(rf"\b(?:dans|d ici) {_FR_NUM} (jours?|semaines?|mois)\b"), _in_n),
+    (re.compile(rf"\b({_WD_FR}) prochaine?\b"), r"\1"),  # "vendredi prochain" = the coming Friday
+    (re.compile(r"\b1er\b"), "1st"),
+    (re.compile(r"\ble (\d{1,2})\b"), r"the \1th"),
+]
+
+
+def _french_to_english(s: str) -> str:
+    for rx, repl in _FR_RULES:
+        s = rx.sub(repl, s)
+    for fr, en in (*_FR_WEEKDAYS.items(), *_FR_MONTHS.items()):
+        s = re.sub(rf"\b{fr}\b", en, s)
+    return s
+
+
+def _strip_accents(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
 
 
 def today(tz: str | None = None) -> date:
@@ -54,9 +108,10 @@ def resolve_due(text: str | None, base: date | None = None) -> str | None:
     if not text:
         return None
     base = base or today()
-    s = text.lower().strip()
+    s = _strip_accents(text.lower().strip()).replace("’", "'")
     s = re.sub(r"[^\w\s/-]", " ", s)
     s = re.sub(r"\s+", " ", s)
+    s = _french_to_english(s)
 
     if m := re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", s):
         try:

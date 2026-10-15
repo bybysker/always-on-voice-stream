@@ -63,6 +63,12 @@ class WireSummary(BaseModel):
     updates: list[WireUpdate] = Field(description="Corrections to existing items after reading the whole meeting.")
     missing_items: list[WireNewItem] = Field(description="Important items the live pass missed; [] if none.")
     participants: list[str]
+    language: str = Field(description="ISO-639-1 code of the language most of the meeting was spoken in, e.g. 'fr' or 'en'.")
+    followup_subject: str = Field(description="Subject of a short follow-up email to the other participants; '' if pointless (e.g. solo).")
+    followup_body: str = Field(
+        description="Body of that email in Markdown, written in the meeting's language as the user (first person): "
+        "thanks, 2-4 key points/decisions, each person's next steps with dates, a sign-off with the user's name; '' if no subject."
+    )
 
 
 def _opt(s: str) -> str | None:

@@ -230,7 +230,7 @@ class Extractor:
         visible = [i for i in self.meeting.items.values() if not i.dismissed]
         content.append(
             text_block(
-                meeting_context(self.meeting, self.cfg.user_name, self.today(), self.bc.attendees)
+                meeting_context(self.meeting, self.cfg.user_name, self.today(), self.bc.attendees, self.bc.language)
                 + (f"\nVocabulary: {', '.join(self.bc.vocabulary)}" if self.bc.vocabulary else "")
                 + f"\n\nExisting items:\n{render_items(visible)}\n\n"
                 f"Only transcript part {part} (lines #{pending[0][0]}–#{pending[-1][0]}) is new; earlier "

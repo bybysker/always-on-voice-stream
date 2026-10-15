@@ -133,6 +133,9 @@ class BrainConfig(_Section):
     """Live extraction runs every minute or two all day, so it uses the cheapest
     current model (~$0.10-0.50/day). Raise to ``claude-sonnet-5-5`` for better recall."""
     effort: Literal["low", "medium", "high"] = "low"
+    language: str = "auto"
+    """Language for item titles, notes and e-mails: ``auto`` = the language the meeting is held in
+    (mixed French/English meetings are fine), or an ISO code such as ``fr`` / ``en`` to force one."""
     summary_model: str = "claude-sonnet-5-5"
     """End-of-meeting consolidation + notes (a few calls per day)."""
     summary_effort: Literal["low", "medium", "high"] = "medium"
@@ -162,13 +165,27 @@ class BrainConfig(_Section):
             "end of day",
             "eod",
             "next week",
+            # French
+            "tu peux",
+            "pourrais-tu",
+            "est-ce que tu",
+            "vous pouvez",
+            "je vais",
+            "je m'en occupe",
+            "on a décidé",
+            "il faut",
+            "d'ici",
+            "avant vendredi",
+            "à faire",
+            "semaine prochaine",
+            "demain",
         ]
     )
     """Hearing one of these brings the next extraction forward."""
     trigger_delay_s: float = 12.0
     """After a trigger phrase, wait this long (to hear the rest) then extract."""
     wake_phrases: list[str] = Field(
-        default_factory=lambda: ["hey claude", "okay claude", "ok claude", "hey assistant"]
+        default_factory=lambda: ["hey claude", "okay claude", "ok claude", "hey assistant", "dis claude", "hé claude"]
     )
     """Phrases that address the assistant directly ("Hey Claude, draft the ...")."""
     commands_from: list[str] = Field(default_factory=lambda: ["mic"])

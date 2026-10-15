@@ -100,6 +100,13 @@ done, dismiss items that were hypothetical or misheard. Use '' / "unchanged" for
 grounded, with evidence). Usually empty.
 6. participants — names of the people who took part, if mentioned.
 
+7. language — ISO-639-1 code of the language most of the meeting was spoken in.
+8. followup_subject / followup_body — a short, friendly follow-up email the user could send to the \
+other participants, written in the meeting's language in the user's voice (first person, signed with \
+the user's name): thanks, the key points/decisions, each person's next steps with dates. Leave both \
+'' when there were no other participants or nothing worth following up.
+
+Write everything (title, tldr, notes, item titles, email) in the language requested in the context. \
 Never invent facts that are not in the transcript.
 """
 
@@ -139,11 +146,29 @@ def render_items(items: list[Item]) -> str:
     return "\n".join(lines)
 
 
-def meeting_context(meeting: Meeting, user_name: str, today: date, attendees: list[str]) -> str:
+LANGUAGE_NAMES = {"fr": "French", "en": "English", "nl": "Dutch", "de": "German", "es": "Spanish", "it": "Italian"}
+
+
+def output_language(setting: str, meeting: Meeting | None = None) -> str:
+    lang = (setting or "auto").lower()
+    if lang == "auto" and meeting is not None and meeting.language:
+        lang = meeting.language
+    if lang == "auto":
+        return (
+            "the language the meeting is mostly held in (French if people mostly speak French, English if "
+            "English); keep names, product terms and quotes as spoken"
+        )
+    return LANGUAGE_NAMES.get(lang, lang)
+
+
+def meeting_context(
+    meeting: Meeting, user_name: str, today: date, attendees: list[str], language: str = "auto"
+) -> str:
     people = sorted({*attendees, *meeting.participants})
     return (
         f"User (speaker 'Me'): {user_name}\n"
         f"Today: {today.isoformat()} ({today.strftime('%A')})\n"
         f"Meeting title: {meeting.title or '(not set yet)'}\n"
-        f"Known participants: {', '.join(people) if people else '(unknown)'}"
+        f"Known participants: {', '.join(people) if people else '(unknown)'}\n"
+        f"Write titles, details, notes and agent briefs in: {output_language(language, meeting)}"
     )

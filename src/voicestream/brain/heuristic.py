@@ -2,8 +2,9 @@
 
 Used when no Claude API key is configured, when the daily budget is exhausted,
 and in tests. It only catches explicit phrasings ("I'll send...", "can you...",
-"we decided...", "Hey Claude, ..."), so treat it as a safety net, not a peer of
-the LLM extractor.
+"we decided...", "Hey Claude, ..." and their French equivalents "je vais…",
+"tu peux…", "on a décidé…", "Dis Claude, …"), so treat it as a safety net, not a
+peer of the LLM extractor.
 """
 
 from __future__ import annotations
@@ -17,42 +18,67 @@ from .tracker import ExtractedItem, ExtractionResult
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 _SELF_COMMIT = re.compile(
-    r"\b(?:i'll|i will|i'm going to|i am going to|let me|i can take|i'll take|i need to|i have to|i should)\s+(?P<task>.+)",
+    r"\b(?:(?:i'll|i will|i'm going to|i am going to|let me|i can take|i'll take|i need to|i have to|i should"
+    r"|je m'en occupe[,:]?|je vais|je dois|il faut que je|je peux m'en charger[,:]?)\s+"
+    r"|(?:je vais m'occuper|je m'occupe|je me charge) d(?:e\s+|'))(?P<task>.+)",
     re.I,
 )
-_WE_COMMIT = re.compile(r"\b(?:we need to|we have to|we should|we must|let's make sure to|let's)\s+(?P<task>.+)", re.I)
-_REQUEST = re.compile(
-    r"\b(?:can you|could you|would you|will you|please|can someone|could someone)\s+(?P<task>.+?)(?:\?|$)",
+_WE_COMMIT = re.compile(
+    r"\b(?:we need to|we have to|we should|we must|let's make sure to|let's"
+    r"|il faut qu'on|il faut|il faudrait|on doit|on devrait|nous devons)\s+(?P<task>.+)",
     re.I,
 )
+_REQUEST_WORDS = (
+    r"can you|could you|would you|will you|please|can someone|could someone"
+    r"|est-ce que tu peux|est-ce que tu pourrais|est-ce que vous pouvez|tu peux|tu pourrais|peux-tu|pourrais-tu"
+    r"|vous pouvez|pouvez-vous|pourriez-vous|merci de|quelqu'un peut"
+)
+_REQUEST = re.compile(rf"\b(?:{_REQUEST_WORDS})\s+(?P<task>.+?)(?:\?|$)", re.I)
 _NAMED_REQUEST = re.compile(
-    r"^(?P<name>[A-Z][a-z]+),?\s+(?:can you|could you|would you|will you|please)\s+(?P<task>.+?)(?:\?|$)"
+    rf"^(?P<name>[A-ZÀ-Ý][a-zà-ÿ]+),?\s+(?:{_REQUEST_WORDS})\s+(?P<task>.+?)(?:\?|$)", re.I
 )
-_NAMED_COMMIT = re.compile(r"^(?P<name>[A-Z][a-z]+)\s+(?:will|is going to|needs to|should)\s+(?P<task>.+)")
-_EXPLICIT_ITEM = re.compile(r"\b(?:action item|to-?do|follow[- ]up)\s*(?:is|:|,|-|for)?\s*(?P<task>.+)", re.I)
+_NAMED_COMMIT = re.compile(
+    r"^(?P<name>[A-ZÀ-Ý][a-zà-ÿ]+)\s+(?:will|is going to|needs to|should|va|doit|devrait)\s+(?P<task>.+)"
+)
+_EXPLICIT_ITEM = re.compile(
+    r"\b(?:action item|to-?do|follow[- ]up|point d'action|à faire|action)\s*(?:is|:|,|-|for|pour)?\s*(?P<task>.+)", re.I
+)
 _DECISION = re.compile(
-    r"\b(?:we decided|we've decided|we agreed|we've agreed|decision is|let's go with|we'll go with|we're going with|agreed that)\s*(?:to|that|on)?\s*(?P<what>.+)",
+    r"\b(?:we decided|we've decided|we agreed|we've agreed|decision is|let's go with|we'll go with|we're going with|agreed that"
+    r"|on a décidé|nous avons décidé|c'est décidé|décision|on part sur|on valide|on est d'accord|on retient)"
+    r"\s*(?:to|that|on|de|d'|que|qu'|pour|:)?\s*(?P<what>.+)",
     re.I,
 )
-_OPEN_Q = re.compile(r"\b(?:open question|we need to figure out|not sure (?:who|what|how|when|whether)|tbd)\b(?P<what>.*)", re.I)
+_OPEN_Q = re.compile(
+    r"\b(?:open question|we need to figure out|not sure (?:who|what|how|when|whether)|tbd"
+    r"|question ouverte|à clarifier|à voir|on ne sait pas (?:qui|quand|comment|si))\b(?P<what>.*)",
+    re.I,
+)
 _DUE = re.compile(
     r"\b(?P<due>(?:by|before|on|until)\s+(?:end of (?:the )?(?:day|week|month)|eod|eow|tomorrow|today|tonight|"
     r"next \w+|this \w+|monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
     r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\w*\.? \d{1,2}(?:st|nd|rd|th)?)|"
-    r"tomorrow|end of (?:the )?(?:day|week)|eod|eow|next week|in (?:\d+|a|two|three|a few|a couple of) (?:days?|weeks?))\b",
+    r"tomorrow|end of (?:the )?(?:day|week)|eod|eow|next week|in (?:\d+|a|two|three|a few|a couple of) (?:days?|weeks?)"
+    r"|(?:d'ici|avant|pour) (?:la fin de (?:la )?(?:semaine|journée|mois)|demain|ce soir|lundi|mardi|mercredi|jeudi"
+    r"|vendredi|samedi|dimanche|la semaine prochaine|le \d{1,2}(?:er)?(?: \w+)?)(?: prochaine?)?"
+    r"|demain|après-demain|la semaine prochaine|en fin de journée|dans (?:\d+|deux|trois|quelques) (?:jours|semaines))(?!\w)",
     re.I,
 )
-_FILLER = re.compile(r"^(?:um+|uh+|so|okay|ok|yeah|and|also|then|just|actually|basically)[,\s]+", re.I)
+_FILLER = re.compile(
+    r"^(?:um+|uh+|so|okay|ok|yeah|and|also|then|just|actually|basically|euh+|bon|alors|donc|ben|du coup|en fait|et)[,\s]+",
+    re.I,
+)
 _SKIP_TASKS = re.compile(
     r"^(?:see|think|guess|know|mean|say|be honest|be fair|go|do it|do that|try|check|look)\b[\s.!?]*$"
     r"|^(?:get started|start|begin|kick off|move on|wrap up|wrap it up|recap|dive in|jump in|go ahead|"
-    r"take a (?:step back|look|break)|see|think about it|circle back|discuss)\b",
+    r"take a (?:step back|look|break)|see|think about it|circle back|discuss)\b"
+    r"|^(?:commencer|démarrer|y aller|passer à|faire court|faire simple|partager (?:mon|l')écran|voir|regarder|réfléchir)\b",
     re.I,
 )
 
 
 def _clean_task(task: str) -> str:
-    task = task.strip().rstrip(".!?,;").strip()
+    task = task.replace("’", "'").strip().strip(":;,-–—").rstrip(".!?").strip()
     task = _DUE.sub("", task).strip().rstrip(",;").strip()
     task = re.sub(r"\s+", " ", task)
     while (m := _FILLER.match(task)) is not None:
@@ -72,7 +98,7 @@ def extract_heuristic(
     wake = [w.lower() for w in wake_phrases]
     for ref, seg in segments:
         is_me = seg.source == "mic"
-        text = seg.text.strip()
+        text = seg.text.strip().replace("’", "'")
         low = text.lower()
 
         # Direct commands to the assistant: "Hey Claude, draft a ..."

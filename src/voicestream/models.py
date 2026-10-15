@@ -190,6 +190,13 @@ def next_item_id(kind: ItemKind, existing: set[str]) -> str:
 # ------------------------------------------------------------------------- meeting
 
 
+class FollowUpEmail(BaseModel):
+    subject: str
+    body_markdown: str
+    to: list[str] = Field(default_factory=list)
+    """Recipient e-mail addresses when known (otherwise left for you to fill in)."""
+
+
 class Meeting(BaseModel):
     id: str = Field(default_factory=lambda: utcnow().strftime("%Y%m%d-%H%M%S"))
     title: str | None = None
@@ -199,9 +206,13 @@ class Meeting(BaseModel):
     segments: list[TranscriptSegment] = Field(default_factory=list)
     screen_notes: list[ScreenNote] = Field(default_factory=list)
     items: dict[str, Item] = Field(default_factory=dict)
+    language: str | None = None
+    """ISO-639-1 code of the meeting's main language (e.g. ``fr``), detected at wrap-up."""
     tldr: str | None = None
     notes_body: str | None = None
     """Model-written notes sections (the full notes are re-rendered from these + items)."""
+    followup_email: FollowUpEmail | None = None
+    """Ready-to-send recap for the other participants (sinks may create it as a draft)."""
     summary_markdown: str | None = None
     notes_ref: dict[str, str] = Field(default_factory=dict)
 

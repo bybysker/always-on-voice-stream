@@ -208,12 +208,20 @@ _HALLUCINATIONS = {
     "hmm.",
     "uh",
     "um",
+    "merci.",
+    "merci",
+    "merci beaucoup.",
+    "au revoir.",
+    "euh",
 }
 
 _HALLUCINATION_PATTERNS = [
     re.compile(r"^(subtitles|captions|transcription|transcribed) (by|from)\b", re.I),
     re.compile(r"amara\.org", re.I),
-    re.compile(r"^\W*(music|applause|silence|noise|inaudible|blank_audio)\W*$", re.I),
+    re.compile(r"^\W*(music|applause|silence|noise|inaudible|blank_audio|musique|applaudissements|rires)\W*$", re.I),
+    # Whisper's stock French inventions on silence/noise
+    re.compile(r"^sous-titr(age|es|é)", re.I),
+    re.compile(r"\b(soci[ée]t[ée] radio-canada|merci d'avoir regard[ée]|abonnez-vous)\b", re.I),
 ]
 
 
