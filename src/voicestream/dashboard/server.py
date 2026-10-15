@@ -177,18 +177,20 @@ async def _http_error(request: Request, exc: HTTPException) -> JSONResponse:
 
 
 async def _not_found(request: Request, exc: LookupError) -> JSONResponse:
-    if isinstance(exc, KeyError) and exc.args:
-        return _error(404, f"unknown item {exc.args[0]}")
-    return _error(404, str(exc) or "not found")
+    """Only the control API's own lookups are 404s: ``KeyError(item_id)`` for the item in
+    the path, a bare ``LookupError`` for "no meeting in progress". Any other KeyError or
+    IndexError is a bug, so it is re-raised (500, logged) rather than passed off as "not found"."""
+    item_id = request.path_params.get("item_id")
+    if type(exc) is KeyError and item_id is not None and exc.args == (item_id,):
+        return _error(404, f"unknown item {item_id}")
+    if type(exc) is LookupError:
+        return _error(404, str(exc) or "not found")
+    raise exc
 
 
-async def _invalid(request: Request, exc: ValueError) -> JSONResponse:
-    if isinstance(exc, ValidationError):
-        problems = (
-            f"{'.'.join(map(str, e['loc']))}: {e['msg']}" if e["loc"] else e["msg"] for e in exc.errors()
-        )
-        return _error(400, "; ".join(problems))
-    return _error(400, str(exc))
+async def _invalid(request: Request, exc: ValidationError) -> JSONResponse:
+    problems = (f"{'.'.join(map(str, e['loc']))}: {e['msg']}" if e["loc"] else e["msg"] for e in exc.errors())
+    return _error(400, "; ".join(problems))
 
 
 def _outcome(ok: bool, refusal: str) -> JSONResponse:
@@ -314,9 +316,10 @@ class _Api:
         # dot-files too: the data dir may hold a .env with API keys
         if not path.is_relative_to(root) or any(p.startswith(".") for p in path.relative_to(root).parts):
             raise HTTPException(403, "only files inside the voicestream data directory can be opened")
-        if not path.is_file():  # also keeps FIFOs and devices out of open()
-            raise HTTPException(404, "file not found")
         try:
+            # stat can fail too (ENAMETOOLONG, EACCES); also keeps FIFOs and devices out of open()
+            if not path.is_file():
+                raise HTTPException(404, "file not found")
             with path.open("rb") as fh:
                 data = fh.read(MAX_FILE_BYTES + 1)
         except OSError as exc:
@@ -387,7 +390,7 @@ def create_app(
     app = Starlette(
         routes=api.routes(),
         middleware=[Middleware(_Guard, token=token, allowed_hosts=allowed_hosts)],
-        exception_handlers={HTTPException: _http_error, LookupError: _not_found, ValueError: _invalid},
+        exception_handlers={HTTPException: _http_error, LookupError: _not_found, ValidationError: _invalid},
     )
     app.state.close_streams = api.close_streams
     return app

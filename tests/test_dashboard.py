@@ -202,6 +202,7 @@ def test_loopback_hosts_are_accepted(client: TestClient, host: str) -> None:
 def test_dns_rebinding_hosts_are_refused_even_for_the_page(client: TestClient, host: str) -> None:
     assert client.get("/api/state", headers={"host": host}).status_code == 403
     assert client.get("/", headers={"host": host}).status_code == 403
+    assert client.get("/api/events", headers={"host": host}).status_code == 403
 
 
 def test_allowed_hosts_follow_the_bind_address(fake: FakeAssistant) -> None:
@@ -300,6 +301,18 @@ def test_unknown_items_are_404(client: TestClient, method: str, path: str, body:
     assert r.json() == {"error": "unknown item ZZ"}
 
 
+@pytest.mark.parametrize("exc", [KeyError("markdown"), IndexError("list index out of range"), ValueError("bad state")])
+def test_internal_errors_are_500s_not_passed_off_as_404_or_400(fake: FakeAssistant, exc: Exception) -> None:
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise exc
+
+    fake.dismiss_item = fake.add_item = broken  # type: ignore[method-assign]
+    app = create_app(fake, TOKEN)
+    with TestClient(app, base_url=BASE, headers={TOKEN_HEADER: TOKEN}, raise_server_exceptions=False) as c:
+        assert c.post("/api/items/A1/dismiss").status_code == 500
+        assert c.post("/api/items", json={"kind": "action", "title": "x"}).status_code == 500
+
+
 def test_no_meeting_in_progress_is_404(client: TestClient, fake: FakeAssistant) -> None:
     fake.meeting = None
     for path, body in (("/api/items", {"kind": "action", "title": "x"}), ("/api/extract", None)):
@@ -392,14 +405,15 @@ def test_file_refuses_paths_outside_the_data_dir(client: TestClient, cfg: Config
     assert client.get("/api/file?path=..%2Fsecret.txt").status_code == 403
 
 
-def test_file_refuses_symlinks_that_leave_the_data_dir(client: TestClient, files: dict[str, Path]) -> None:
+def test_file_refuses_symlinks_that_leave_the_data_dir(client: TestClient, cfg: Config, files: dict[str, Path]) -> None:
     session = files["session"]
     try:
         os.symlink(files["secret"], session / "link.txt")
         os.symlink(files["secret"].parent, session / "linkdir", target_is_directory=True)
+        os.symlink(cfg.data_path / ".env", session / "env.txt")  # inside, but a dot-file
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not available")
-    for path in (session / "link.txt", session / "linkdir" / "secret.txt"):
+    for path in (session / "link.txt", session / "linkdir" / "secret.txt", session / "env.txt"):
         assert client.get("/api/file", params={"path": str(path)}).status_code == 403
 
 
@@ -410,6 +424,7 @@ def test_file_errors(client: TestClient, files: dict[str, Path], monkeypatch: py
     assert client.get("/api/file?path=notes%00.md").status_code == 400
     assert client.get("/api/file", params={"path": str(workspace / "missing.md")}).status_code == 404
     assert client.get("/api/file", params={"path": str(workspace)}).status_code == 404
+    assert client.get("/api/file", params={"path": "a" * 300}).status_code == 404  # stat → ENAMETOOLONG
     assert client.get("/api/file", params={"path": str(workspace / "chart.png")}).status_code == 415
     monkeypatch.setattr(server, "MAX_FILE_BYTES", 10)
     assert client.get("/api/file", params={"path": str(workspace / "draft.txt")}).status_code == 413

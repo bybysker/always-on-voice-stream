@@ -16,8 +16,8 @@ Block Kit digest goes out with:
 
 The digest stays within Slack's limits (≤50 blocks, ≤3000 characters per section,
 ≤150-character header) and carries a plain ``text`` fallback for notifications.
-Meetings with nothing to report are skipped. Set ``kinds`` to also get a short
-message per item as it's pushed.
+Meetings with nothing to report are skipped, and a meeting's digest is posted only
+once. Set ``kinds`` to also get a short message per item as it's pushed.
 
 Slack reports errors as a plain-text code such as ``invalid_payload``,
 ``no_service`` or ``channel_is_archived``. If Slack rejects the blocks, the message
@@ -144,7 +144,11 @@ class SlackSink(HttpSinkMixin, Sink):
                 lines = [self._line(i) for i in items]
                 body += [_section(chunk) for chunk in _chunks(heading, lines)]
                 listed += [heading, *lines]
-        links = [f"<{ref}|{sink.capitalize()}>" for sink, ref in meeting.notes_ref.items() if ref.startswith(("https://", "http://"))]
+        links = [
+            f"<{ref}|{sink.capitalize()}>"
+            for sink, ref in meeting.notes_ref.items()
+            if sink not in _NO_LINK_SINKS and ref.startswith(("https://", "http://"))
+        ]
         tail = [_context("Full notes: " + " · ".join(links))] if links else []
         room = BLOCKS_MAX - len(head) - len(tail)
         if len(body) > room:
@@ -162,6 +166,10 @@ class SlackSink(HttpSinkMixin, Sink):
         return f"slack:{meeting.id}/{item.id}"
 
     async def push_notes(self, meeting: Meeting, notes_markdown: str) -> str | None:
+        if ref := meeting.notes_ref.get(self.name):
+            # e.g. a later ``voicestream push``: the posted digest can't be edited, and a second one is noise
+            log.info("slack: digest for meeting %s already posted; not posting it again", meeting.id)
+            return ref
         if (payload := self.digest(meeting)) is None:
             log.info("slack: nothing to report for meeting %s; no digest posted", meeting.id)
             return None

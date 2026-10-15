@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -146,7 +147,7 @@ async def test_push_resolves_team_key_and_creates_issue(cfg: Config, meeting: Me
                 "assigneeId": "u-sam",
                 "projectId": "proj-1",
                 "labelIds": ["lbl-1"],
-                "id": issue_uuid("team-1", meeting.id, "A1"),
+                "id": issue_uuid("team-1", meeting.id, meeting.started_at.isoformat(), "A1"),
             }
         },
     }
@@ -157,6 +158,18 @@ def test_issue_ids_are_stable_v4_uuids() -> None:
     assert first == issue_uuid("team-1", "20261014-090000", "A1")
     assert first != issue_uuid("team-1", "20261014-090000", "A2")
     assert uuid.UUID(first).version == 4
+
+
+async def test_meetings_started_in_the_same_second_get_distinct_issue_ids(cfg: Config, key: str) -> None:
+    sink = make(cfg)
+    api = FakeApi(sink, TEAM_REPLY, CREATED, CREATED)
+    first = Meeting(id="20261014-090000")
+    second = Meeting(id=first.id, started_at=first.started_at + timedelta(milliseconds=300))
+
+    await sink.push_item(action(), first)
+    await sink.push_item(action(), second)
+
+    assert api.body(1)["variables"]["input"]["id"] != api.body(2)["variables"]["input"]["id"]
 
 
 async def test_team_lookup_is_cached(cfg: Config, meeting: Meeting, key: str) -> None:
@@ -306,7 +319,7 @@ async def test_graphql_errors_raise_with_message(cfg: Config, meeting: Meeting, 
     with pytest.raises(SinkError, match=r"dueDate must be a valid date \[INVALID_INPUT\]") as err:
         await sink.push_item(action(), meeting)
     assert err.value.retryable is False
-    assert api.body(2) == {"query": ISSUE, "variables": {"id": issue_uuid("team-1", meeting.id, "A1")}}
+    assert api.body(2) == {"query": ISSUE, "variables": {"id": issue_uuid("team-1", meeting.id, meeting.started_at.isoformat(), "A1")}}
 
 
 async def test_ratelimited_http_400_is_retryable(cfg: Config, meeting: Meeting, key: str) -> None:
@@ -335,11 +348,16 @@ async def test_retried_create_finds_the_issue_made_by_a_lost_attempt(
     sink = make(cfg)
     exists = {"data": None, "errors": [{"message": "Entity already exists"}]}
     found = {"data": {"issue": {"id": "issue-uuid", "url": ISSUE_URL}}}
-    api = FakeApi(sink, TEAM_REPLY, httpx.Response(503, text="unavailable"), exists, found)
+    api = FakeApi(sink, TEAM_REPLY, httpx.Response(503, text="unavailable"), exists, found, UPDATED)
+    item = action()
 
-    assert await sink.push_item(action(), meeting) == REF
+    assert await sink.push_item(item, meeting) == REF
     assert api.body(1) == api.body(2)  # same input, same id
     assert api.body(3)["query"] == ISSUE and api.body(3)["variables"]["id"] == api.body(1)["variables"]["input"]["id"]
+    # the found issue may predate the item's latest revision, so it's brought up to date
+    update = api.body(4)
+    assert update["query"] == ISSUE_UPDATE and update["variables"]["id"] == "issue-uuid"
+    assert update["variables"]["input"]["description"] == item_markdown(item, meeting)
 
 
 async def test_non_json_reply_raises(cfg: Config, meeting: Meeting, key: str) -> None:

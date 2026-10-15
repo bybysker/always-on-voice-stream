@@ -192,13 +192,17 @@ class LinearSink(HttpSinkMixin, Sink):
             data["labelIds"] = self.cfg.label_ids
         # A deterministic id makes a retried create (after a lost response) fail instead of
         # duplicating the issue; the existing issue is then looked up under that id.
-        data["id"] = issue_uuid(team.id, meeting.id, item.id)
+        # (Meeting ids have 1-second resolution, so the exact start keeps meetings apart.)
+        data["id"] = issue_uuid(team.id, meeting.id, meeting.started_at.isoformat(), item.id)
         try:
             result = (await self._gql(ISSUE_CREATE, {"input": data})).get("issueCreate") or {}
         except SinkError:
-            if existing := await self._existing(data["id"]):
-                return f"{existing['url']}#{existing['id']}"
-            raise
+            if (existing := await self._existing(data["id"])) is None:
+                raise
+            ref = f"{existing['url']}#{existing['id']}"
+            # the lost attempt may have sent an older revision (the dispatcher retries with the latest)
+            await self.update_item(item, meeting, ref)
+            return ref
         issue = result.get("issue") or {}
         if not result.get("success") or not issue.get("id"):
             raise SinkError(f"linear: issueCreate failed: {result}", retryable=False)

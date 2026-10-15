@@ -1033,7 +1033,8 @@ $('end').addEventListener('click', (e) => {
   if (!confirm('End this meeting now? voicestream writes the notes and pushes the items.')) return;
   act(e.currentTarget, async () => {
     await api('POST', '/api/meeting/end');
-    S.phase = 'ending';
+    // meeting.ending / meeting.ended may already have arrived on the event stream
+    if (S.phase === 'live') S.phase = 'ending';
   }).then(renderHeader);
 });
 

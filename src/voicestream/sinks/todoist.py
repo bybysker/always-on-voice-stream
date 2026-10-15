@@ -9,8 +9,9 @@ Todoist can recognise a retry of the same create (say, after a lost response)
 instead of adding the task twice. That is what makes retrying creates on 5xx safe.
 
 Due dates go up as ``due_date`` when the extractor resolved one. Otherwise the
-spoken phrase goes up as ``due_string`` for Todoist's own parser, in the
-transcription language. If Todoist can't parse it, the task is saved without a due
+spoken phrase goes up as ``due_string`` for Todoist's own parser, in the meeting's
+language, but only when the task is created: parsed again on a later update,
+"tomorrow" would move. If Todoist can't parse it, the task is saved without a due
 date; the phrase is still in the description. A due date is never cleared, since
 you may have set it in Todoist yourself.
 
@@ -116,7 +117,7 @@ class TodoistSink(HttpSinkMixin, Sink):
             # the fields were just saved, so the task exists: it's already completed
             log.info("todoist: task %s was already closed (%s)", task_id, exc)
 
-    def _fields(self, item: Item, meeting: Meeting) -> dict[str, Any]:
+    def _fields(self, item: Item, meeting: Meeting, *, create: bool) -> dict[str, Any]:
         data: dict[str, Any] = {
             "content": _clip(item.title, CONTENT_MAX),
             "description": _clip(item_markdown(item, meeting), DESCRIPTION_MAX),
@@ -124,16 +125,17 @@ class TodoistSink(HttpSinkMixin, Sink):
         }
         if item.due_date:
             data["due_date"] = item.due_date
-        elif item.due_text:
+        elif item.due_text and create:
             data["due_string"] = item.due_text
-            if lang := self.app.transcription.language:
+            # needed for a non-English phrase; with auto-detection (the default) only the meeting knows its language
+            if lang := self.app.transcription.language or meeting.language:
                 data["due_lang"] = lang
         return data
 
     # -------------------------------------------------------------- sink API
 
     async def push_item(self, item: Item, meeting: Meeting) -> str:
-        data = self._fields(item, meeting)
+        data = self._fields(item, meeting, create=True)
         if self.cfg.project_id:
             data["project_id"] = self.cfg.project_id
         if self.cfg.labels:
@@ -151,7 +153,7 @@ class TodoistSink(HttpSinkMixin, Sink):
 
     async def update_item(self, item: Item, meeting: Meeting, ref: str) -> None:
         task_id = ref.rstrip("/").rpartition("/")[2]
-        await self._save(f"/tasks/{task_id}", self._fields(item, meeting))
+        await self._save(f"/tasks/{task_id}", self._fields(item, meeting, create=False))
         if is_closed(item):
             await self._close(task_id)
 
