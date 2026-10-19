@@ -94,6 +94,8 @@ def human_error(exc: BaseException | str) -> str:
             return f"Speech-to-text with {name} needs your {name} key: Settings → Speech-to-text"
     if "not downloaded" in low and "model" in low:
         return "The speech-to-text model isn't downloaded yet: Settings → Speech-to-text → Download"
+    if "sounddevice unavailable" in low or "portaudio" in low:
+        return "Audio capture is missing from this install (sounddevice/PortAudio): reinstall Voicestream"
     if "whisper-server not found" in low:
         return "Speech-to-text on this Mac is missing from this install (whisper-server not found): reinstall Voicestream"
     if isinstance(exc, ImportError):
@@ -181,6 +183,10 @@ class AppHost:
         self._assistant: Assistant | None = None
         self._run_task: asyncio.Task[None] | None = None
         self._stop_requested = False
+        self._closing = False
+        """Set by :meth:`shutdown`: nothing may start listening any more (a restart in flight, a menu click)."""
+        self._stop_pressed = False
+        """Stop was asked for (not by a restart): a restart under way must not start listening again."""
         self._last_source_error: str | None = None
         self._factory = assistant_factory or _default_assistant
         self._background: set[asyncio.Task[Any]] = set()
@@ -198,6 +204,11 @@ class AppHost:
             cfg = load_app_config(self.config_path)
         except (ConfigError, OSError, ValueError) as exc:
             self.config_error = f"Your settings file has a problem: {exc}"
+            log.error("%s", self.config_error)
+            return None
+        except RuntimeError as exc:  # Path.expanduser: "~name/…" of an account that doesn't exist
+            self.config_error = (f"Your settings file has a problem: {exc} "
+                                 "(a path starts with ~name/ — write ~/… for your own folder)")
             log.error("%s", self.config_error)
             return None
         self.config_error = None
@@ -276,12 +287,17 @@ class AppHost:
         self._publish_state()
 
     def add_warning(self, message: str) -> None:
-        """Recent problems for the UI's banner: deduplicated, newest first, at most :data:`MAX_WARNINGS`."""
+        """Recent problems for the UI's banner: deduplicated, newest first, at most :data:`MAX_WARNINGS`.
+
+        The same problem often arrives twice, as a ``source.error`` event and as the log line around it
+        ("mic: capture/transcription failed: <error>"): those count as one, the shorter wording is kept."""
         message = message.strip()
         if not message:
             return
-        with contextlib.suppress(ValueError):
-            self.warnings.remove(message)
+        for old in list(self.warnings):
+            if old == message or old.endswith(f": {message}") or message.endswith(f": {old}"):
+                self.warnings.remove(old)
+                message = min(old, message, key=len)
         self.warnings.appendleft(message)
 
     def _on_log_warning(self, message: str) -> None:
@@ -293,6 +309,9 @@ class AppHost:
             msg = human_error(str(ev.data.get("error") or ""))
             self._last_source_error = msg
             self.add_warning(msg)
+        elif ev.type == "source.stopped" and ev.data.get("source") == "mic" and self.status in ("listening", "paused", "starting"):
+            # your microphone gave up for good (missing device, package or permission): not really listening
+            self._set_status("error", human_error(str(ev.data.get("error") or "the microphone stopped")))
         elif ev.type in ("meeting.started", "assistant.paused", "assistant.resumed"):
             self._publish_state()
         elif ev.type == "meeting.ended":
@@ -324,9 +343,14 @@ class AppHost:
         becomes state ``error`` with a plain message."""
         if self._run_task is not None and self._stop_requested:
             await asyncio.wait({self._run_task})  # a stop (or restart) still winding down
-        if self._assistant is not None:
+        if self._assistant is not None or self._closing:
             return
-        if problem := self._preflight():
+        try:
+            problem = self._preflight()
+        except Exception as exc:  # noqa: BLE001 - e.g. a hand-edited path that can't be expanded: shown, not raised
+            log.warning("could not start listening: %s", exc)
+            problem = human_error(exc)
+        if problem:
             self._set_status("error", problem)
             return
         self._set_status("starting")
@@ -397,7 +421,12 @@ class AppHost:
     async def listen_stop(self, force: bool = False, timeout: float | None = None) -> None:
         """Stop listening and wait for it (``timeout``: give up waiting, the stop continues). The meeting
         in progress is wrapped up unless ``force``; a forced stop never takes more than ~:data:`FORCE_STOP_S`.
-        Calling it with ``force`` while a normal stop is under way escalates that stop."""
+        Calling it with ``force`` while a normal stop is under way escalates that stop. A restart under
+        way (e.g. "apply now") then stays stopped."""
+        self._stop_pressed = True
+        await self._stop(force, timeout)
+
+    async def _stop(self, force: bool = False, timeout: float | None = None) -> None:
         task, a = self._run_task, self._assistant
         if task is None or task.done() or a is None:
             if self.status == "error":  # Stop dismisses the error
@@ -420,8 +449,11 @@ class AppHost:
         """Stop (ending the meeting in progress) and start again with the current settings."""
         paused = self._assistant.paused if self._assistant is not None else False
         self.restart_pending = False
+        self._stop_pressed = False
         if self._assistant is not None:
-            await self.listen_stop(force=force)
+            await self._stop(force=force)
+            if self._stop_pressed:  # you pressed Stop while the meeting was being wrapped up: stay stopped
+                return
         await self.listen_start(paused=paused)
 
     async def _apply_pending(self) -> None:
@@ -435,8 +467,10 @@ class AppHost:
         """After a settings or key change: restart now when no meeting is in progress, else when it ends.
         Returns ``{restarting, restart_pending}``; ``wait=False`` restarts in the background."""
         self.reload_config()
-        if self._assistant is None:
-            if self.status == "error" and not self.config_error:
+        if self._assistant is None or self._stop_requested or self._closing:
+            # not listening — or you pressed Stop and it is wrapping up: the next start reads the new
+            # settings anyway, and restarting here would turn the microphone back on after your Stop
+            if self.status == "error" and not self.config_error and not self._closing:
                 # the fix for the failed start may be this very change: try again
                 coro = self.listen_start()
             else:
@@ -569,9 +603,7 @@ class AppHost:
         assert self.loop is not None
         mirror = logs.WarningMirror(self._on_log_warning, self.loop)
         vs = logging.getLogger("voicestream")
-        vs.addHandler(mirror)
-        if vs.level == logging.NOTSET or vs.level > logging.WARNING:
-            vs.setLevel(logging.WARNING)
+        vs.addHandler(mirror)  # its own level is WARNING; the logger's stays as configured (INFO for the file)
         self._log_handlers.append((vs, mirror))
         if self.process_setup:
             try:
@@ -599,6 +631,7 @@ class AppHost:
     async def shutdown(self, force: bool = False) -> None:
         """Stop listening (a graceful wrap-up of up to :data:`GRACEFUL_SHUTDOWN_S`, then forced; at once
         forced with ``force``), downloads and the server. Safe to call again to escalate."""
+        self._closing = True  # a restart in flight (settings, pending after a meeting) must not start a new one
         if self._run_task is not None:
             if not force:
                 await self.listen_stop(timeout=GRACEFUL_SHUTDOWN_S)

@@ -33,8 +33,10 @@ def _launch(argv: list[str]) -> None:
 
 def reveal_command(path: Path) -> list[str]:
     if sys.platform == "darwin":
-        # a folder opens as a window; a file is selected in its folder
-        return ["open", str(path)] if path.is_dir() else ["open", "-R", str(path)]
+        # a folder opens as a window; a file is selected in its folder. So is a folder with an extension:
+        # `open X.app` (or .pkg, .bundle…) would start it rather than show it, and data_dir is a setting
+        is_plain_folder = path.is_dir() and not path.suffix
+        return ["open", str(path)] if is_plain_folder else ["open", "-R", str(path)]
     if sys.platform.startswith("win"):
         return ["explorer", str(path)] if path.is_dir() else ["explorer", f"/select,{path}"]
     return ["xdg-open", str(path if path.is_dir() else path.parent)]

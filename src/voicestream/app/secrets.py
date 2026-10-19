@@ -29,7 +29,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
-from .files import write_private
+from .files import editing, write_private
 
 log = logging.getLogger(__name__)
 
@@ -138,16 +138,17 @@ def _quoted(value: str) -> str:
 
 def _write_file(name: str, value: str | None) -> bool:
     """Set (or with ``None`` remove) ``name`` in the ``.env``, keeping every other line. Returns
-    whether the file had the name."""
-    lines = _read_file()
-    kept = [line for line in lines if _line_name(line) != name]
-    had = len(kept) != len(lines)
-    if value is not None:
-        kept.append(f"{name}={_quoted(value)}")
-    elif not had:
-        return False
-    write_private(env_file(), "\n".join(kept) + "\n")
-    return had
+    whether the file had the name. Locked: two keys saved at once must both end up in the file."""
+    with editing(env_file()):
+        lines = _read_file()
+        kept = [line for line in lines if _line_name(line) != name]
+        had = len(kept) != len(lines)
+        if value is not None:
+            kept.append(f"{name}={_quoted(value)}")
+        elif not had:
+            return False
+        write_private(env_file(), "\n".join(kept) + "\n")
+        return had
 
 
 def _file_value(name: str) -> str | None:
@@ -205,8 +206,11 @@ def set_secret(name: str, value: str) -> dict[str, Any]:
     value = (value or "").strip()
     if not value:
         return delete_secret(name)
-    if "\n" in value or "\r" in value or "\x00" in value:
-        raise SecretError(f"{name} must be a single line")
+    if not value.isprintable():
+        # not only \n and \r: the .env files are read with splitlines(), which also breaks lines at
+        # \x0b \x0c \x1c-\x1e \x85 \u2028 \u2029 — the rest of such a value would become a line of
+        # its own, setting any variable it names (ANTHROPIC_BASE_URL=…, PATH…) on every start
+        raise SecretError(f"{name} must be a single line of visible characters (no line breaks, tabs or control characters)")
     backend = _keyring()
     store: Store = "file"
     if backend is not None:

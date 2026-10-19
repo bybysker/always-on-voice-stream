@@ -1,0 +1,167 @@
+name: mac app
+
+# Builds Voicestream.app on a real Apple Silicon Mac, tests the on-device speech-to-text with the
+# whisper-server it bundles (real model, speech made with `say`), launches the packaged app in
+# self-test mode (window, page, menu-bar icon, hide/reopen, quit) and uploads the DMG.
+# Everything it runs is in packaging/mac/build.sh, so a Mac can do the same by hand.
+
+on:
+  push:
+    branches: [claude/clever-pascal-hdj7ym]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-app-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WHISPER_CPP_VERSION: v1.9.5
+  MODEL: large-v3-turbo-q5_0
+  VAD_MODEL: silero-v6.2.0
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  app:
+    name: build, test and package (macOS 15, arm64)
+    # pinned: macos-14 is end-of-life on 2026-11-02 and macos-latest moves
+    runs-on: macos-15
+    timeout-minutes: 75
+    env:
+      VOICESTREAM_WHISPER_SERVER: ${{ github.workspace }}/build/whisper/bin/whisper-server
+      MODELS_DIR: ${{ github.workspace }}/build/models
+      SPEECH_DIR: ${{ github.workspace }}/build/speech
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: About this runner
+        run: |
+          sw_vers
+          uname -m
+          sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
+          xcodebuild -version
+          cmake --version | head -n 1
+          python --version
+
+      - name: Cache whisper-server
+        id: whisper-cache
+        uses: actions/cache@v5
+        with:
+          path: build/whisper/bin/whisper-server
+          key: whisper-server-${{ env.WHISPER_CPP_VERSION }}-macos15-arm64-${{ hashFiles('packaging/mac/build.sh') }}
+
+      - name: Build whisper-server
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        run: packaging/mac/build.sh whisper
+
+      - name: Check whisper-server (system libraries only, arm64, runs)
+        run: packaging/mac/build.sh check-whisper
+
+      - name: Cache speech models
+        id: models-cache
+        uses: actions/cache@v5
+        with:
+          path: build/models
+          key: whisper-models-${{ env.MODEL }}-${{ env.VAD_MODEL }}
+
+      - name: Download speech models
+        if: steps.models-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$MODELS_DIR"
+          curl -fL --retry 4 --retry-delay 5 -o "$MODELS_DIR/ggml-$MODEL.bin" \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$MODEL.bin"
+          curl -fL --retry 4 --retry-delay 5 -o "$MODELS_DIR/ggml-$VAD_MODEL.bin" \
+            "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-$VAD_MODEL.bin"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[audio,dashboard,agents,app,mac,dev]" pyinstaller==6.22.3
+          python -m pip list
+
+      - name: Check the models against the catalogue
+        run: |
+          python - <<'EOF'
+          import hashlib, os, pathlib
+          from voicestream import stt_models
+          d = pathlib.Path(os.environ["MODELS_DIR"])
+          for name in (os.environ["MODEL"], os.environ["VAD_MODEL"]):
+              info, path = stt_models.CATALOG[name], d / f"ggml-{name}.bin"
+              data = path.read_bytes()
+              assert data[:4] == stt_models.GGML_MAGIC, f"{path} is not a ggml model"
+              if info.sha1:
+                  assert hashlib.sha1(data).hexdigest() == info.sha1, f"{path}: checksum mismatch"
+              print(f"{name}: {len(data) / 1e6:.0f} MB ok")
+          EOF
+
+      - name: Make test speech with say (French + English)
+        run: |
+          say -v '?' | grep -E ' (fr|en)_[A-Z]{2} ' || true
+          python packaging/mac/make_speech.py "$SPEECH_DIR"
+
+      - name: Test suite
+        # the real-server tests run in the next step, with their output shown
+        run: python -m pytest -q -o addopts="" --ignore=tests/js -rs -k "not real_whisper_server"
+
+      - name: Real whisper-server on the CPU (French + English speech)
+        env:
+          VOICESTREAM_WHISPER_TEST_MODEL: ${{ github.workspace }}/build/models/ggml-large-v3-turbo-q5_0.bin
+          VOICESTREAM_WHISPER_TEST_VAD: ${{ github.workspace }}/build/models/ggml-silero-v6.2.0.bin
+          VOICESTREAM_WHISPER_TEST_SPEECH: ${{ github.workspace }}/build/speech
+          # the runner's Metal is a paravirtual GPU: accuracy is checked on the CPU
+          VOICESTREAM_WHISPER_TEST_GPU: "0"
+          VOICESTREAM_WHISPER_TEST_REQUIRED: "1"
+        run: python -m pytest -q -o addopts="" tests/test_whisper_cpp.py -k real_whisper_server -rA -s
+
+      - name: Real whisper-server on Metal (informational)
+        continue-on-error: true
+        env:
+          VOICESTREAM_WHISPER_TEST_MODEL: ${{ github.workspace }}/build/models/ggml-large-v3-turbo-q5_0.bin
+          VOICESTREAM_WHISPER_TEST_VAD: ${{ github.workspace }}/build/models/ggml-silero-v6.2.0.bin
+          VOICESTREAM_WHISPER_TEST_SPEECH: ${{ github.workspace }}/build/speech
+          VOICESTREAM_WHISPER_TEST_GPU: "1"
+          VOICESTREAM_WHISPER_TEST_REQUIRED: "1"
+        run: python -m pytest -q -o addopts="" tests/test_whisper_cpp.py -k real_whisper_server -rA -s
+
+      - name: App icon
+        run: packaging/mac/build.sh icon
+
+      - name: Build Voicestream.app
+        run: packaging/mac/build.sh app
+
+      - name: Verify the bundle (signature, Info.plist, arm64, bundled whisper-server)
+        run: packaging/mac/build.sh verify
+
+      - name: Self-test launch of the packaged app
+        run: packaging/mac/build.sh selftest
+
+      - name: DMG
+        id: dmg
+        run: |
+          packaging/mac/build.sh dmg
+          echo "path=$(ls dist/Voicestream-*-arm64.dmg)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the DMG
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.dmg.outputs.path }}
+          archive: false  # one file, as is: zipping would drop the app's permissions bits
+          if-no-files-found: error
+
+      - name: Upload the self-test report and screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: selftest
+          path: build/selftest/
+          if-no-files-found: warn

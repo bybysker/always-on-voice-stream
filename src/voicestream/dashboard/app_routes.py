@@ -28,7 +28,7 @@ from ..app import secrets as keys
 from ..app.checks import run_checks
 from ..app.host import HostError
 from ..app.meetings import MeetingBusy, MeetingNotFound, resolve_folder
-from ..app.settings import SettingsError, save_changes, settings_view
+from ..app.settings import SettingsError, save_checked, settings_view
 from ..costs import estimate_daily
 from .server import AgentApproval, ItemEdit, NewItem, _Body, _error, _parse  # noqa: F401 - shared bodies
 
@@ -158,6 +158,7 @@ class AppApi:
             Route("/api/reveal", self.reveal, methods=["POST"]),
             Route("/api/open-settings", self.open_settings, methods=["POST"]),
             Route("/api/permissions/{kind}", self.permission, methods=["POST"]),
+            Route("/api/google-bridge", self.google_bridge, methods=["GET"]),
         ]
 
     # ------------------------------------------------------------------ the page
@@ -217,13 +218,20 @@ class AppApi:
 
     async def patch_settings(self, request: Request) -> JSONResponse:
         body = await _parse(request, SettingsPatch)
-        cfg = await asyncio.to_thread(save_changes, self.host.config_path, body.changes)
+        # refuses the settings that only matter for running programs (see app.settings.LOCKED)
+        cfg, review = await asyncio.to_thread(save_checked, self.host.config_path, body.changes)
+        if review:
+            # what Voicestream runs, or where it sends your meetings and keys, changed: say so where you
+            # will see it (the app's warning banner mirrors voicestream warnings) and in the log
+            log.warning("settings changed what Voicestream runs or where it sends data — check this was you: %s",
+                        "; ".join(f"{r['field']} = {r['value']}" for r in review))
         result = await self.host.apply_settings(wait=False)
-        self.host.bus.publish("settings.changed", changes=sorted(body.changes), **result)
+        self.host.bus.publish("settings.changed", changes=sorted(body.changes), review=review, **result)
         return JSONResponse({
             "values": cfg.model_dump(mode="json"),
             "restart_required": result["restart_pending"],
             "restarting": result["restarting"],
+            "review": review,
         })  # fmt: skip
 
     def _secret_name(self, request: Request) -> str:
@@ -381,6 +389,13 @@ class AppApi:
         body = await _parse(request, OpenSettingsRequest)
         await asyncio.to_thread(desktop.open_settings, body.pane)
         return JSONResponse({"ok": True})
+
+    async def google_bridge(self, request: Request) -> JSONResponse:
+        """The Apps Script for Settings → Your tools → Google ("Copy the bridge script"): what
+        ``voicestream google-bridge`` prints, for people who never open a terminal."""
+        from ..sinks.google import BRIDGE_SOURCE
+
+        return JSONResponse({"script": await asyncio.to_thread(BRIDGE_SOURCE.read_text, encoding="utf-8")})
 
 
 def _history(spend_dir: Path, today: Any) -> list[dict[str, Any]]:

@@ -448,7 +448,17 @@ def _real_binary() -> Path | None:
 
 REAL = _real_binary()
 TEST_MODEL = os.environ.get("VOICESTREAM_WHISPER_TEST_MODEL")
-needs_real = pytest.mark.skipif(REAL is None, reason="no whisper-server binary on this machine")
+GPU = os.environ.get("VOICESTREAM_WHISPER_TEST_GPU", "1") != "0"
+"""``VOICESTREAM_WHISPER_TEST_GPU=0``: run the real server on the CPU (a CI runner's Metal is a paravirtual GPU)."""
+TEST_VAD = os.environ.get("VOICESTREAM_WHISPER_TEST_VAD")  # ggml-silero-v6.2.0.bin: transcribe with voice detection on
+REQUIRED = os.environ.get("VOICESTREAM_WHISPER_TEST_REQUIRED") == "1"
+"""Set by the macOS CI job: fail, instead of skipping, when the real-server tests can't run."""
+needs_real = pytest.mark.skipif(REAL is None and not REQUIRED, reason="no whisper-server binary on this machine")
+
+
+def _skip_unless(ok: object, reason: str) -> None:
+    if not ok:
+        (pytest.fail if REQUIRED else pytest.skip)(reason)
 
 
 def _empty_test_model() -> Path | None:
@@ -461,12 +471,14 @@ def _empty_test_model() -> Path | None:
 @needs_real
 async def test_real_whisper_server_protocol(cfg: Config) -> None:
     """Our flags, routes and fields against the real binary (an empty test model returns no text)."""
+    _skip_unless(REAL, "no whisper-server binary (set VOICESTREAM_WHISPER_SERVER)")
     model = Path(TEST_MODEL) if TEST_MODEL else _empty_test_model()
-    if model is None:
-        pytest.skip("no whisper.cpp model to load (set VOICESTREAM_WHISPER_TEST_MODEL or VOICESTREAM_WHISPER_TEST_DIR)")
+    _skip_unless(model, "no whisper.cpp model to load (set VOICESTREAM_WHISPER_TEST_MODEL or VOICESTREAM_WHISPER_TEST_DIR)")
+    assert model is not None
     cfg.transcription.backend = "whisper-cpp"
     cfg.transcription.whisper_cpp.binary = str(REAL)
     cfg.transcription.whisper_cpp.model = str(model)
+    cfg.transcription.whisper_cpp.gpu = GPU
     silero = model.with_name("for-tests-silero-v6.2.0-ggml.bin")  # real Silero weights, shipped with the tests
     if silero.is_file():
         vad = stt_models.model_path(cfg, stt_models.VAD_MODEL)
@@ -488,13 +500,19 @@ async def test_real_whisper_server_protocol(cfg: Config) -> None:
 SPEECH = os.environ.get("VOICESTREAM_WHISPER_TEST_SPEECH")  # dir with en.wav/en.txt, fr.wav/fr.txt
 
 
-@pytest.mark.skipif(not (REAL and TEST_MODEL and SPEECH), reason="needs a real model and recorded speech")
+@pytest.mark.skipif(not (REAL and TEST_MODEL and SPEECH) and not REQUIRED, reason="needs a real model and recorded speech")
 @pytest.mark.parametrize("lang", ["en", "fr"])
 async def test_real_whisper_server_transcribes_speech(cfg: Config, lang: str) -> None:
+    _skip_unless(REAL and TEST_MODEL and SPEECH, "needs VOICESTREAM_WHISPER_SERVER, _TEST_MODEL and _TEST_SPEECH")
     cfg.transcription.backend = "whisper-cpp"
     cfg.transcription.whisper_cpp.binary = str(REAL)
     cfg.transcription.whisper_cpp.model = str(TEST_MODEL)
     cfg.transcription.whisper_cpp.allowed_languages = ["fr", "en"]
+    cfg.transcription.whisper_cpp.gpu = GPU
+    if TEST_VAD:  # as the app runs it: Silero voice detection before each utterance
+        vad = stt_models.model_path(cfg, stt_models.VAD_MODEL)
+        vad.parent.mkdir(parents=True, exist_ok=True)
+        vad.write_bytes(Path(TEST_VAD).read_bytes())
     wav, expected = Path(SPEECH) / f"{lang}.wav", (Path(SPEECH) / f"{lang}.txt").read_text(encoding="utf-8")
     with wave.open(str(wav)) as w:
         assert (w.getframerate(), w.getnchannels(), w.getsampwidth()) == (SAMPLE_RATE, 1, 2)
@@ -505,11 +523,13 @@ async def test_real_whisper_server_transcribes_speech(cfg: Config, lang: str) ->
         res = await t.transcribe_utterance(  # type: ignore[attr-defined]
             Utterance(source="mic", samples=pcm, t_start=0, t_end=len(pcm) / SAMPLE_RATE, speech_seconds=len(pcm) / SAMPLE_RATE), None)
         took = time.monotonic() - started
+        used_vad = t.server.vad_model is not None  # type: ignore[attr-defined]
     finally:
         await t.aclose()
     words = lambda s: {w.strip(".,!?;:'’").lower() for w in s.split() if len(w) > 3}  # noqa: E731
     overlap = len(words(res.text) & words(expected)) / max(1, len(words(expected)))
-    print(f"[{lang}] {took:.1f}s · {overlap:.0%} words · {res.text!r}")
+    print(f"[{lang}] {'GPU' if GPU else 'CPU'}{' + VAD' if used_vad else ''} · {took:.1f}s · {overlap:.0%} words · {res.text!r}")
+    assert used_vad == bool(TEST_VAD)
     assert res.language == lang and overlap >= 0.6, res.text
 
 

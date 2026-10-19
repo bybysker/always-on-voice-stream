@@ -126,6 +126,8 @@ def run(args: argparse.Namespace) -> int:
     if mode == "native":
         try:
             from . import native
+
+            native.preflight()
         except ImportError as exc:  # pywebview or PyObjC half-installed: still usable in the browser
             log.warning("no native window (%s): opening the app in the browser", exc)
             mode = "browser"

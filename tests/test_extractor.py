@@ -359,14 +359,36 @@ async def test_context_is_capped_by_dropping_the_oldest_blocks(cfg: Config, monk
         rig.say(NEUTRAL, at=10.0 * i)
         await rig.extract_at(10.0 * i + 5)
     blocks = [b["text"] for b in rig.transcript_blocks(2)]
-    assert len(blocks) == 2 and blocks[0].startswith("<transcript part='2'>")
-    assert sum(map(len, blocks)) <= extractor_mod.MAX_CONTEXT_CHARS
+    # down to 70% of the cap in one go: here that leaves the new block alone
+    assert len(blocks) == 1 and blocks[0].startswith("<transcript part='3'>")
+    assert sum(map(len, blocks)) <= extractor_mod.MAX_CONTEXT_CHARS * extractor_mod.TRIM_TO_FRACTION
     assert rig.transcript_blocks(2)[-1]["cache_control"] == {"type": "ephemeral"}
     monkeypatch.setattr(extractor_mod, "MAX_CONTEXT_CHARS", 10)
     rig.say(NEUTRAL, at=40.0)
     await rig.extract_at(45.0)
     (only,) = rig.transcript_blocks(3)  # an oversized new block is still sent on its own
     assert only["text"].startswith("<transcript part='4'>")
+
+
+async def test_trimming_the_context_keeps_the_cached_prefix_for_many_rounds(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Over the cap, old blocks go in one large cut, not one per round: every round that drops a block
+    rewrites the whole cached prefix (a cache miss on ~60k tokens)."""
+    rig = Rig(cfg, [_empty() for _ in range(12)])
+    rig.say(NEUTRAL, at=0.0)
+    await rig.extract_at(5.0)
+    size = len(rig.transcript_blocks(0)[0]["text"]) + 10  # later blocks cite longer line numbers
+    monkeypatch.setattr(extractor_mod, "MAX_CONTEXT_CHARS", 5 * size)
+    firsts = []
+    for i in range(1, 12):
+        rig.say(NEUTRAL, at=10.0 * i)
+        await rig.extract_at(10.0 * i + 5)
+        blocks = [b["text"] for b in rig.transcript_blocks(i)]
+        assert sum(map(len, blocks)) <= extractor_mod.MAX_CONTEXT_CHARS
+        firsts.append(blocks[0].split("'")[1])  # the part number the context starts with
+    # parts 1-5 fit; part 6 cuts down to 70% (parts 4-6), which then holds for two more rounds
+    assert firsts == ["1", "1", "1", "1", "4", "4", "4", "7", "7", "7", "10"]
+    cut = [i for i in range(1, len(firsts)) if firsts[i] != firsts[i - 1]]
+    assert len(cut) == 3  # 3 cache rewrites in 11 rounds, not one per round once over the cap
 
 
 async def test_run_loop_extracts_when_due_and_stops(cfg: Config) -> None:

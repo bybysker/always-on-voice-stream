@@ -4,9 +4,30 @@ from __future__ import annotations
 
 import contextlib
 import os
+import tempfile
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 from ..storage import private_dir
+
+_locks: dict[str, threading.RLock] = {}
+_locks_guard = threading.Lock()
+
+
+@contextlib.contextmanager
+def editing(path: Path) -> Iterator[None]:
+    """Hold this around a read-modify-write of ``path``.
+
+    The app's routes run file edits in worker threads, so two requests at once (two settings saves,
+    two keys typed quickly) would each read the file and write back their own version: the first
+    change would be lost. One lock per file, re-entrant so a helper may take it again.
+    """
+    key = os.path.abspath(path)
+    with _locks_guard:
+        lock = _locks.setdefault(key, threading.RLock())
+    with lock:
+        yield
 
 
 def write_private(path: Path, text: str) -> None:
@@ -14,12 +35,14 @@ def write_private(path: Path, text: str) -> None:
 
     Atomic so a crash or a full disk mid-write never leaves half a settings file (the next start
     would refuse it), and created 0600 from the first byte: the umask of a Finder-launched app is
-    not ours to rely on, and these files can hold API keys.
+    not ours to rely on, and these files can hold API keys. The temporary file gets a fresh random
+    name (``mkstemp``: ``O_EXCL``, never follows a symlink), so two writers can't truncate each
+    other's text, and nobody can plant a link at a predictable name to have us overwrite its target.
     """
     if not path.parent.exists():
         private_dir(path.parent)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)

@@ -3,13 +3,16 @@
 Used by the app's Meetings screen (through :class:`Meetings`) and by ``voicestream push`` /
 ``voicestream summarize`` (the module-level functions), so both do the same thing.
 
-Two rules keep a meeting from ever existing as two diverging copies:
+Three rules keep a meeting from ever existing as two diverging copies:
 
 * a meeting the running assistant still holds in memory (the one in progress, or one that ended
   during this run) is changed through that in-memory session, never by rewriting its file — the
   session's next save would undo the change;
 * a meeting that is still being recorded by *another* process (``voicestream run`` in a
-  terminal) is read-only here: that process owns its file.
+  terminal) is read-only here: that process owns its file;
+* while a push, a sync of an edit or new notes are under way for a past meeting, everything uses
+  that work's copy (:class:`_Held`) and the work runs one at a time per meeting — otherwise its
+  final save would undo an edit made meanwhile, and two pushes at once would each create the items.
 
 Relative deadlines ("by Friday") in a re-summarized meeting are resolved from the meeting's own
 date, not from today.
@@ -20,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Collection
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -200,6 +204,17 @@ class MeetingsHost(Protocol):
     def track(self, task: asyncio.Task[Any]) -> None: ...
 
 
+@dataclass
+class _Held:
+    """A past meeting with work in flight: the one copy every operation on it uses meanwhile."""
+
+    meeting: Meeting
+    dir: Path
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    """One push / sync / summary at a time for this meeting."""
+    users: int = 0
+
+
 class Meetings:
     """The Meetings screen's operations, sharing the host's bus, cost meter and (while listening)
     the running assistant's sinks and in-memory meetings."""
@@ -209,6 +224,8 @@ class Meetings:
         self._cache: dict[str, tuple[int, dict[str, Any], str]] = {}
         """folder name -> (meeting.json mtime, summary, search text): parsing every meeting.json
         (each holds its whole transcript) on every list would be slow after a few months."""
+        self._held: dict[str, _Held] = {}
+        """folder name -> the copy of a past meeting that has work in flight."""
 
     @property
     def cfg(self) -> Config:
@@ -229,7 +246,26 @@ class Meetings:
         return None
 
     def _load(self, folder: str) -> tuple[Meeting, Path]:
+        """The meeting from disk — or the copy that work in flight holds (it is newer, and it is the
+        one that work will save)."""
+        held = self._held.get(folder)
+        if held is not None:
+            return held.meeting, held.dir
         return load_meeting(resolve_folder(self.cfg, folder))
+
+    def _hold(self, folder: str, meeting: Meeting, d: Path) -> _Held:
+        """Register work on ``meeting`` (got from :meth:`_load`, so the held copy if there is one).
+        Synchronous on purpose: from here on every edit lands in this copy. Pair with :meth:`_release`."""
+        held = self._held.get(folder)
+        if held is None:
+            held = self._held[folder] = _Held(meeting, d)
+        held.users += 1
+        return held
+
+    def _release(self, folder: str, held: _Held) -> None:
+        held.users -= 1
+        if held.users <= 0 and self._held.get(folder) is held:
+            del self._held[folder]  # everything is saved: the next read is from disk again
 
     def _summary(self, d: Path) -> tuple[dict[str, Any], str] | None:
         try:
@@ -269,7 +305,7 @@ class Meetings:
     def detail(self, folder: str) -> dict[str, Any]:
         d = resolve_folder(self.cfg, folder)
         s = self.live_session(folder)
-        meeting = s.meeting if s is not None else load_meeting(d)[0]
+        meeting = s.meeting if s is not None else self._load(folder)[0]
         return {
             "meeting": meeting.model_dump(mode="json"),
             "notes_markdown": notes_markdown(d, meeting),
@@ -337,16 +373,21 @@ class Meetings:
         item = meeting.items.get(item_id)
         if item is None or not item.pushed:
             return
+        held = self._hold(d.name, meeting, d)  # now, not in the task: an edit made before it runs lands here too
 
         async def go() -> None:
-            sinks, temporary = self._sinks()
             try:
-                d_ = Dispatcher(self.cfg, meeting, sinks, self.host.bus, on_change=lambda: save_meeting(d, meeting))
-                await d_.sync(require_stable=False, only={item_id})
+                async with held.lock:
+                    sinks, temporary = self._sinks()
+                    try:
+                        d_ = Dispatcher(self.cfg, meeting, sinks, self.host.bus, on_change=lambda: save_meeting(d, meeting))
+                        await d_.sync(require_stable=False, only={item_id})
+                    finally:
+                        save_meeting(d, meeting)
+                        if temporary:
+                            await _close(sinks)
             finally:
-                save_meeting(d, meeting)
-                if temporary:
-                    await _close(sinks)
+                self._release(d.name, held)
 
         self.host.track(asyncio.ensure_future(go()))
 
@@ -371,18 +412,23 @@ class Meetings:
         meeting, d = self._load(folder)
         if meeting.ended_at is None and not force:
             raise MeetingBusy("this meeting is still in progress in another voicestream: end it there first")
-        sinks, temporary = self._sinks()
+        held = self._hold(folder, meeting, d)
         try:
-            if not sinks:
-                return {"items": {}, "notes": {}, "errors": ["no tools are enabled (Settings → Your tools)"], "count": 0,
-                        "up_to_date": False}
-            result = await push_meeting(
-                self.cfg, meeting, sinks, bus=self.host.bus, notes=notes, sink_names=sink_names,
-                save=lambda: save_meeting(d, meeting),
-            )
+            async with held.lock:  # a second push waits, then finds the items already pushed
+                sinks, temporary = self._sinks()
+                try:
+                    if not sinks:
+                        return {"items": {}, "notes": {}, "errors": ["no tools are enabled (Settings → Your tools)"],
+                                "count": 0, "up_to_date": False}
+                    result = await push_meeting(
+                        self.cfg, meeting, sinks, bus=self.host.bus, notes=notes, sink_names=sink_names,
+                        save=lambda: save_meeting(d, meeting),
+                    )
+                finally:
+                    if temporary:
+                        await _close(sinks)
         finally:
-            if temporary:
-                await _close(sinks)
+            self._release(folder, held)
         self.host.bus.publish("meeting.saved", meeting_id=meeting.id, folder=d.name)
         return result
 
@@ -414,8 +460,13 @@ class Meetings:
                 s.store.save()
             else:
                 meeting, d = self._editable(folder)
-                notes = await summarize_meeting(self.cfg, meeting, llm, budget_ok=budget_ok)
-                save_meeting(d, meeting, notes)
+                held = self._hold(folder, meeting, d)
+                try:
+                    async with held.lock:
+                        notes = await summarize_meeting(self.cfg, meeting, llm, budget_ok=budget_ok)
+                        save_meeting(d, meeting, notes)
+                finally:
+                    self._release(folder, held)
         except Exception as exc:
             bus.publish("meeting.notes_updated", meeting_id=None, folder=folder, notes=None, error=str(exc))
             raise

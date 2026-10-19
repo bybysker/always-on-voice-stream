@@ -27,6 +27,7 @@ shows the estimate for your settings). Agent work is extra and has its own budge
 
 ## Contents
 
+- [Install the app (Mac)](#install-the-app-mac) · [Installer l'application](#installer-lapplication-mac)
 - [Quick start](#quick-start)
 - [What happens during a meeting](#what-happens-during-a-meeting)
 - [Capturing system audio](#capturing-system-audio-what-the-others-say)
@@ -39,6 +40,66 @@ shows the estimate for your settings). Agent work is extra and has its own budge
 - [Privacy and consent](#privacy-and-consent)
 - [Configuration reference](#configuration-reference)
 - [Development](#development)
+
+## Install the app (Mac)
+
+For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. No terminal needed.
+
+1. Download `Voicestream-<version>-arm64.dmg`: from the project's Releases page, or from the
+   **mac app** workflow's artifacts on GitHub Actions.
+2. Open it and drag **Voicestream** onto **Applications**. Then open Voicestream from your
+   Applications folder.
+3. macOS says it can't verify the app, because it isn't notarized by Apple. Close that message
+   (don't choose Move to Trash), open **System Settings → Privacy & Security**, scroll down to
+   "Voicestream was blocked…", click **Open Anyway**, enter your password and click **Open**.
+   This is needed once for each version you download. Since macOS Sequoia, Control-click → Open
+   no longer skips it.
+4. Follow the setup: your name and languages, speech-to-text ("On this Mac" is free and private;
+   it downloads a 547 MB model), your Claude key (saved in the macOS Keychain), then click the two
+   permission tests so macOS asks for **Microphone** and **System Audio Recording**. Allow both.
+5. Voicestream now lives in the menu bar (the microphone icon). Closing the window doesn't stop
+   it listening: click the icon → **Open Voicestream** to bring the window back, or **Quit
+   Voicestream** to stop. **Open at login** in the same menu starts it with your Mac.
+
+**After an update**, install the new DMG the same way (step 3 again). macOS ties permissions to
+each build of an app that isn't notarized, so they may have to be granted again, even when System
+Settings still shows them as on. In **Privacy & Security → Microphone** and **Privacy & Security →
+Screen & System Audio Recording**, remove Voicestream with the **−** button (or switch it off and
+on again), open Voicestream and allow it when asked. The Keychain may also ask once whether the new
+version may read your saved keys: click **Always Allow**.
+
+To build the app yourself on a Mac: `packaging/mac/build.sh` (see the comments at its top).
+
+### Installer l'application (Mac)
+
+Pour un Mac Apple Silicon (M1 ou plus récent) sous macOS 14.2 ou plus. Aucun terminal nécessaire.
+
+1. Téléchargez `Voicestream-<version>-arm64.dmg` : sur la page Releases du projet, ou dans les
+   artefacts du workflow **mac app** de GitHub Actions.
+2. Ouvrez-le et faites glisser **Voicestream** sur **Applications**, puis ouvrez Voicestream
+   depuis votre dossier Applications.
+3. macOS indique qu'il ne peut pas vérifier l'app, car elle n'est pas notariée par Apple. Fermez ce
+   message (sans choisir « Placer dans la corbeille »), ouvrez **Réglages Système →
+   Confidentialité et sécurité**, descendez jusqu'à « L'ouverture de Voicestream a été
+   bloquée… », cliquez sur **Ouvrir quand même**, saisissez votre mot de passe puis cliquez sur
+   **Ouvrir**. À refaire une fois pour chaque version téléchargée. Depuis macOS Sequoia, le
+   Contrôle-clic → Ouvrir ne suffit plus.
+4. Suivez l'assistant : votre nom et vos langues, la transcription (« Sur ce Mac » est gratuit et
+   privé ; un modèle de 547 Mo est téléchargé), votre clé Claude (enregistrée dans le trousseau de
+   macOS), puis cliquez sur les deux tests d'autorisation pour que macOS demande l'accès au
+   **Micro** et à l'**Enregistrement audio du système**. Autorisez les deux.
+5. Voicestream vit ensuite dans la barre des menus (l'icône de micro). Fermer la fenêtre ne coupe
+   pas l'écoute : cliquez sur l'icône → **Ouvrir Voicestream** pour retrouver la fenêtre, ou
+   **Quitter Voicestream** pour arrêter. **Ouvrir à la connexion**, dans le même menu, le lance
+   avec votre Mac.
+
+**Après une mise à jour**, installez le nouveau DMG de la même façon (étape 3 à refaire). macOS
+associe les autorisations à chaque version d'une app non notariée : il faut parfois les accorder à
+nouveau, même si Réglages Système les affiche encore comme activées. Dans **Confidentialité et
+sécurité → Micro** et **Confidentialité et sécurité → Enregistrement de l'écran et de l'audio du
+système**, retirez Voicestream avec le bouton **−** (ou désactivez-le puis réactivez-le), rouvrez
+Voicestream et autorisez-le quand il le demande. Le trousseau peut aussi demander une fois si la
+nouvelle version peut lire vos clés enregistrées : cliquez sur **Toujours autoriser**.
 
 ## Quick start
 
@@ -411,6 +472,11 @@ The dashboard (`dashboard.enabled`, bound to 127.0.0.1 and protected by a per-ru
 
 You can also add items by hand or end the meeting from it. Between meetings it shows the last one,
 so you can still edit, push or dismiss its items after it ended.
+
+`voicestream app` runs the [Mac app](#install-the-app-mac) from a terminal: its window and
+menu-bar icon on a Mac (with the `mac` extra installed), your browser elsewhere. `--browser` opens
+it in the browser on a Mac too; `--no-open` only serves it and prints its address. Ctrl+C stops
+it, wrapping up a meeting in progress first (press it twice to stop at once).
 
 In the terminal, type `help`, or one of these:
 

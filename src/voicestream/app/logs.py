@@ -38,9 +38,13 @@ def install_file_log(path: Path) -> logging.Handler:
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     handler.setLevel(logging.INFO)
     root = logging.getLogger()
-    root.addHandler(handler)
-    if root.level > logging.INFO or root.level == logging.NOTSET:
+    if root.getEffectiveLevel() > logging.INFO:
+        # the file gets INFO; a terminal's handlers keep the verbosity you chose (-v)
+        for existing in root.handlers:
+            if existing.level == logging.NOTSET:
+                existing.setLevel(root.getEffectiveLevel())
         root.setLevel(logging.INFO)
+    root.addHandler(handler)
     for name in NOISY:  # one line per HTTP request would bury everything else
         logging.getLogger(name).setLevel(logging.WARNING)
     return handler

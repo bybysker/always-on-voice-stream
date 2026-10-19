@@ -18,7 +18,8 @@ from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[2]
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[1]
 APP_NAME = "Voicestream"
 BUNDLE_ID = "io.github.bybysker.voicestream"
 """Never change it: macOS keys the microphone and system-audio permissions, the Keychain items
@@ -122,7 +123,7 @@ def agent_cli(env: Mapping[str, str] = os.environ) -> Path | None:
     return cli
 
 
-def icon(env: Mapping[str, str] = os.environ, here: Path = Path(__file__).resolve().parent) -> Path | None:
+def icon(env: Mapping[str, str] = os.environ, here: Path = HERE) -> Path | None:
     """The .icns made by make_icon.py (PyInstaller's default icon when there is none)."""
     candidates = [env.get(ICON_ENV), str(here / "build" / f"{APP_NAME}.icns")]
     for c in candidates:

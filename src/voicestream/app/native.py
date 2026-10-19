@@ -419,6 +419,18 @@ def _with_timeout(fn: Callable[[], Any], timeout: float) -> Any:
 # ------------------------------------------------------------------ the shell
 
 
+def preflight() -> None:
+    """Raise ImportError unless everything native mode needs imports, before the host starts (the
+    launcher then falls back to the browser). Leaves pywebview's Cocoa backend alone: importing it
+    creates the NSApplication."""
+    import AppKit  # noqa: F401
+    import Foundation  # noqa: F401
+    import objc  # noqa: F401
+    import WebKit  # noqa: F401
+    import webview  # noqa: F401
+    from PyObjCTools import AppHelper  # noqa: F401
+
+
 def run(host: launcher.Host, *, selftest: float | None = None, report_path: Path | None = None) -> int:
     """Start the host, then run the Cocoa app on this (the main) thread until the app quits."""
     caps = getattr(host, "capabilities", None)
@@ -484,7 +496,9 @@ class MacShell:
     def run(self) -> int:
         global _SHELL
         import webview
-        from webview.platforms import cocoa  # creates the NSApplication; we patch its delegate class
+
+        # importing the Cocoa backend creates the NSApplication; we patch its app delegate class
+        from webview.platforms import cocoa
 
         _SHELL = self
         try:
@@ -505,20 +519,39 @@ class MacShell:
         self.window.events.before_show += self._restore_frame
         self.window.events.closing += self._on_closing
         self._login = self._login_status(refresh=True)
-        self._create_status_item()
-        self.apply_state(self.state)
+        from PyObjCTools import AppHelper
+
+        # runs once NSApp.run() has started (inside webview.start), i.e. after the app finished launching;
+        # state updates queued later run after it (the main thread's queue is first in, first out)
+        AppHelper.callAfter(self._start_menu_bar)
         self.host.add_state_listener(self._on_host_state)
         storage = native_hooks.app_support_dir() / "web"
-        webview.start(
-            func=self._selftest if self.selftest is not None else None,
-            gui="cocoa",
-            private_mode=False,  # keep the page's local storage (UI choices) between launches
-            storage_path=str(storage),
-            localization=PYWEBVIEW_FR if self.lang == "fr" else {},
-        )
+        try:
+            webview.start(
+                func=self._selftest if self.selftest is not None else None,
+                gui="cocoa",
+                private_mode=False,  # keep the page's local storage (UI choices) between launches
+                storage_path=str(storage),
+                localization=PYWEBVIEW_FR if self.lang == "fr" else {},
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("the window could not be opened")
+            if self.selftest is not None:
+                launcher.write_report(self.report_path, {"ok": False, "mode": "native", "errors": [f"window: {exc}"]})
+            else:
+                _fatal_alert(str(exc))
+            self.exit_code = 2
         # only reached when the run loop stops without AppKit ending the process
         launcher.shutdown_host(self.host)
         return self.exit_code
+
+    def _start_menu_bar(self) -> None:
+        try:
+            self._create_status_item()
+        except Exception:  # noqa: BLE001 - the window still works without it
+            log.exception("could not create the menu-bar icon")
+        # read again: listening may have started before the state listener was added
+        self.apply_state(launcher.safe_state(self.host))
 
     def _language(self) -> str:
         prefs = self.state.get("prefs") or {}
@@ -703,6 +736,8 @@ class MacShell:
         elif key == "login":
             self._toggle_login()
         elif key == "quit":
+            if not _PATCHED:  # pywebview's own quit asks the window, which would only hide itself
+                self.quitting = True
             _app().terminate_(None)
 
     def _post(self, coro: Any) -> None:

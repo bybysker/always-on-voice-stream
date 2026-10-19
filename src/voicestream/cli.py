@@ -495,7 +495,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--hours", type=float, default=8.0, help="hours of meetings per day for the estimate")
     c.set_defaults(func=cmd_cost)
 
-    from .app.launcher import add_arguments as app_arguments  # stdlib-only module: cheap at parse time
+    # a stdlib-only module: cheap to import at parse time
+    from .app.launcher import add_arguments as app_arguments
 
     ap = sub.add_parser("app", help="open the Voicestream app: a window and menu-bar icon on a Mac, the browser elsewhere")
     app_arguments(ap, standalone=False)

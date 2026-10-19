@@ -502,10 +502,11 @@ class Assistant:
     def forced(self) -> bool:
         return self._force.is_set()
 
-    async def unless_forced(self, aw: Any, grace: float = FORCE_GRACE_S) -> tuple[bool, Any]:
+    async def unless_forced(self, aw: Any, grace: float | None = None) -> tuple[bool, Any]:
         """Await ``aw`` unless :meth:`stop` is forced: then a step not started is skipped and one under
-        way gets ``grace`` seconds before it is cancelled. Returns ``(completed, result)``; the step's
-        own exceptions propagate."""
+        way gets ``grace`` seconds (default :data:`FORCE_GRACE_S`) before it is cancelled. Returns
+        ``(completed, result)``; the step's own exceptions propagate."""
+        grace = FORCE_GRACE_S if grace is None else grace
         if self._force.is_set():
             if asyncio.iscoroutine(aw):
                 aw.close()  # never started: no "was never awaited" warning
@@ -637,7 +638,9 @@ class Assistant:
         return self._system_live and self.echo.system_active and not self._system_sound and self._mic_speech_s >= SILENT_SYSTEM_AFTER_S
 
     def _check_system_audio(self, seg: TranscriptSegment) -> None:
-        if seg.source != "mic" or self._system_sound or not self._system_live:
+        # paused, system audio is silenced on purpose: a line still arriving from before the pause
+        # mustn't count towards "macOS is withholding it"
+        if seg.source != "mic" or self._system_sound or not self._system_live or self._paused:
             return
         self._mic_speech_s += max(0.0, seg.t_end - seg.t_start)
         if self.echo_unprotected and not self._silent_warned:
@@ -709,6 +712,8 @@ class Assistant:
                     isinstance(exc, TranscriptionError) and exc.fatal
                 )
                 if not src.live or fatal or self._stop.is_set():
+                    if not self._stop.is_set():  # given up for good: the app shows it as an error
+                        self.bus.publish("source.stopped", source=src.name, error=str(exc))
                     raise
                 if time.monotonic() - started > 60:
                     retry = RESTART_DELAY_S

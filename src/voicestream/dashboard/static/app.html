@@ -3,35 +3,69 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
 <title>Voicestream</title>
-<style>
-  :root { color-scheme: light dark; --bg: #f7f7f8; --fg: #1d1d1f; --muted: #6e6e73; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #1c1c1e; --fg: #f2f2f7; --muted: #98989d; } }
-  body { margin: 0; padding: 32px; background: var(--bg); color: var(--fg);
-         font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
-  h1 { font-size: 22px; margin: 0 0 8px; }
-  p { color: var(--muted); margin: 0; }
-</style>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/app.css">
+<script>
+'use strict';
+// Runs before app.js loads: keep the per-launch token for this window (and drop it from the
+// address bar, as the live dashboard does), and ask for the app's state right away.
+(function () {
+  var url = new URL(location.href);
+  var token = url.searchParams.get('token') || '';
+  var stored = false;
+  try {
+    if (token) { sessionStorage.setItem('voicestream-token', token); stored = true; }
+    else { token = sessionStorage.getItem('voicestream-token') || ''; }
+  } catch (e) { /* storage blocked: the token simply stays in the URL */ }
+  if (stored) {
+    url.searchParams.delete('token');
+    history.replaceState(null, '', url.pathname + url.search + url.hash);
+  }
+  window.VOICESTREAM_BOOT = {
+    token: token,
+    app: token ? fetch('/api/app', { headers: { 'X-Voicestream-Token': token }, cache: 'no-store' }) : null,
+  };
+})();
+</script>
+<script src="/static/app.js" defer></script>
 </head>
 <body>
-<!-- Placeholder: the real app UI replaces this page. -->
-<h1>Voicestream</h1>
-<p id="state">Connecting…</p>
-<script>
-  (function () {
-    var params = new URLSearchParams(location.search);
-    var token = params.get("token");
-    try {
-      if (token) { sessionStorage.setItem("voicestream-token", token); }
-      else { token = sessionStorage.getItem("voicestream-token"); }
-    } catch (e) { /* private mode */ }
-    if (params.has("token")) { history.replaceState(null, "", location.pathname); }
-    var out = document.getElementById("state");
-    fetch("/api/app", { headers: { "X-Voicestream-Token": token || "" } })
-      .then(function (r) { return r.json(); })
-      .then(function (s) { out.textContent = s.error ? s.error : "Voicestream " + s.version + " · " + s.state; })
-      .catch(function () { out.textContent = "Can't reach Voicestream."; });
-  })();
-</script>
+<a class="skip" href="#main" id="skip-link">Skip to content</a>
+<div id="shell" class="shell" hidden>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark" id="brand-mark"></span><span class="brand-name">Voicestream</span></div>
+    <nav class="nav" id="nav"></nav>
+    <div class="sidebar-foot" id="sidebar-foot"></div>
+  </aside>
+  <div class="frame">
+    <header class="topbar" id="topbar"></header>
+    <div id="notices"></div>
+    <main id="main" tabindex="-1">
+      <section class="screen screen-live" id="screen-live" hidden></section>
+      <section class="screen" id="screen-meetings" hidden></section>
+      <section class="screen" id="screen-costs" hidden></section>
+      <section class="screen" id="screen-settings" hidden></section>
+    </main>
+  </div>
+</div>
+<div id="setup" class="setup" hidden></div>
+<div id="boot" class="boot"><p id="boot-text">Opening Voicestream…</p></div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+<dialog id="ask" class="ask" aria-labelledby="ask-title" aria-describedby="ask-body">
+  <h2 id="ask-title"></h2>
+  <p id="ask-body"></p>
+  <div class="ask-actions">
+    <button type="button" class="btn" id="ask-cancel"></button>
+    <button type="button" class="btn primary" id="ask-ok"></button>
+  </div>
+</dialog>
+<dialog id="viewer" class="viewer" aria-labelledby="viewer-name">
+  <div class="viewer-head"><span id="viewer-name"></span><button type="button" class="btn small" id="viewer-close"></button></div>
+  <pre id="viewer-body"></pre>
+</dialog>
 </body>
 </html>
