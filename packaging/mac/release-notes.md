@@ -8,6 +8,14 @@ detected as people speak.
 For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. You need a Claude API key
 ([console.anthropic.com](https://console.anthropic.com/settings/keys)).
 
+### New in this version
+
+- **A new look**, in light and dark: colour only where it means something (your to-dos, the
+  decisions, what was said that led to them), and *Who spoke when*, the meeting as two lanes,
+  you and the others, with each to-do at the moment it was said.
+- **⌥⌘R starts and stops recording from any app**, even with the window closed. A short sound
+  says it worked. Change it or turn it off in Settings → General.
+
 ### Install
 
 1. Download `Voicestream-…-arm64.dmg` below, under **Assets**.
@@ -21,7 +29,7 @@ For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. You need a C
    private; it downloads a 547 MB model), your Claude key (saved in the macOS Keychain), then
    allow **Microphone** and **System Audio Recording**.
 
-Voicestream then lives in the menu bar. After an update, macOS may ask for the permissions
+Voicestream then lives in the menu bar; press **⌥⌘R** to start or stop recording. After an update, macOS may ask for the permissions
 again: the [README](https://github.com/bybysker/always-on-voice-stream#install-the-app-mac)
 says how.
 
@@ -38,6 +46,9 @@ says how.
 4. Suivez l'assistant : votre nom et vos langues, la transcription (**Sur ce Mac** est gratuit
    et privé ; un modèle de 547 Mo est téléchargé), votre clé Claude (enregistrée dans le
    trousseau de macOS), puis autorisez le **Micro** et l'**Enregistrement audio du système**.
+
+Voicestream vit ensuite dans la barre des menus ; **⌥⌘R** lance ou arrête l'enregistrement depuis
+n'importe quelle app (à changer dans Réglages → Général).
 
 ### Cost
 

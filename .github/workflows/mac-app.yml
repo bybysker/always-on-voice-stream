@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: "Also publish this build as a release, tagging this commit (e.g. v0.1.0). Empty: just build."
+        description: "Also publish this build as a release, tagging this commit (e.g. v0.2.0). Empty: just build."
         required: false
         default: ""
 
