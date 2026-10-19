@@ -359,6 +359,26 @@ def test_push_ends_a_meeting_a_crash_cut_off_then_pushes_it(tmp_path: Path, caps
     assert meeting.ended_at is not None and meeting.interrupted and meeting.items["A1"].pushed
 
 
+def test_j4_refs_written_in_the_same_clock_tick_are_kept(tmp_path: Path) -> None:
+    """Windows can give two writes a few milliseconds apart the same modification time; the session
+    took the other process's file for its own and dropped the refs it holds (seen on the Windows CI)."""
+    m = Meeting(title="Live")
+    m.items["A1"] = Item(id="A1", kind=ItemKind.ACTION, title="Task 1")
+    store = SessionStore(tmp_path, m)
+    store.save()
+    path = store.dir / "meeting.json"
+    ours = path.stat().st_mtime_ns
+    other, _ = load_meeting(store.dir)
+    other.items["A1"].pushed["reminders"] = "x-apple-reminder://1"
+    atomic_write(path, other.model_dump_json(indent=1))  # `voicestream push` from another terminal
+    os.utime(path, ns=(ours, ours))  # both writes in one tick of the clock
+    m.items["A1"].title = "Task 1 (edited live)"
+    store.save()
+    saved, _ = load_meeting(store.dir)
+    assert saved.items["A1"].title == "Task 1 (edited live)"
+    assert saved.items["A1"].pushed == {"reminders": "x-apple-reminder://1"}
+
+
 def test_j4_running_session_keeps_refs_written_by_another_process(tmp_path: Path) -> None:
     m = Meeting(title="Live")
     m.items["A1"] = Item(id="A1", kind=ItemKind.ACTION, title="Task 1")

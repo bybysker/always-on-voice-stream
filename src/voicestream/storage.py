@@ -154,6 +154,14 @@ def replace_file(src: Path, dst: Path) -> None:
             time.sleep(0.05)
 
 
+def _file_id(path: Path) -> tuple[int, int, int, int]:
+    """Which file is at ``path`` now. Every write replaces it with a new file (:func:`atomic_write`), so
+    its inode (on Windows the file index) tells two writes apart even when their times are equal, as on
+    Windows, where two writes a few milliseconds apart can get the same modification time."""
+    st = path.stat()
+    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns
+
+
 def atomic_write(path: Path, data: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
@@ -174,7 +182,7 @@ class SessionStore:
         self.meeting = meeting
         self.store_audio = store_audio
         self._titled = False  # the title slug is appended once (the name may already end in "-2")
-        self._written: int | None = None  # mtime of the meeting.json we last wrote
+        self._written: tuple[int, int, int, int] | None = None  # the meeting.json we last wrote (_file_id)
         self._wavs: dict[str, wave.Wave_write] = {}
         self._lock_fd: int | None = self._take_lock()
         self._transcript_md = self.dir / "transcript.md"
@@ -235,7 +243,7 @@ class SessionStore:
         try:
             self._adopt_foreign_refs(path)
             atomic_write(path, self.meeting.model_dump_json(indent=1))
-            self._written = path.stat().st_mtime_ns
+            self._written = _file_id(path)
         except OSError as exc:
             log.error("could not save meeting state: %s", exc)
 
@@ -243,7 +251,7 @@ class SessionStore:
         """``voicestream push`` (another process) records what it created in this file. Keep those refs, or
         the next save drops them and the next push creates everything again."""
         try:
-            if path.stat().st_mtime_ns == self._written:
+            if _file_id(path) == self._written:
                 return  # still the file we wrote
             disk = Meeting.model_validate_json(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
