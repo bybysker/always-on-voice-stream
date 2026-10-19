@@ -142,6 +142,7 @@ def test_a_relative_data_dir_is_made_absolute(tmp_path: Path, monkeypatch: pytes
     monkeypatch.chdir(tmp_path)
     assert Config(data_dir="./x").data_path == tmp_path / "x"
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))  # Windows
     assert Config(data_dir="~/.voicestream").data_path == tmp_path / "home" / ".voicestream"
 
 
