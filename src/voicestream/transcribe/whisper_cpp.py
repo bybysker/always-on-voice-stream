@@ -76,11 +76,13 @@ _children: set[int] = set()
 
 
 @atexit.register
-def _stop_children() -> None:
-    """Don't leave a server holding a gigabyte of model in memory after we exit."""
+def stop_all() -> None:
+    """Don't leave a server holding a gigabyte of model in memory after we exit. Also called by the
+    Mac app on quit: Cmd+Q ends the process with exit(), which skips atexit handlers."""
     for pid in list(_children):
         with contextlib.suppress(OSError):
             os.kill(pid, signal.SIGTERM)
+        _children.discard(pid)
 
 
 def find_binary(cfg: WhisperCppConfig) -> Path | None:
@@ -89,10 +91,12 @@ def find_binary(cfg: WhisperCppConfig) -> Path | None:
     if getattr(sys, "frozen", False):  # inside the packaged app (PyInstaller)
         exe = Path(sys.executable).resolve()
         bundle = getattr(sys, "_MEIPASS", None)
+        contents = exe.parent.parent  # Voicestream.app/Contents (the executable is in Contents/MacOS)
         candidates += [
+            str(contents / "Helpers" / "whisper-server"),  # where Apple wants helper tools
+            str(exe.parent / "whisper-server"),
             str(Path(bundle) / "bin" / "whisper-server") if bundle else None,
-            str(exe.parent.parent / "Resources" / "bin" / "whisper-server"),  # Voicestream.app/Contents/Resources
-            str(exe.parent / "bin" / "whisper-server"),
+            str(contents / "Resources" / "bin" / "whisper-server"),
         ]
     candidates += [shutil.which("whisper-server"), *HOMEBREW_PATHS]
     for c in candidates:
@@ -440,6 +444,9 @@ class WhisperCppTranscriber(ChunkTranscriber):
             "no_speech_thold": f"{self.wc.no_speech_threshold:g}",
             "suppress_nst": "true",
             "no_language_probabilities": "true",
+            # verbose_json turns token timestamps on, and with them whisper cuts segments every 60
+            # characters, mid-word ("trimes tre"); we need neither
+            "token_timestamps": "false",
             "vad": "true" if self.server.vad_model is not None else "false",
         }
         if prompt:
@@ -472,16 +479,16 @@ class WhisperCppTranscriber(ChunkTranscriber):
 def parse_reply(data: dict[str, Any], no_speech_threshold: float = 0.6) -> tuple[str, float | None, str | None]:
     """(text, confidence, language code) from a verbose_json reply."""
     segments = data.get("segments")
-    texts: list[str] = []
+    texts: list[str] = []  # raw, with whisper's own leading spaces: a split word stays whole when joined
     logprobs: list[float] = []
     if isinstance(segments, list):
         for s in segments:
             if not isinstance(s, dict):
                 continue
-            t = str(s.get("text") or "").strip()
+            t = str(s.get("text") or "")
             nsp = _num(s.get("no_speech_prob"))
             lp = _num(s.get("avg_logprob"))
-            if not t:
+            if not t.strip():
                 continue
             if nsp is not None and lp is not None and nsp > no_speech_threshold and lp < -1.0:
                 continue  # whisper's own "this was silence" rule (the server applies it per window too)
@@ -491,15 +498,15 @@ def parse_reply(data: dict[str, Any], no_speech_threshold: float = 0.6) -> tuple
             if lp is not None:
                 logprobs.append(lp)
     else:
-        t = str(data.get("text") or "").strip()
-        if t:
+        t = str(data.get("text") or "")
+        if t.strip():
             texts.append(t)
     lang_name = str(data.get("language") or "").strip().lower()
     code = NAMES.get(lang_name) or (lang_name if lang_name in CODES else None)
     if not texts:
         return "", None, None  # with nothing heard, the reported language is stale
     conf = math.exp(sum(logprobs) / len(logprobs)) if logprobs else None
-    return " ".join(texts), conf, code
+    return " ".join("".join(texts).split()), conf, code
 
 
 def _num(v: Any) -> float | None:

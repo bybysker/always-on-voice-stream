@@ -128,13 +128,30 @@ async def test_transcribes_through_whisper_server(whisper_cfg: Config) -> None:
     (req,) = requests_seen(model)
     assert req["fields"] == {
         "response_format": "verbose_json", "language": "auto", "temperature": "0.0", "temperature_inc": "0.2",
-        "no_speech_thold": "0.6", "suppress_nst": "true", "no_language_probabilities": "true", "vad": "false",
+        "no_speech_thold": "0.6", "suppress_nst": "true", "no_language_probabilities": "true",
+        "token_timestamps": "false", "vad": "false",
     }  # fmt: skip
     assert req["file_bytes"] == 44 + 2 * 2 * SAMPLE_RATE  # a 16 kHz mono 16-bit WAV
     assert req["path"].count("/") == 2 and len(req["path"].split("/")[1]) == 16  # behind the random token
     argv = json.loads(Path(str(model) + ".argv.json").read_text())
     assert argv[:2] == ["-m", str(model)] and ["--host", "127.0.0.1"] == argv[2:4]
     assert {"-nlp", "-sns"} <= set(argv) and argv[argv.index("-l") + 1] == "auto"
+
+
+async def test_long_sentences_come_back_whole(whisper_cfg: Config) -> None:
+    sentence = ("Pour le trimestre prochain, on garde la facturation annuelle pour les clients entreprise "
+                "et on revoit la grille tarifaire avec l'équipe commerciale avant vendredi.")
+    model = install_model(whisper_cfg, script={"replies": [reply(sentence)]})
+    t = build_transcriber(whisper_cfg, "mic")
+    try:
+        res = await t.transcribe_utterance(utt(), None)  # type: ignore[attr-defined]
+    finally:
+        await t.aclose()
+    assert res.text == sentence  # no word cut in two
+    assert requests_seen(model)[0]["fields"]["token_timestamps"] == "false"
+    # and pieces that were cut anyway (another client's settings, a long window) join back whole
+    pieces = {"language": "french", "segments": [{"text": " Pour le trim", "no_speech_prob": 0.0}, {"text": "estre prochain.", "no_speech_prob": 0.0}]}
+    assert wc.parse_reply(pieces)[0] == "Pour le trimestre prochain."
 
 
 async def test_vocabulary_is_the_only_prompt(whisper_cfg: Config) -> None:

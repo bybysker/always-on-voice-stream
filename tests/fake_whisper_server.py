@@ -66,6 +66,17 @@ def form(handler: BaseHTTPRequestHandler) -> tuple[dict[str, str], int]:
     return fields, size
 
 
+def wrap60(reply: dict) -> dict:
+    """What the real server does to verbose_json unless token_timestamps=false: every segment is
+    cut into pieces of at most 60 characters, mid-word."""
+    out = []
+    for seg in reply["segments"]:
+        text = seg["text"]
+        for k in range(0, len(text), 60):
+            out.append({**seg, "text": text[k:k + 60]})
+    return {**reply, "segments": out}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: object) -> None:  # requests go to stderr like the real server
         print(fmt % args, file=sys.stderr, flush=True)
@@ -105,6 +116,8 @@ class Handler(BaseHTTPRequestHandler):
         reply = (script.get("by_language") or {}).get(fields.get("language", ""))
         if reply is None:
             reply = replies[min(n - 1, len(replies) - 1)]
+        if fields.get("token_timestamps", "") not in ("false", "0", "no", "n") and reply.get("segments"):
+            reply = wrap60(reply)
         self.send(200, json.dumps(reply).encode(), "application/json")
         if script.get("exit_after") and n >= int(script["exit_after"]):
             self.wfile.flush()

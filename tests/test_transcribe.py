@@ -238,6 +238,10 @@ async def test_hallucinations_are_dropped_but_real_speech_is_kept() -> None:
         ("we we need need to to ship ship the the beta beta", 5.0, False),  # 6 distinct words
         ("Let's ship the beta on Monday and send the notes to Sarah after", 5.0, False),
         ("I subscribe to the subtitles idea", 5.0, False),
+        ("❤️ par SousTitreur.com", 5.0, True),  # Whisper's stock French inventions (openai/whisper#928)
+        ("— Sous-titrage ST'501 —", 5.0, True),
+        ("Sous-titres réalisés par la communauté d'Amara.org", 5.0, True),
+        ("On revoit les sous-titres de la vidéo demain", 5.0, False),
     ],
 )
 def test_is_hallucination(text: str, speech_s: float, expected: bool) -> None:
