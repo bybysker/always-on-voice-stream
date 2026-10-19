@@ -1062,6 +1062,173 @@ def test_reminders_permission_is_asked_during_setup(make_app: Callable[..., UIAp
     assert len(app.reminders_checks) == 2
 
 
+def _fake_mac_shell(app: UIApp, taken: tuple[str, ...] = ("KeyT",)) -> None:
+    """What the native shell does with the keyboard shortcut, without a Mac: it registers the one the
+    preferences name and tells the host what macOS answered (``taken``: keys another app holds)."""
+    host = app.host
+    host.capabilities["hotkey"] = True
+    assert host.loop is not None
+
+    def on_state(state: dict[str, Any]) -> None:  # on the host's loop, like the shell's listener
+        hk, st = state["prefs"]["hotkey"], state["hotkey"]
+        want = "paused" if st["recording"] else "off" if hk is None else "taken" if hk["code"] in taken else "ok"
+        err = -9878 if want == "taken" else None
+        if (st["status"], st["error"]) != (want, err):
+            host.loop.call_soon(host.set_hotkey_status, want, err)
+
+    host.add_state_listener(on_state)
+    host.loop.call_soon_threadsafe(host._publish_state)
+    _wait(lambda: host.hotkey["status"] == "ok")
+
+
+def test_keyboard_shortcut_settings(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """Settings → General: record a new shortcut from the keyboard, refused ones say why, turn it off,
+    reset it; the Live screen mentions it while not listening."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True)
+    _fake_mac_shell(app)
+    p = open_page(app)
+    pg = p.page
+    expect(pg.locator("#shortcut-hint")).to_have_text(" You can also press ⌥⌘R in any app.")
+    pg.goto(app.url + "#/settings/general")
+    pg.locator('#boot').wait_for(state='hidden')
+    keys, status, error = pg.locator("#shortcut-keys"), pg.locator("#shortcut-status"), pg.locator("#shortcut-error")
+    expect(pg.locator("#shortcut-label")).to_have_text("Keyboard shortcut")
+    expect(keys).to_have_text("⌥⌘R")
+    expect(status).to_have_text("Works from any app, even with this window closed: it starts and stops listening.")
+    expect(pg.locator("#shortcut-reset")).to_have_count(0)  # it is the default already
+    p.shot("settings-shortcut")
+
+    # Change: the current one is off while the next combination is recorded (so pressing it reaches the page)
+    pg.click("#shortcut-change")
+    expect(keys).to_have_text("Press the new shortcut…")
+    expect(pg.locator("#shortcut-change")).to_have_text("Cancel")
+    _wait(lambda: app.host.state()["hotkey"]["recording"])
+    for combo, why in (("Meta+KeyQ", "⌘Q is a command every Mac app has"), ("Meta+KeyC", "⌘C is taken in many apps"),
+                       ("Alt+KeyE", "⌥E is taken in many apps"), ("Shift+KeyK", "Hold ⌘, ⌥ or ⌃ as well: ⇧K alone"),
+                       ("Meta+Space", "macOS uses ⌘Space itself"), ("Control+Meta+KeyQ", "macOS uses ⌃⌘Q itself"),
+                       ("Alt+F5", "macOS 15 can refuse a shortcut held with ⌥ alone, or ⌥⇧ (⌥F5)")):
+        pg.keyboard.press(combo)
+        expect(error).to_contain_text(why)
+        expect(keys).to_have_text("Press the new shortcut…")  # still recording: try another
+    p.shot("settings-shortcut-refused")
+    pg.keyboard.press("Escape")  # cancels
+    expect(keys).to_have_text("⌥⌘R")
+    expect(error).to_have_text("")
+    expect(pg.locator("#shortcut-change")).to_be_focused()
+    _wait(lambda: not app.host.state()["hotkey"]["recording"])
+
+    pg.click("#shortcut-change")
+    pg.keyboard.press("Control+Alt+KeyK")
+    expect(keys).to_have_text("⌃⌥K")
+    expect(status).to_contain_text("Works from any app")
+    hk = app.host.prefs.hotkey
+    assert hk is not None and (hk.code, hk.mods, hk.key) == ("KeyK", ["ctrl", "alt"], "K")
+    assert not app.host.state()["hotkey"]["recording"]
+    expect(pg.locator("#shortcut-change")).to_be_focused()
+
+    # the physical key is what counts: on an AZERTY keyboard KeyQ is printed A — and ⌃⌘ with the key
+    # printed Q there (KeyA) is the Lock Screen command, refused, while ⌃⌘A is fine
+    pg.click("#shortcut-change")
+    press = "document.dispatchEvent(new KeyboardEvent('keydown', {code: '%s', key: '%s', ctrlKey: true, metaKey: true}))"
+    pg.evaluate(press % ("KeyA", "q"))
+    expect(error).to_contain_text("macOS uses ⌃⌘Q itself")
+    pg.evaluate(press % ("KeyQ", "a"))
+    expect(keys).to_have_text("⌃⌘A")
+    hk = app.host.prefs.hotkey
+    assert hk is not None and (hk.code, hk.mods, hk.key) == ("KeyQ", ["ctrl", "cmd"], "A")
+
+    # a combination another app holds
+    pg.click("#shortcut-change")
+    pg.keyboard.press("Control+Alt+KeyT")
+    expect(status).to_have_text("Already used by another app — choose another.")
+    expect(keys).to_have_text("⌃⌥T")
+
+    pg.click("#shortcut-off")
+    expect(keys).to_have_text("Off")
+    expect(status).to_contain_text("Turned off.")
+    expect(pg.locator("#shortcut-change")).to_be_focused()  # the button pressed is gone: not lost
+    assert app.host.prefs.hotkey is None
+    pg.goto(app.url + "#/live")
+    pg.locator('#boot').wait_for(state='hidden')
+    expect(pg.locator("#live-heading")).to_have_text("Not listening")
+    expect(pg.locator("#shortcut-hint")).to_have_count(0)  # no shortcut: nothing to mention
+    pg.goto(app.url + "#/settings/general")
+    pg.locator('#boot').wait_for(state='hidden')
+    pg.click("#shortcut-reset")
+    expect(keys).to_have_text("⌥⌘R")
+    expect(status).to_contain_text("Works from any app")
+    hk = app.host.prefs.hotkey
+    assert hk is not None and (hk.code, hk.mods) == ("KeyR", ["alt", "cmd"])
+
+    # the sound is an ordinary preference, saved with the others
+    pg.click("label[for=p-hotkey_sound]")
+    pg.click("#save-settings")
+    _wait(lambda: app.host.prefs.hotkey_sound is False)
+    assert app.host.prefs.hotkey is not None  # saving the others left the shortcut alone
+
+    # the same rules on both sides: the page's, for the words at once, and the server's
+    from voicestream.app import hotkey
+
+    assert pg.evaluate("SHORTCUT_RESERVED") == hotkey.RESERVED
+    combos = [(code, mods, key) for code in ("KeyR", "KeyQ", "KeyA", "KeyM", "Digit3", "F5", "F12", "Space", "Tab",
+                                             "Escape", "Comma", "Semicolon", "Backquote", "ArrowLeft", "Fn", "Numpad1")
+              for mods in ([], ["shift"], ["cmd"], ["alt"], ["ctrl"], ["shift", "cmd"], ["alt", "cmd"], ["ctrl", "cmd"],
+                           ["ctrl", "alt"], ["alt", "shift", "cmd"], ["ctrl", "shift", "cmd"])
+              for key in ("", "q", ",", "m")]  # fmt: skip
+    page_says = pg.evaluate("(combos) => combos.map(([c, m, k]) => [shortcutProblem(c, m, k), shortcutLabel(c, k)])", combos)
+    for (code, mods, key), (why, label) in zip(combos, page_says, strict=True):
+        assert why == hotkey.problem(code, mods, key), (code, mods, key)
+        if code != "Space":  # a word, in the page's language
+            assert label == hotkey.label(code, key), (code, key)
+    keys_en = pg.evaluate("Object.keys(STRINGS.en).filter((k) => k.startsWith('shortcut.'))")
+    assert keys_en and sorted(keys_en) == sorted(pg.evaluate("Object.keys(STRINGS.fr).filter((k) => k.startsWith('shortcut.'))"))
+
+
+def test_keyboard_shortcut_in_french_and_outside_the_mac_app(make_app: Callable[..., UIApp],
+                                                            open_page: Callable[..., Page]) -> None:
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True)
+    p = open_page(app, locale="fr-FR")
+    pg = p.page
+    # the browser, or Linux and Windows: no global shortcut, said so where it would be
+    expect(pg.locator("#live-heading")).to_have_text("À l’arrêt")
+    expect(pg.locator("#shortcut-hint")).to_have_count(0)
+    pg.goto(app.url + "#/settings/general")
+    pg.locator('#boot').wait_for(state='hidden')
+    expect(pg.locator("#shortcut-label")).to_have_text("Raccourci clavier")
+    expect(pg.locator("#shortcut-status")).to_have_text(
+        "Dans l’application Voicestream pour Mac, un raccourci clavier démarre et arrête l’écoute depuis n’importe quelle app.")
+    expect(pg.locator("#shortcut-change")).to_have_count(0)
+    expect(pg.locator("#p-hotkey_sound")).to_have_count(0)
+
+    _fake_mac_shell(app)  # now as in the Mac app
+    pg.reload()
+    pg.locator('#boot').wait_for(state='hidden')
+    expect(pg.locator("#shortcut-status")).to_have_text(
+        "Fonctionne depuis n’importe quelle app, même fenêtre fermée : il démarre et arrête l’écoute.")
+    pg.click("#shortcut-change")
+    expect(pg.locator("#shortcut-keys")).to_have_text("Tapez le nouveau raccourci…")
+    pg.keyboard.press("Meta+KeyW")
+    expect(pg.locator("#shortcut-error")).to_have_text(
+        "⌘W est une commande de toutes les apps Mac (Quitter, Fermer, Masquer, Placer dans le Dock, Réglages) : choisissez-en un autre.")
+    pg.keyboard.press("Control+Alt+Space")
+    expect(pg.locator("#shortcut-error")).to_contain_text("macOS utilise lui-même ⌃⌥Espace")
+    pg.keyboard.press("Control+Alt+KeyT")
+    expect(pg.locator("#shortcut-status")).to_have_text("Déjà utilisé par une autre app — choisissez-en un autre.")
+    pg.click("#shortcut-off")
+    expect(pg.locator("#shortcut-keys")).to_have_text("Désactivé")
+    expect(pg.locator("#shortcut-reset")).to_have_text("Revenir à ⌥⌘R")
+    pg.click("#shortcut-reset")
+    expect(pg.locator("#shortcut-keys")).to_have_text("⌥⌘R")
+    pg.goto(app.url + "#/live")
+    pg.locator('#boot').wait_for(state='hidden')
+    expect(pg.locator("#shortcut-hint")).to_have_text(" Vous pouvez aussi appuyer sur ⌥⌘R dans n’importe quelle app.")
+    p.shot("live-stopped-shortcut-fr")
+
+
 def test_google_bridge_script_route(tmp_path: Path) -> None:
     """Settings → Your tools → Google copies the bridge script from the app (needs the token)."""
     from test_app_host import _factory, _write_config

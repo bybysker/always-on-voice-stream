@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from voicestream import cli
-from voicestream.app import launcher, native, native_hooks
+from voicestream.app import hotkey, launcher, native, native_hooks
 
 TOKEN = "secret-token-123"
 
@@ -108,6 +108,16 @@ class FakeHost:
 
     async def listen_restart(self, force: bool = False) -> None:
         self.calls.append(("listen_restart", force))
+
+    def toggle_action(self) -> str | None:
+        return hotkey.TOGGLE.get(self._state["state"])
+
+    async def listen_toggle(self) -> str | None:
+        self.calls.append(("listen_toggle", None))
+        return self.toggle_action()
+
+    def set_hotkey_status(self, status: str, error: int | None = None) -> None:
+        self.calls.append(("set_hotkey_status", (status, error)))
 
     def update_prefs(self, changes: dict[str, Any]) -> None:
         self.calls.append(("update_prefs", changes))
@@ -352,8 +362,12 @@ def test_native_modules_import_without_pyobjc() -> None:
         "for m in ('objc', 'AppKit', 'Foundation', 'WebKit', 'AVFoundation', 'ServiceManagement', 'PyObjCTools', 'webview'):\n"
         "    sys.modules[m] = None\n"
         "sys.platform = 'darwin'\n"
-        "from voicestream.app import native, native_hooks\n"
+        "from voicestream.app import hotkey, native, native_hooks\n"
         "assert native.status_symbol({'state': 'listening'}) == 'mic.fill'\n"
+        "hotkey.CARBON_PATHS = ('/nonexistent/HIToolbox',)\n"  # nor HIToolbox (a Mac has it whatever we do)
+        "assert hotkey.available() is False\n"  # said, not raised
+        "assert native.listen_shortcut({'prefs': {'hotkey': {'code': 'KeyR', 'mods': ['alt', 'cmd']}},"
+        " 'hotkey': {'status': 'ok'}}) == ('r', 0x180000)\n"
         "assert native_hooks.microphone_authorization() is None\n"
         "assert native_hooks.request_microphone() is None\n"
         "assert native_hooks.login_item_status() == 'unsupported'\n"
@@ -436,6 +450,25 @@ def test_menu_model() -> None:
 
     quitting = _menu(_state("listening", minutes=4), quitting=True)
     assert not any(e.enabled for e in quitting.values() if not e.separator)
+
+    # Start/Stop listening shows the keyboard shortcut, once macOS took it (the menu teaches it)
+    assert stopped["listen"].shortcut == "" and stopped["quit"].modifiers == hotkey.APPKIT_MODIFIERS["cmd"]
+    shortcut = {"prefs": {"hotkey": {"code": "KeyR", "mods": ["alt", "cmd"], "key": "R"}}, "hotkey": {"status": "ok"}}
+    listen = _menu(_state("stopped", **shortcut))["listen"]
+    assert (listen.shortcut, listen.modifiers) == ("r", (1 << 19) | (1 << 20))  # NSEventModifierFlagOption | Command
+    assert _menu(_state("listening", **shortcut))["listen"].shortcut == "r"
+    for status in ("taken", "failed", "pending", "off"):
+        assert _menu(_state("stopped", **{**shortcut, "hotkey": {"status": status}}))["listen"].shortcut == ""
+    azerty = {"prefs": {"hotkey": {"code": "KeyQ", "mods": ["ctrl", "cmd"], "key": "A"}}, "hotkey": {"status": "ok"}}
+    assert _menu(_state("stopped", **azerty))["listen"].shortcut == "a"  # AppKit shows the character
+
+
+def test_which_shortcut_the_shell_registers() -> None:
+    hk = {"code": "KeyR", "mods": ["cmd", "alt"], "key": "R"}
+    assert native.hotkey_wanted({"prefs": {"hotkey": hk}, "hotkey": {"recording": False}}) == ("KeyR", ("alt", "cmd"))
+    assert native.hotkey_wanted({"prefs": {"hotkey": hk}, "hotkey": {"recording": True}}) is None  # Settings records one
+    assert native.hotkey_wanted({"prefs": {"hotkey": hk}}, quitting=True) is None
+    assert native.hotkey_wanted({"prefs": {"hotkey": None}}) is None and native.hotkey_wanted({}) is None
 
 
 def test_quit_asks_only_while_listening() -> None:
@@ -776,6 +809,182 @@ def test_login_toggle_goes_through_the_host_prefs(host: FakeHost, appkit: Record
     shell.on_menu("login")
     assert _wait(lambda: rendered == ["enabled"])
     assert host.calls == [("update_prefs", {"start_at_login": True})]
+
+
+# ---------------------------------------------------------- native shell: keyboard shortcut
+
+
+class FakeHotKeys:
+    """hotkey.CarbonHotKey without Carbon: records registrations, answers what macOS would."""
+
+    def __init__(self, on_press: Any) -> None:
+        self.on_press = on_press
+        self.calls: list[tuple[Any, ...]] = []
+        self.registered: tuple[str, tuple[str, ...]] | None = None
+        self.answers: dict[str, int] = {}  # code -> OSStatus
+        self.presses = 0
+
+    def register(self, code: str, mods: Any) -> int:
+        self.calls.append(("register", code, tuple(mods)))
+        err = self.answers.get(code, 0)
+        self.registered = (code, tuple(mods)) if err == 0 else None
+        return err
+
+    def unregister(self) -> None:
+        self.calls.append(("unregister",))
+        self.registered = None
+
+    def close(self) -> None:
+        self.calls.append(("close",))
+
+    def send_test_press(self) -> int:  # Carbon calls the handler synchronously, on the main thread
+        self.presses += 1
+        self.on_press()
+        return 0
+
+
+def _hk_state(state: str = "stopped", *, code: str | None = "KeyR", mods: tuple[str, ...] = ("alt", "cmd"),
+              status: str = "pending", error: int | None = None, recording: bool = False,
+              sound: bool = True, hotkey_cap: bool = True) -> dict[str, Any]:
+    prefs = {"ui_language": "auto", "hotkey_sound": sound,
+             "hotkey": {"code": code, "mods": list(mods), "key": code[-1]} if code else None}
+    return {**_state(state), "prefs": prefs, "capabilities": {"hotkey": hotkey_cap},
+            "hotkey": {"status": status, "error": error, "recording": recording}}
+
+
+@pytest.fixture
+def hotkeys(monkeypatch: pytest.MonkeyPatch) -> list[FakeHotKeys]:
+    made: list[FakeHotKeys] = []
+    monkeypatch.setattr(native.hotkey, "CarbonHotKey", lambda on_press: made.append(FakeHotKeys(on_press)) or made[-1])
+    return made
+
+
+def _reports(host: FakeHost) -> list[Any]:
+    return [args for name, args in host.calls if name == "set_hotkey_status"]
+
+
+def test_the_shortcut_is_registered_from_the_preferences(host: FakeHost, appkit: Recorder, hotkeys: list[FakeHotKeys],
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    host.thread.start()
+    shell = _shell(host)
+    shell.state = _hk_state()
+    shell._sync_hotkey()
+    assert hotkeys == []  # not before the app has finished launching
+    shell._launched = True
+    shell.state = _hk_state(hotkey_cap=False)  # the browser, or no Carbon
+    shell._sync_hotkey()
+    assert hotkeys == []
+
+    shell.state = _hk_state()
+    shell._sync_hotkey()
+    (hk,) = hotkeys
+    assert hk.calls == [("register", "KeyR", ("alt", "cmd"))]
+    assert _wait(lambda: _reports(host) == [("ok", None)])  # macOS took it: Settings shows it
+    shell.state = _hk_state(status="ok")  # the host's state says it now: nothing more to do
+    shell._sync_hotkey()
+    shell._sync_hotkey()
+    time.sleep(0.1)
+    assert len(hk.calls) == 1 and len(_reports(host)) == 1
+
+    # Settings records a new one: the current one is off meanwhile, so pressing it reaches the page
+    shell.state = _hk_state(status="ok", recording=True)
+    shell._sync_hotkey()
+    assert hk.calls[-1] == ("unregister",) and _wait(lambda: _reports(host)[-1] == ("paused", None))
+    # a new one another app holds: said, and not tried again at every state …
+    hk.answers["KeyT"] = hotkey.HOT_KEY_EXISTS
+    shell.state = _hk_state(code="KeyT", mods=("ctrl", "alt"), status="pending")
+    shell._sync_hotkey()
+    assert hk.calls[-1] == ("register", "KeyT", ("ctrl", "alt"))
+    assert _wait(lambda: _reports(host)[-1] == ("taken", -9878))
+    shell.state = _hk_state(code="KeyT", mods=("ctrl", "alt"), status="taken", error=-9878)
+    shell._sync_hotkey()
+    assert hk.calls[-1] == ("register", "KeyT", ("ctrl", "alt")) and len(hk.calls) == 3
+    # … only when Settings saves it again (pending): the other app may have let it go
+    del hk.answers["KeyT"]
+    shell.state = _hk_state(code="KeyT", mods=("ctrl", "alt"), status="pending")
+    shell._sync_hotkey()
+    assert len(hk.calls) == 4 and hk.registered == ("KeyT", ("ctrl", "alt"))
+    assert _wait(lambda: _reports(host)[-1] == ("ok", None))
+
+    shell.state = _hk_state(code=None, status="ok")  # turned off
+    shell._sync_hotkey()
+    assert hk.calls[-1] == ("unregister",) and _wait(lambda: _reports(host)[-1] == ("off", None))
+    shell.state = _hk_state(status="off")
+    shell._sync_hotkey()
+    assert hk.calls[-1] == ("register", "KeyR", ("alt", "cmd"))  # on again
+    shell.quitting = True  # quitting: a press must not start listening again
+    shell._sync_hotkey()
+    assert hk.calls[-1] == ("unregister",) and hk.registered is None
+    monkeypatch.setattr(native, "_run_exit_handlers", lambda: None)  # not pytest's own!
+    shell.will_terminate()
+    assert hk.calls[-1] == ("close",)
+
+
+def test_a_press_toggles_listening_and_plays_a_sound(host: FakeHost, appkit: Recorder, hotkeys: list[FakeHotKeys],
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    host.thread.start()
+    played: list[str] = []
+
+    class Sound:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def play(self) -> None:
+            played.append(self.name)
+
+    sounds = types.SimpleNamespace(soundNamed_=lambda name: Sound(name))
+    monkeypatch.setitem(sys.modules, "AppKit", types.SimpleNamespace(NSApplication=sys.modules["AppKit"].NSApplication,
+                                                                    NSSound=sounds))
+    shell = _shell(host)
+    shell._launched = True
+    for state, sound in (("stopped", "Tink"), ("listening", "Pop"), ("paused", "Tink"), ("error", "Tink")):
+        host._state["state"] = state
+        shell.state = _hk_state(state, status="ok")
+        before = len(played)
+        shell.on_hotkey()  # from Carbon's handler, on the main thread: only posts to the host
+        assert _wait(lambda s=sound, n=before: len(played) == n + 1 and played[-1] == s)
+    assert [c for c in host.calls if c[0] == "listen_toggle"] == [("listen_toggle", None)] * 4
+    host._state["state"] = "starting"  # nothing to do: no sound either
+    shell.on_hotkey()
+    assert _wait(lambda: len([c for c in host.calls if c[0] == "listen_toggle"]) == 5)
+    time.sleep(0.1)
+    assert len(played) == 4
+    host._state["state"] = "stopped"
+    shell.state = _hk_state("stopped", status="ok", sound=False)  # turned off in Settings
+    shell.on_hotkey()
+    assert _wait(lambda: len([c for c in host.calls if c[0] == "listen_toggle"]) == 6)
+    time.sleep(0.1)
+    assert len(played) == 4
+
+
+def test_the_selftest_presses_the_shortcut_without_listening(host: FakeHost, appkit: Recorder,
+                                                             hotkeys: list[FakeHotKeys]) -> None:
+    """A synthetic press reaches the host, which only says what it would do: nothing is started."""
+    host.thread.start()
+    shell = _shell(host)
+    shell._launched = True
+    shell.state = _hk_state()
+    shell._sync_hotkey()
+    shell.state = _hk_state(status="ok")
+    listen = Recorder(keyEquivalent="r", keyEquivalentModifierMask=hotkey.appkit_mask(["alt", "cmd"]))
+    shell._entries["listen"] = listen
+    out = shell._check_hotkey()
+    assert out["registered"] == "⌥⌘R" and out["register_result"] == 0 and out["in_menu"] is True
+    assert (out["send_result"], out["handled"], out["host_answer"], out["expected"]) == (0, 1, "start", "start")
+    assert out["reaches_host"] is True and out["temporary"] is False
+    assert not [c for c in host.calls if c[0] == "listen_toggle"]  # asked, never pressed for real
+    assert shell._probe is None
+
+    listen.returns["keyEquivalent"] = ""  # the menu doesn't show it
+    assert shell._check_hotkey()["in_menu"] is False
+    # turned off in the preferences: the default one is registered for the test, then removed again
+    shell.state = _hk_state(code=None)
+    shell._sync_hotkey()
+    shell.state = _hk_state(code=None, status="off")
+    out = shell._check_hotkey()
+    assert out["temporary"] is True and out["registered"] == "⌥⌘R" and out["reaches_host"] is True
+    assert out["in_menu"] is True  # nothing shown, as nothing is set: right
+    assert hotkeys[0].registered is None
 
 
 # ---------------------------------------------------------------- macOS hooks

@@ -65,6 +65,7 @@ ROUTES = [
     ("POST", f"/api/meetings/{PLANNING}/items/A1/dismiss"), ("GET", "/api/cost"), ("GET", "/api/models"),
     ("POST", "/api/models/base/download"), ("DELETE", "/api/models/base"), ("POST", "/api/setup/complete"),
     ("PATCH", "/api/prefs"), ("POST", "/api/reveal"), ("POST", "/api/open-settings"), ("POST", "/api/permissions/microphone"),
+    ("POST", "/api/hotkey/recording"),
 ]  # fmt: skip
 
 
@@ -386,9 +387,67 @@ def test_setup_and_prefs(client: TestClient, host: AppHost) -> None:
     assert client.get("/api/app").json()["setup_done"] is True
     body = client.patch("/api/prefs", json={"ui_language": "fr", "listen_on_launch": False}).json()
     assert body["ui_language"] == "fr" and body["listen_on_launch"] is False
-    assert client.get("/api/app").json()["prefs"] == {"listen_on_launch": False, "start_at_login": False, "ui_language": "fr"}
+    assert client.get("/api/app").json()["prefs"] == {
+        "listen_on_launch": False, "start_at_login": False, "ui_language": "fr",
+        "hotkey": {"code": "KeyR", "mods": ["alt", "cmd"], "key": "R"}, "hotkey_sound": True}  # fmt: skip
     for bad in ({"ui_language": "de"}, {"setup_done": False}, {"listen_on_launch": "maybe"}):
         assert client.patch("/api/prefs", json=bad).status_code == 400
+
+
+def test_the_keyboard_shortcut_round_trip(client: TestClient, host: AppHost, tmp_path: Path) -> None:
+    """Settings saves the shortcut through /api/prefs; the server checks it the way the page does."""
+    assert client.get("/api/app").json()["hotkey"] == {"status": "pending", "error": None, "recording": False}
+    host.set_hotkey_status("ok")  # the native shell's answer for the default one
+    # recorded on an AZERTY keyboard: the physical key is KeyQ, its label is A; modifiers in any order
+    body = client.patch("/api/prefs", json={"hotkey": {"code": "KeyQ", "mods": ["cmd", "ctrl", "cmd"], "key": "a"}})
+    assert body.status_code == 200, body.text
+    assert body.json()["hotkey"] == {"code": "KeyQ", "mods": ["ctrl", "cmd"], "key": "A"}
+    state = client.get("/api/app").json()
+    assert state["prefs"]["hotkey"] == {"code": "KeyQ", "mods": ["ctrl", "cmd"], "key": "A"}
+    assert state["hotkey"]["status"] == "pending"  # until the shell says whether macOS took it
+    assert json.loads((tmp_path / "app.json").read_text())["hotkey"] == {"code": "KeyQ", "mods": ["ctrl", "cmd"], "key": "A"}
+
+    for bad, why in (
+        ({"code": "KeyQ", "mods": ["cmd"]}, "every Mac app has"),             # ⌘Q quits
+        ({"code": "Space", "mods": ["cmd"]}, "macOS uses ⌘Space itself"),     # Spotlight
+        ({"code": "KeyC", "mods": ["cmd"]}, "taken in many apps"),            # ⌘C copies
+        ({"code": "KeyE", "mods": ["alt", "shift"]}, "taken in many apps"),   # ⌥ types characters
+        ({"code": "KeyR", "mods": ["shift"]}, "Add ⌘, ⌥ or ⌃"),
+        ({"code": "KeyR", "mods": []}, "Add ⌘, ⌥ or ⌃"),
+        ({"code": "Fn", "mods": ["alt", "cmd"]}, "can't use this key"),
+        ({"code": "KeyR", "mods": ["alt", "hyper"]}, "hotkey.mods"),
+        ({"code": "KeyR", "mods": ["alt", "cmd"], "extra": 1}, "extra"),
+        ({"code": "KeyR", "mods": ["alt", "cmd"], "key": "R" * 40}, "at most 16"),
+    ):  # fmt: skip
+        r = client.patch("/api/prefs", json={"hotkey": bad})
+        assert r.status_code == 400 and why in r.json()["error"], (bad, r.text)
+    assert host.prefs.hotkey is not None and host.prefs.hotkey.code == "KeyQ"  # nothing refused was kept
+
+    assert client.patch("/api/prefs", json={"hotkey": {"code": "F5", "mods": ["ctrl"]}}).status_code == 200  # an F-key: one is enough
+    assert client.patch("/api/prefs", json={"hotkey": None, "hotkey_sound": False}).json()["hotkey"] is None  # turned off
+    state = client.get("/api/app").json()
+    assert state["prefs"]["hotkey"] is None and state["prefs"]["hotkey_sound"] is False
+    assert client.patch("/api/prefs", json={"ui_language": "en"}).json()["hotkey"] is None  # stays off
+    assert client.patch("/api/prefs", json={"hotkey": {}}).json()["hotkey"] == {"code": "KeyR", "mods": ["alt", "cmd"], "key": "R"}
+
+
+def test_recording_a_shortcut_turns_the_current_one_off_for_a_while(client: TestClient, host: AppHost,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    from voicestream.app import host as host_mod
+
+    assert client.post("/api/hotkey/recording", json={"active": True}).json()["hotkey"]["recording"] is True
+    assert client.post("/api/hotkey/recording", json={"active": False}).json()["hotkey"]["recording"] is False
+    client.post("/api/hotkey/recording", json={"active": True})
+    client.patch("/api/prefs", json={"hotkey": {"code": "KeyK", "mods": ["ctrl", "alt"]}})  # saved: recording is over
+    assert client.get("/api/app").json()["hotkey"]["recording"] is False
+    monkeypatch.setattr(host_mod, "HOTKEY_RECORDING_S", 0.1)  # a page that never says it is done
+    client.post("/api/hotkey/recording", json={"active": True})
+    deadline = time.monotonic() + 5
+    while client.get("/api/app").json()["hotkey"]["recording"] and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert client.get("/api/app").json()["hotkey"]["recording"] is False
+    for bad in ({}, {"active": "yes please"}, {"active": True, "x": 1}):
+        assert client.post("/api/hotkey/recording", json=bad).status_code == 400
 
 
 def test_reveal_only_known_places(client: TestClient, host: AppHost, monkeypatch: pytest.MonkeyPatch) -> None:

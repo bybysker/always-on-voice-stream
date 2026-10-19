@@ -9,7 +9,9 @@ The app's own report says ``ok`` when every check it ran passed, which is not en
   menu-bar icon;
 * the whisper-server it finds must be the copy inside the app: CI exports the build tree's copy as
   ``$VOICESTREAM_WHISPER_SERVER``, which ``find_binary`` reads first, and that says nothing about
-  what users get.
+  what users get;
+* the keyboard shortcut checks only run on a Mac: macOS must have taken it (RegisterEventHotKey
+  answered noErr), a press delivered to the app must reach the host, and the menu must show it.
 
 Prints the report and every problem; exits 1 when there is one. Standard library only.
 """
@@ -24,6 +26,7 @@ from typing import Any
 NATIVE_CHECKS = (
     "window_loaded", "page_rendered", "page_has_content", "app_page", "api_app", "status_item",
     "app_delegate_patched", "hide_on_close_and_reopen", "whisper_server_bundled",
+    "hotkey_registered", "hotkey_reaches_host", "hotkey_in_menu",
 )  # fmt: skip
 """What native mode checks in the packaged app (voicestream/app/native.py MacShell._selftest)."""
 
@@ -53,6 +56,8 @@ def problems(report: dict[str, Any], app: Path) -> list[str]:
     ws = report.get("whisper_server")
     if not ws or not _inside(str(ws), app):
         out.append(f"the app did not find its own whisper-server inside {app.name} (found: {ws})")
+    if (report.get("hotkey") or {}).get("state_after") in ("starting", "listening", "paused"):
+        out.append("the keyboard shortcut's test left the app listening")
     for error in report.get("errors") or []:
         out.append(f"error: {error}")
     if "quit" not in report:

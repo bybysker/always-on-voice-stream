@@ -320,6 +320,19 @@ def test_selftest_verdict(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
         "failed checks: app_delegate_patched", "error: the app did not quit within 50 s",
         "the app did not finish quitting (its last report, written as it quits, is missing)"]
 
+    # the keyboard shortcut: registered (noErr), a press reaches the host, the menu shows it — and the
+    # test of it must not leave the app listening
+    for name in ("hotkey_registered", "hotkey_reaches_host", "hotkey_in_menu"):
+        assert name in check_selftest.NATIVE_CHECKS
+    older = _native_report(app, checks={k: True for k in check_selftest.NATIVE_CHECKS if not k.startswith("hotkey_")})
+    assert check_selftest.problems(older, app) == [
+        "checks that did not run: hotkey_registered, hotkey_reaches_host, hotkey_in_menu"]
+    taken = _native_report(app, ok=False, checks=dict.fromkeys(check_selftest.NATIVE_CHECKS, True) | {"hotkey_registered": False},
+                           hotkey={"register_result": -9878, "state_before": "stopped", "state_after": "stopped"})
+    assert check_selftest.problems(taken, app) == ["failed checks: hotkey_registered"]
+    listening = _native_report(app, hotkey={"state_before": "stopped", "state_after": "listening"})
+    assert check_selftest.problems(listening, app) == ["the keyboard shortcut's test left the app listening"]
+
     report = tmp_path / "selftest.json"
     report.write_text(json.dumps(browser), encoding="utf-8")
     assert check_selftest.main([str(report), str(app)]) == 1

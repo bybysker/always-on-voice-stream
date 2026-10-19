@@ -29,7 +29,9 @@ The microphone picked in Settings may be a headset that isn't connected: listeni
 the default input (or meeting audio alone) and takes it back when it is (:class:`ChosenMic`).
 
 The native shell talks to the host from its main thread with :meth:`AppHost.run_in_thread`,
-:meth:`AppHost.call` and :meth:`AppHost.add_state_listener`. Optional platform glue lives in
+:meth:`AppHost.call` and :meth:`AppHost.add_state_listener`. Its global keyboard shortcut
+(:mod:`.hotkey`) calls :meth:`AppHost.listen_toggle`, and the shell says with
+:meth:`AppHost.set_hotkey_status` whether macOS took the shortcut. Optional platform glue lives in
 ``voicestream.app.native_hooks`` when the shell provides it (all functions optional):
 
 * ``microphone_status() -> "granted" | "denied" | "undetermined" | "restricted"`` (AVFoundation);
@@ -70,6 +72,7 @@ from ..events import EventBus
 from ..models import AudioFrame, Event
 from . import logs
 from . import secrets as keys
+from .hotkey import TOGGLE
 from .meetings import Meetings
 from .prefs import Prefs, load_prefs, save_prefs, update_prefs
 from .settings import default_config_path, load_app_config
@@ -104,6 +107,9 @@ MODEL_WAIT = "The speech-to-text model is still downloading"
 """How the notices about a speech model listening waits for start."""
 NOT_APPLIED = "Your new settings aren't used yet"
 """How the warning about saved settings that can't run (listening goes on with the previous ones) starts."""
+HOTKEY_RECORDING_S = 30.0
+"""Settings records a new shortcut with the current one off (or pressing it would toggle listening, not
+reach the page); it is back on after this long even if the page never says it is done."""
 
 _STT_KEYS = {"openai": ("OPENAI_API_KEY", "OpenAI"), "openai-realtime": ("OPENAI_API_KEY", "OpenAI"),
              "deepgram": ("DEEPGRAM_API_KEY", "Deepgram")}  # fmt: skip
@@ -343,9 +349,17 @@ class AppHost:
         self.native_hooks: Any = _native_hooks()
         self.capabilities: dict[str, bool] = {
             "native_window": False,  # the native shell sets it
+            "hotkey": False,  # likewise: a global shortcut needs the Mac app
             "login_item": _login_item_supported(self.native_hooks),
             "keychain": keys.store_name() == "keychain",
         }
+        self.hotkey: dict[str, Any] = {"status": "pending", "error": None}
+        """What the native shell says of the shortcut: ``ok`` (works from any app), ``taken`` (by another
+        app), ``failed`` (``error``: macOS's code), ``off``, ``paused`` (Settings is recording a new one)
+        or, until it has said, ``pending``."""
+        self._hotkey_recording: asyncio.TimerHandle | None = None
+        self._toggling: asyncio.Task[None] | None = None
+        """What the last press of the shortcut started, while it is being carried out."""
         self.status: State = "stopped"
         self.error: str | None = self.config_error
         if self.error:
@@ -494,7 +508,10 @@ class AppHost:
                 "listen_on_launch": self.prefs.listen_on_launch,
                 "start_at_login": self.prefs.start_at_login,
                 "ui_language": self.prefs.ui_language,
+                "hotkey": self.prefs.hotkey.model_dump() if self.prefs.hotkey is not None else None,
+                "hotkey_sound": self.prefs.hotkey_sound,
             },
+            "hotkey": {**self.hotkey, "recording": self._hotkey_recording is not None},
             "capabilities": dict(self.capabilities),
             "today_usd": round(self.costs.today.total_usd, 4),
         }
@@ -837,6 +854,30 @@ class AppHost:
                 return
         await self.listen_start(paused=paused)
 
+    def toggle_action(self) -> str | None:
+        """What a press of the keyboard shortcut does now (:data:`.hotkey.TOGGLE`), or ``None``: nothing
+        while listening starts or stops, while the previous press is still being carried out (the gap
+        before the state says so), or once the app is quitting."""
+        if self._closing or (self._toggling is not None and not self._toggling.done()):
+            return None
+        return TOGGLE.get(self.status)
+
+    async def listen_toggle(self) -> str | None:
+        """The keyboard shortcut: start when stopped; after a problem, restart as Start does then; stop
+        when listening — the meeting in progress is wrapped up and its notes written, as with Stop, but
+        nobody is asked first (you pressed it on purpose, maybe in another app); resume when paused.
+
+        Returns what it does (:meth:`toggle_action`) at once, for the shell's sound: the work goes on in
+        the background, a stop wrapping a meeting up can take a while."""
+        action = self.toggle_action()
+        if action is None:
+            return None
+        run = {"start": self.listen_start, "restart": self.listen_restart, "stop": self.listen_stop,
+               "resume": self.listen_resume}[action]  # fmt: skip
+        self._toggling = asyncio.ensure_future(run())
+        self.track(self._toggling)
+        return action
+
     async def _apply_pending(self) -> None:
         await asyncio.sleep(0)  # after the rest of the meeting.ended listeners
         if not self.restart_pending or self._stop_requested or self.in_meeting() or self._assistant is None:
@@ -900,8 +941,33 @@ class AppHost:
                 except Exception as exc:  # noqa: BLE001 - e.g. needs approval in System Settings
                     raise HostError(f"could not change launch at login: {exc}") from None
         self.prefs = update_prefs(changes, self.prefs_path)
+        if "hotkey" in changes:
+            # the shell registers it when it sees this state (the same one again: it tries again, as
+            # one macOS refused may be free now), then says whether macOS took it
+            self.hotkey = {"status": "pending", "error": None}
+            self._end_hotkey_recording()
         self._publish_state()
         return self.prefs
+
+    def record_hotkey(self, active: bool) -> None:
+        """(On the loop.) Settings is recording a new shortcut (``active``), or stopped: the shell turns the
+        current one off meanwhile, so that pressing it reaches the page — for at most :data:`HOTKEY_RECORDING_S`."""
+        self._end_hotkey_recording()
+        if active:
+            self._hotkey_recording = asyncio.get_running_loop().call_later(HOTKEY_RECORDING_S, self.record_hotkey, False)
+        self._publish_state()
+
+    def _end_hotkey_recording(self) -> None:
+        if self._hotkey_recording is not None:
+            self._hotkey_recording.cancel()
+            self._hotkey_recording = None
+
+    def set_hotkey_status(self, status: str, error: int | None = None) -> None:
+        """The native shell, on the loop: whether macOS took the shortcut (see :attr:`hotkey`)."""
+        new = {"status": status, "error": error}
+        if new != self.hotkey:
+            self.hotkey = new
+            self._publish_state()
 
     def complete_setup(self) -> Prefs:
         self.prefs = self.prefs.model_copy(update={"setup_done": True})

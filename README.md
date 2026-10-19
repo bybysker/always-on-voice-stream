@@ -68,6 +68,11 @@ For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. No terminal 
 5. Voicestream now lives in the menu bar (the microphone icon). Closing the window doesn't stop
    it listening: click the icon → **Open Voicestream** to bring the window back, or **Quit
    Voicestream** to stop. **Open at login** in the same menu starts it with your Mac.
+6. Press **⌥⌘R** (Option-Command-R) in any app, window open or not, to start or stop listening; a
+   short sound says it worked. Stopping this way wraps the meeting up and writes its notes, like
+   **Stop listening**. Change the shortcut, turn it off or mute the sound in **Settings → General →
+   Keyboard shortcut** (it needs no extra permission); the menu-bar menu shows it next to **Start
+   listening**. In Safari ⌥⌘R also reloads a page: pick another shortcut if you use that.
 
 **After an update**, install the new DMG the same way (step 3 again). macOS ties permissions to
 each build of an app that isn't notarized, so they may have to be granted again, even when System
@@ -110,6 +115,12 @@ Pour un Mac Apple Silicon (M1 ou plus récent) sous macOS 14.2 ou plus. Aucun te
    pas l'écoute : cliquez sur l'icône → **Ouvrir Voicestream** pour retrouver la fenêtre, ou
    **Quitter Voicestream** pour arrêter. **Ouvrir à la connexion**, dans le même menu, le lance
    avec votre Mac.
+6. Appuyez sur **⌥⌘R** (Option-Commande-R) dans n'importe quelle app, fenêtre ouverte ou non, pour
+   démarrer ou arrêter l'écoute ; un petit son le confirme. Arrêter ainsi clôture la réunion et
+   rédige ses notes, comme **Arrêter l'écoute**. Modifiez le raccourci, désactivez-le ou coupez le
+   son dans **Réglages → Général → Raccourci clavier** (aucune autorisation supplémentaire) ; le
+   menu de la barre des menus l'affiche à côté de **Démarrer l'écoute**. Dans Safari, ⌥⌘R recharge
+   aussi la page : choisissez un autre raccourci si vous vous en servez.
 
 **Après une mise à jour**, installez le nouveau DMG de la même façon (étape 3 à refaire). macOS
 associe les autorisations à chaque version d'une app non notariée : il faut parfois les accorder à
