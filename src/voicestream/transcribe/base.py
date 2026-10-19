@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import logging
 import re
+import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -30,6 +31,8 @@ log = logging.getLogger(__name__)
 
 UsageCallback = Callable[[str, float], None]
 """(model, billed_audio_seconds) -> None"""
+BacklogCallback = Callable[[str, float, int, str], None]
+"""(source, behind_s, queued, backend) -> None: ``behind_s`` 0 = caught up again."""
 
 
 @dataclass(slots=True)
@@ -89,6 +92,11 @@ class ChunkTranscriber(Transcriber):
 
     concurrency = 3
     max_retries = 3
+    backlog_after_s = 20.0
+    """An utterance waiting this long for its transcript (or more than :attr:`backlog_max_queued` waiting)
+    means transcription can't keep up with the speech: :attr:`on_backlog` is told, once."""
+    backlog_max_queued = 3
+    backlog_poll_s = 2.0
 
     def __init__(
         self,
@@ -103,6 +111,9 @@ class ChunkTranscriber(Transcriber):
         self.base_prompt = prompt
         self.language = language
         self.on_level: Callable[[str, float, bool], None] | None = None
+        self.on_backlog: BacklogCallback | None = None
+        """Set for live audio: a model too big for the computer (large-v3 on a CPU) falls further behind with
+        every sentence, and the transcript, the to-dos and "Hey Claude" come minutes late without a word."""
 
     @abstractmethod
     async def transcribe_utterance(self, utt: Utterance, prompt: str | None) -> TranscribeResult:
@@ -137,6 +148,14 @@ class ChunkTranscriber(Transcriber):
             delay = min(delay * 2, 8.0)
         return None
 
+    def _report_backlog(self, source: str, behind_s: float, queued: int) -> None:
+        if self.on_backlog is None:
+            return
+        try:
+            self.on_backlog(source, round(behind_s, 1), queued, self.backend)
+        except Exception:  # pragma: no cover - a display problem must not stop the transcript
+            log.exception("backlog callback failed")
+
     async def stream(
         self, source: str, speaker: str, frames: AsyncIterator[AudioFrame]
     ) -> AsyncIterator[TranscriptSegment]:
@@ -149,6 +168,8 @@ class ChunkTranscriber(Transcriber):
         sem = asyncio.Semaphore(self.concurrency)
         prev_text = ""
         utterances: dict[asyncio.Task[TranscribeResult | None], Utterance] = {}
+        waiting_since: dict[asyncio.Task[TranscribeResult | None], float] = {}  # not delivered yet (time.monotonic)
+        behind = False
 
         async def run(utt: Utterance, prompt: str | None) -> TranscribeResult | None:
             async with sem:
@@ -157,7 +178,24 @@ class ChunkTranscriber(Transcriber):
         def submit(utt: Utterance) -> None:
             task = asyncio.ensure_future(run(utt, self.build_prompt(prev_text)))
             utterances[task] = utt
+            waiting_since[task] = time.monotonic()
             pending.put_nowait(task)
+
+        def check_backlog() -> None:
+            nonlocal behind
+            waited = time.monotonic() - min(waiting_since.values()) if waiting_since else 0.0
+            queued = len(waiting_since)
+            if not behind and (waited >= self.backlog_after_s or queued > self.backlog_max_queued):
+                behind = True  # once per episode, not on every poll
+                self._report_backlog(source, max(waited, 0.1), queued)  # (0 would read as "caught up")
+            elif behind and queued <= 1 and waited < self.backlog_after_s / 4:
+                behind = False
+                self._report_backlog(source, 0.0, 0)
+
+        async def watch_backlog() -> None:
+            while True:
+                await asyncio.sleep(self.backlog_poll_s)
+                check_backlog()
 
         async def feed() -> None:
             try:
@@ -170,12 +208,15 @@ class ChunkTranscriber(Transcriber):
                 pending.put_nowait(None)
 
         feeder = asyncio.ensure_future(feed())
+        # the requests in flight can't tell: a slow one just takes long, so look from the outside
+        watcher = asyncio.ensure_future(watch_backlog()) if self.on_backlog is not None else None
         try:
             while True:
                 task = await pending.get()
                 if task is None:
                     break
                 result = await task
+                waiting_since.pop(task, None)
                 utt = utterances.pop(task)
                 if result is None:
                     continue  # the request failed, and failed requests aren't billed
@@ -187,6 +228,10 @@ class ChunkTranscriber(Transcriber):
                 yield self.segment(source, speaker, text, utt.t_start, utt.t_end, result.confidence)
             await feeder  # surface capture errors
         finally:
+            if watcher is not None:
+                watcher.cancel()
+            if behind:  # stopped or restarting: nothing is waiting any more
+                self._report_backlog(source, 0.0, 0)
             if not feeder.done():
                 feeder.cancel()
                 # let the cancellation close the frames before anyone else tries to (aclose() on a

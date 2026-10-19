@@ -88,6 +88,14 @@ async def summarize(
     return rerender(meeting, cfg.user_name)
 
 
+def is_short_clip(cfg: Config, meeting: Meeting) -> bool:
+    """Too little speech to be a meeting (``always_on.short_clip_speech_s`` / ``short_clip_lines``):
+    listening all day, a line from a video or a word with a colleague opens a "meeting" too, and it
+    isn't worth a summary-model call or notes in every tool."""
+    ao = cfg.always_on
+    return meeting.speech_seconds() < ao.short_clip_speech_s and len(meeting.segments) < ao.short_clip_lines
+
+
 def known_language(cfg: Config) -> str | None:
     """The meeting language when the config fixes it (``brain.language``, else ``transcription.language``)."""
     for lang in (cfg.brain.language, cfg.transcription.language):

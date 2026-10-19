@@ -6,7 +6,9 @@ import asyncio
 import functools
 import logging
 import os
+import sys
 import threading
+import time
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
@@ -22,9 +24,11 @@ from voicestream import session as session_mod
 from voicestream import stt_models
 from voicestream.app import host as host_mod
 from voicestream.app import logs
+from voicestream.app import secrets as keys_mod
 from voicestream.app.host import AppHost, HostError, human_error
 from voicestream.app.settings import save_changes
 from voicestream.audio import CaptureSetupError
+from voicestream.audio import mic as mic_mod
 from voicestream.audio.base import AudioSource
 from voicestream.config import Config
 from voicestream.models import AgentStatus, AudioFrame, Event, TranscriptSegment
@@ -310,8 +314,10 @@ async def test_failures_to_start_are_plain_errors(tmp_path: Path, monkeypatch: p
     (tmp_path / "ws").write_text("#!/bin/sh\n")
     (tmp_path / "ws").chmod(0o755)
     host.reload_config()
-    await host.listen_start()
-    assert host.status == "error" and "isn't downloaded" in host.error
+    monkeypatch.setattr(stt_models, "download", _failing_download)
+    await host.listen_start()  # the model isn't there: it is fetched (here the download fails)…
+    await _until(lambda: host.status == "error")
+    assert host.error.startswith("download of large-v3-turbo-q5_0 failed") and host.awaiting_model is None
     # adding what was missing tries again by itself
     stt_models.models_dir(host.cfg).mkdir(parents=True, exist_ok=True)
     stt_models.model_path(host.cfg, "large-v3-turbo-q5_0").write_bytes(stt_models.GGML_MAGIC + b"\0" * 64)
@@ -319,6 +325,10 @@ async def test_failures_to_start_are_plain_errors(tmp_path: Path, monkeypatch: p
     await host.apply_settings()
     assert host.status == "listening"
     await host.listen_stop()
+
+
+async def _failing_download(cfg: Config, name: str, *, on_progress: Any = None, **kw: Any) -> Path:
+    raise stt_models.DownloadError("HTTP 404")
 
 
 async def test_a_microphone_that_fails_for_good_is_an_error(tmp_path: Path) -> None:
@@ -549,3 +559,399 @@ def test_events_listener_types(tmp_path: Path) -> None:
     host = _host(tmp_path)
     host._on_event(Event(type="source.error", data={"source": "mic", "error": "microphone delivers only digital silence"}))
     assert host.warnings[0].startswith("Microphone permission is off")
+
+
+# ----------------------------------------------------- what can't run (yet) never stops listening
+
+
+def _gated_download(gate: asyncio.Event, calls: list[str]) -> Callable[..., Any]:
+    async def download(cfg: Config, name: str, *, on_progress: Any = None, **kw: Any) -> Path:
+        calls.append(name)
+        await gate.wait()
+        path = stt_models.model_path(cfg, name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(stt_models.GGML_MAGIC + b"\0" * 64)
+        return path
+
+    return download
+
+
+def _on_this_mac(host: AppHost, tmp_path: Path, model: str, installed: tuple[str, ...] = ()) -> None:
+    """Speech-to-text on this computer with ``model`` (the fake whisper-server passes the preflight)."""
+    ws = tmp_path / "ws"
+    ws.write_text("#!/bin/sh\n")
+    ws.chmod(0o755)
+    save_changes(host.config_path, {"transcription.backend": "whisper-cpp", "transcription.whisper_cpp.binary": str(ws),
+                                    "transcription.whisper_cpp.model": model, "transcription.whisper_cpp.vad": False})
+    host.reload_config()
+    for name in installed:
+        path = stt_models.model_path(host.cfg, name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(stt_models.GGML_MAGIC + b"\0" * 64)
+
+
+async def test_a_model_still_downloading_is_switched_to_once_it_is_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    gate, calls = asyncio.Event(), []
+    monkeypatch.setattr(stt_models, "download", _gated_download(gate, calls))
+    built: list[Assistant] = []
+    host = _host(tmp_path, factory=_factory(built=built))
+    _on_this_mac(host, tmp_path, "base", installed=("base",))
+    await host.listen_start()
+    assert host.status == "listening"
+    save_changes(host.config_path, {"transcription.whisper_cpp.model": "small"})  # picked in Settings, not downloaded
+    result = await host.apply_settings()
+    # listening goes on with the model it has, the new one downloads
+    assert not result["restarting"] and host.status == "listening" and host.assistant is built[0] and len(built) == 1
+    assert host.awaiting_model == "small" and host.state()["waiting_for_model"] == "small"
+    await _until(lambda: calls == ["small"])
+    assert any(w.startswith(host_mod.MODEL_WAIT) for w in host.warnings)
+    assert host.models()["in_use"] == "base"  # what the running assistant loaded
+    with pytest.raises(HostError):
+        await host.model_remove("base")
+    gate.set()  # downloaded: switched to between meetings, by itself
+    await _until(lambda: len(built) == 2 and host.status == "listening")
+    assert host.assistant.cfg.transcription.whisper_cpp.model == "small" and host.awaiting_model is None
+    assert not any(w.startswith(host_mod.MODEL_WAIT) for w in host.warnings)
+    await host.listen_stop()
+
+
+async def test_listening_asked_for_during_the_download_starts_once_it_is_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    gate, calls = asyncio.Event(), []
+    monkeypatch.setattr(stt_models, "download", _gated_download(gate, calls))
+    host = _host(tmp_path)
+    _on_this_mac(host, tmp_path, "base")  # e.g. the app quit during the setup's download: it resumes
+    await host.listen_start()
+    assert host.status == "starting" and host.assistant is None and host.awaiting_model == "base"
+    await _until(lambda: calls == ["base"])
+    gate.set()
+    await _until(lambda: host.status == "listening")
+    await host.listen_stop()
+    # Stop while waiting: it stays stopped when the download is done
+    stt_models.remove(host.cfg, "base")
+    gate.clear()
+    await host.listen_start()
+    assert host.status == "starting"
+    await host.listen_stop()
+    assert host.status == "stopped" and host.awaiting_model is None
+    gate.set()
+    await _until(lambda: not host._downloads)
+    await asyncio.sleep(0.1)
+    assert host.status == "stopped" and host.assistant is None
+
+
+async def test_new_settings_that_cant_run_keep_the_current_ones_listening(tmp_path: Path) -> None:
+    built: list[Assistant] = []
+    host = _host(tmp_path, factory=_factory(built=built))
+    await host.listen_start()
+    save_changes(host.config_path, {"transcription.backend": "deepgram"})  # no Deepgram key yet
+    assert (await host.apply_settings())["restarting"] is False
+    assert host.status == "listening" and host.assistant is built[0]
+    assert any(w.startswith(host_mod.NOT_APPLIED) and "Deepgram key" in w for w in host.warnings)
+    os.environ["DEEPGRAM_API_KEY"] = "dg-test"  # the key pasted: now it can run
+    await host.apply_settings()
+    assert len(built) == 2 and host.status == "listening" and not any(w.startswith(host_mod.NOT_APPLIED) for w in host.warnings)
+    await host.listen_stop()
+
+
+async def test_a_restart_doesnt_wait_for_an_ended_meetings_agents(tmp_path: Path) -> None:
+    gate = asyncio.Event()
+    engine = FakeEngine(gate=gate)  # an agent that works on long after its meeting
+    built: list[Assistant] = []
+    host = _host(tmp_path, idle=0, factory=_factory(built=built, agent_engine=engine))
+    save_changes(host.config_path, {"agents.mode": "commands", "agents.engine": "api", "agents.finish_wait_s": 0})
+    host.reload_config()
+    await host.listen_start()
+    await _until(lambda: host.in_meeting())
+    old = built[0]
+    old.current.add_segment(seg("Hey Claude, compare Globex and Initech pricing for the Acme email.", "mic", t=1.0))
+    await old.extract_now()
+    await _until(lambda: engine.prompts != [])
+    await old.end_meeting("manual")
+    ended = old.finished_meetings[0]
+    assert ended.agents.busy
+    save_changes(host.config_path, {"user_name": "Sam"})  # a setting saved between meetings
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    await asyncio.wait_for(host.apply_settings(), 10)
+    # listening again at once, with the new settings; the old assistant finishes its agent meanwhile
+    assert loop.time() - started < 5 and len(built) == 2 and host.assistant is built[1] and host.status == "listening"
+    assert host.assistant.cfg.user_name == "Sam" and host.assistants == [built[1], old]
+    item_id = next(iter(ended.meeting.items))
+    host.meetings.edit_item(ended.store.dir.name, item_id, title="Compare pricing")  # still held in memory there
+    assert ended.meeting.items[item_id].title == "Compare pricing"
+    gate.set()
+    await _until(lambda: host.assistants == [built[1]])
+    runs = [i.agent for i in ended.meeting.items.values() if i.agent is not None]
+    assert runs and all(r.status == AgentStatus.DONE for r in runs)
+    assert host.status == "listening"
+    await host.listen_stop()
+
+
+async def test_quitting_cuts_short_agents_left_working_by_a_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(host_mod, "GRACEFUL_SHUTDOWN_S", 0.5)
+    engine = FakeEngine(gate=asyncio.Event())  # never finishes
+    built: list[Assistant] = []
+    host = _host(tmp_path, idle=0, factory=_factory(built=built, agent_engine=engine))
+    save_changes(host.config_path, {"agents.mode": "commands", "agents.engine": "api", "agents.finish_wait_s": 0})
+    host.reload_config()
+    await host.listen_start()
+    await _until(lambda: host.in_meeting())
+    built[0].current.add_segment(seg("Hey Claude, compare Globex and Initech pricing for the Acme email.", "mic", t=1.0))
+    await built[0].extract_now()
+    await _until(lambda: engine.prompts != [])
+    await built[0].end_meeting("manual")
+    await asyncio.wait_for(host.listen_restart(), 10)
+    assert len(host.assistants) == 2
+    await asyncio.wait_for(host.shutdown(), 30)
+    assert host.assistants == [] and built[0].forced
+
+
+# ------------------------------------------------------------------- the chosen microphone
+
+
+class _Stream:
+    """A PortAudio input stream: calls back from its own thread until stopped, or until its device is
+    unplugged (``dead``: PortAudio then just stops calling back)."""
+
+    def __init__(self, sd: _FakeSD, device: int | None, callback: Callable[..., None]) -> None:
+        self.sd, self.device, self.callback = sd, device, callback
+        self.name = sd.query_devices(device, "input")["name"]
+        self._stop = threading.Event()
+
+    def start(self) -> None:
+        def run() -> None:
+            while not self._stop.wait(0.01):
+                if self.name in self.sd.names:
+                    self.callback(np.full((160, 1), 0.01, dtype=np.float32), 160, None, None)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def close(self) -> None:
+        self._stop.set()
+
+
+class _FakeSD:
+    """python-sounddevice with hot-plugging: ``names`` is what is plugged in, ``listed`` what PortAudio
+    saw when it (re)started."""
+
+    def __init__(self, names: list[str]) -> None:
+        self.names = list(names)
+        self.listed = list(names)
+        self.opened: list[str] = []
+        self.default = type("Default", (), {"device": [0, 0]})()
+
+    def query_devices(self, index: int | None = None, kind: str | None = None) -> Any:
+        devs = [{"name": n, "max_input_channels": 1, "default_samplerate": 16000} for n in self.listed]
+        if index is None and kind is None:
+            return devs
+        return devs[index or 0]
+
+    def _terminate(self) -> None:
+        pass
+
+    def _initialize(self) -> None:
+        self.listed = list(self.names)
+
+    def InputStream(self, *, device: int | None, callback: Callable[..., None], **kw: Any) -> _Stream:  # noqa: N802
+        stream = _Stream(self, device, callback)
+        self.opened.append(stream.name)
+        return stream
+
+
+def _mic_host(tmp_path: Path, extra: str) -> AppHost:
+    """A host with the real assistant factory (so the real microphone source) on a fake sounddevice."""
+    return AppHost(_write_config(tmp_path, extra=extra), process_setup=False, prefs_path=tmp_path / "app.json")
+
+
+async def test_a_chosen_microphone_that_isnt_connected_doesnt_stop_listening(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sd = _FakeSD(["MacBook Pro Microphone"])  # the AirPods are in their case
+    monkeypatch.setattr(mic_mod, "_sd", lambda: sd)
+    monkeypatch.setattr(host_mod, "MIC_STALL_S", 0.3)
+    host = _mic_host(tmp_path, '\n[capture]\nsources = ["mic"]\n\n[capture.mic]\ndevice = "AirPods"\n')
+    await host.listen_start()
+    missing = "Your microphone (AirPods) isn't connected — using MacBook Pro Microphone until it is back"
+    await _until(lambda: missing in host.warnings)
+    assert host.status == "listening" and sd.opened == ["MacBook Pro Microphone"]  # the default input meanwhile
+    sd.names.append("AirPods")  # taken out of the case
+    host.audio_devices_changed()
+    await _until(lambda: sd.opened[-1] == "AirPods")
+    await _until(lambda: not any(w.startswith(host_mod.MIC_MISSING) for w in host.warnings))
+    assert host.status == "listening"
+    sd.names.remove("AirPods")  # flat battery mid-meeting: its stream just goes quiet
+    await _until(lambda: missing in host.warnings)
+    assert sd.opened[-1] == "MacBook Pro Microphone" and host.status == "listening"
+    await host.listen_stop()
+    assert host.status == "stopped"
+
+
+async def test_without_the_fallback_only_meeting_audio_is_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sd = _FakeSD(["MacBook Pro Microphone"])
+    monkeypatch.setattr(mic_mod, "_sd", lambda: sd)
+    monkeypatch.setattr(host_mod, "MIC_RETRY_S", 0.2)
+    host = _mic_host(tmp_path, '\n[capture]\nsources = ["mic"]\n\n[capture.mic]\ndevice = "AirPods"\n'
+                               "use_default_when_missing = false\n")
+    await host.listen_start()
+    await _until(lambda: any(w.startswith("Your microphone (AirPods) isn't connected — nothing is recorded") for w in host.warnings))
+    assert host.status == "listening" and sd.opened == []
+    sd.names.append("AirPods")  # found by the periodic look, no notification needed
+    await _until(lambda: sd.opened == ["AirPods"])
+    await _until(lambda: not any(w.startswith(host_mod.MIC_MISSING) for w in host.warnings))
+    await host.listen_stop()
+
+
+async def test_a_source_that_gives_up_while_another_records_is_a_warning(tmp_path: Path) -> None:
+    class GoneMic(AudioSource):
+        async def frames(self) -> AsyncIterator[AudioFrame]:
+            raise CaptureSetupError("Microphone permission is off for Voicestream")
+            yield  # pragma: no cover
+
+    host = _host(tmp_path, factory=_factory(sources=lambda: [GoneMic("mic"), IdleSource("system")]))
+    await host.listen_start()
+    await _until(lambda: any(e.type == "source.stopped" for e in host.bus.history))
+    await asyncio.sleep(0.1)
+    # meeting audio is still recorded: listening, with the problem in the banner — not an error state
+    # where Start did nothing and Dismiss ended the meeting
+    assert host.status == "listening" and host.error is None and host.assistant is not None
+    assert any("Microphone permission is off" in w for w in host.warnings)
+    await host.listen_stop()
+
+
+async def test_start_in_an_error_state_with_an_assistant_restarts_it(tmp_path: Path) -> None:
+    built: list[Assistant] = []
+    host = _host(tmp_path, factory=_factory(built=built))
+    await host.listen_start()
+    host._set_status("error", "something gave up")  # half of it still running
+    await host.listen_start()
+    assert len(built) == 2 and host.assistant is built[1] and host.status == "listening"
+    await host.listen_stop()
+
+
+# ----------------------------------------------------------- settings edited by hand, the Keychain
+
+
+async def test_hand_edits_are_read_on_start_and_stop(tmp_path: Path) -> None:
+    built: list[Assistant] = []
+    host = _host(tmp_path, factory=_factory(built=built))
+    path = host.config_path
+    await host.listen_start()
+    path.write_text(path.read_text(encoding="utf-8").replace('user_name = "Alex"', 'user_name = "Camille"'), encoding="utf-8")
+    await host.listen_stop()
+    assert host.cfg.user_name == "Camille"
+    path.write_text(path.read_text(encoding="utf-8").replace('"Camille"', '"Dominique Martin"'), encoding="utf-8")
+    await host.listen_start()
+    assert built[-1].cfg.user_name == "Dominique Martin"
+    await host.listen_stop()
+    good = path.read_text(encoding="utf-8")
+    path.write_text(good + "\n[broken\n", encoding="utf-8")  # a typo while editing it…
+    await host.listen_start()
+    assert host.status == "error" and host.error.startswith("Your settings file has a problem")
+    path.write_text(good, encoding="utf-8")  # …fixed: Start starts, rather than repeating the old problem
+    await host.listen_start()
+    assert host.status == "listening"
+    await host.listen_stop()
+
+
+class _SlowKeychain:
+    """The Keychain after an update of the app: a prompt for every item, and Deny clicked for one."""
+
+    priority = 5
+
+    def __init__(self) -> None:
+        self.asked: list[tuple[str, int]] = []
+
+    def get_password(self, service: str, name: str) -> str | None:
+        self.asked.append((name, threading.get_ident()))
+        if name == "HUBSPOT_TOKEN":
+            time.sleep(0.2)  # macOS's prompt, waiting for an answer
+            raise PermissionError("User canceled the operation")
+        return None
+
+    def set_password(self, service: str, name: str, value: str) -> None:
+        pass
+
+
+async def test_the_keychain_is_never_read_on_the_loop_and_a_refusal_is_remembered(tmp_path: Path,
+                                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    kc = _SlowKeychain()
+    monkeypatch.setattr(keys_mod, "_keyring", lambda: kc)
+    monkeypatch.setattr(keys_mod, "_UNREADABLE", set())
+    host = _host(tmp_path)  # reads the keys once, at launch (before its loop runs)
+    assert [n for n, _ in kc.asked].count("HUBSPOT_TOKEN") == 1
+    warning = keys_mod.unreadable_message("HUBSPOT_TOKEN")
+    assert warning in host.warnings and "won't ask again" in warning
+    kc.asked.clear()
+    loop_thread = threading.get_ident()
+    for change in ({"user_name": "Sam"}, {"user_name": "Alex"}):  # every save reloads the settings
+        save_changes(host.config_path, change)
+        await host.apply_settings()
+    assert kc.asked and all(t != loop_thread for _, t in kc.asked)  # in a worker thread: nothing froze
+    assert "HUBSPOT_TOKEN" not in [n for n, _ in kc.asked]  # refused once: not asked again this launch
+    keys_mod.set_secret("HUBSPOT_TOKEN", "pat-new")  # saved again from the app: readable from now on
+    assert keys_mod.unreadable() == []
+
+
+async def test_the_app_ends_a_meeting_a_crash_left_open_when_it_starts(tmp_path: Path) -> None:
+    from test_app_meetings import crashed_meeting
+
+    host = _host(tmp_path)
+    folder = crashed_meeting(host.cfg)
+    await host.start()
+    try:
+        meeting, _ = load_meeting(host.cfg.data_path / "sessions" / folder)
+        assert meeting.ended_at is not None and meeting.interrupted and len(meeting.segments) == 5
+        assert host.meetings.list()["meetings"][0]["interrupted"]
+    finally:
+        await host.shutdown()
+
+
+async def test_a_meeting_whose_wrap_up_a_forced_stop_cut_short_can_be_finished_at_once(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Quitting while the wrap-up hangs cancels it: the meeting has no end. Its lock file must stay
+    (unlocked), or it would pass for another voicestream's recording, read-only for an hour."""
+    monkeypatch.setattr(host_mod, "FORCE_STOP_S", 0.3)
+
+    async def hangs(self: Any, reason: str = "ended") -> None:
+        self.finished = True
+        await asyncio.Event().wait()
+
+    built: list[Assistant] = []
+    host = _host(tmp_path, idle=0, factory=_factory(built=built))
+    await host.listen_start()
+    await _until(lambda: host.in_meeting())
+    await built[0]._route(seg("I'll send the deck by Friday.", "mic", t=1.0))
+    await built[0].extract_now()
+    assert built[0].current is not None
+    built[0].current.flush_save()
+    monkeypatch.setattr(session_mod.MeetingSession, "finish", hangs)
+    await host.listen_stop(force=True)
+    await _until(lambda: host.assistant is None and host._run_task is None)
+    (row,) = host.meetings.list()["meetings"]
+    assert not row["in_progress"] and row["interrupted"]
+    assert host.meetings.edit_item(row["folder"], "A1", status="done")["status"] == "done"
+
+
+async def test_audio_device_changes_reach_the_microphone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from voicestream.app import native_hooks
+
+    blocks: list[Callable[[Any], None]] = []
+    center = SimpleNamespace(addObserverForName_object_queue_usingBlock_=lambda name, obj, queue, block: blocks.append(block))
+    monkeypatch.setitem(sys.modules, "Foundation", SimpleNamespace(NSNotificationCenter=SimpleNamespace(defaultCenter=lambda: center)))
+    monkeypatch.setattr(native_hooks, "_avfoundation", lambda: SimpleNamespace(
+        AVCaptureDeviceWasConnectedNotification="connected", AVCaptureDeviceWasDisconnectedNotification="disconnected"))
+    host = _host(tmp_path)
+    host.native_hooks = native_hooks
+    poked: list[bool] = []
+    monkeypatch.setattr(host, "audio_devices_changed", lambda: poked.append(True))
+    await host.start()
+    try:
+        assert len(blocks) == 2  # connected, disconnected
+        threading.Thread(target=blocks[0], args=(None,)).start()  # AppKit calls from its own thread
+        await _until(lambda: poked == [True])
+    finally:
+        await host.shutdown()
+    blocks[1](None)  # after quitting: the loop is gone, and nothing raises into Objective-C

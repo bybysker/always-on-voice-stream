@@ -13,7 +13,11 @@ Only the names in :func:`known_names` can be stored, so a request to the local A
 an arbitrary variable (``PATH``, ``DYLD_INSERT_LIBRARIES``…) into the process. Values are never
 logged, returned or written anywhere but the store itself.
 
-The Keychain is reached through ``keyring`` (service ``voicestream``). Without a usable backend
+The Keychain is reached through ``keyring`` (service ``voicestream``). Every call can block on a
+macOS prompt ("Voicestream wants to use your confidential information": a new build of an ad-hoc
+signed app asks again for each key), so the app makes them off its event loop. A key the person
+refused (or a locked Keychain) is remembered as unreadable for the rest of the launch rather than
+asked for again on every settings save (:func:`load_into_env`). Without a usable backend
 (Linux CI, a headless box, ``keyring`` not installed) the keys go into ``~/.voicestream/.env``
 (0600) instead, which every voicestream command already reads and agents are denied
 (``agents.runner.secret_files``). ``VOICESTREAM_SECRET_STORE=file|keychain`` forces either one;
@@ -50,6 +54,22 @@ CORE_SECRETS = (
 
 class SecretError(ValueError):
     """An unknown name or an unusable value (the message never contains the value)."""
+
+
+_UNREADABLE: set[str] = set()
+"""Names the Keychain refused to hand over during this launch (Deny on macOS's prompt, a locked
+Keychain): not asked for again until the app is reopened or the key is saved again from the app."""
+
+
+def unreadable() -> list[str]:
+    """The keys the Keychain refused this launch (see :data:`_UNREADABLE`), for the app's banner."""
+    return sorted(_UNREADABLE)
+
+
+def unreadable_message(name: str) -> str:
+    """What the app's banner says about a refused key (worded for people; also the log line)."""
+    return (f"The Keychain didn't let Voicestream read {name}: Voicestream works without it and won't ask again "
+            "until it is reopened. To use it, paste it again in Settings, or choose “Always Allow” when macOS asks")
 
 
 @functools.cache
@@ -168,19 +188,23 @@ def load_into_env() -> list[str]:
     """Copy stored keys into ``os.environ`` for the variables that aren't set yet; returns their names.
 
     Reads the Keychain only (the ``.env`` files are loaded by ``load_config`` already). Each lookup
-    is a separate Keychain query, but only for names missing from the environment.
+    is a separate Keychain query, but only for names missing from the environment — and not for one
+    refused earlier this launch: the app reloads its settings on every save, and macOS would show its
+    password prompt again each time (blocking until it is answered). May block: not on an event loop.
     """
     backend = _keyring()
     if backend is None:
         return []
     loaded = []
     for name in known_names():
-        if os.environ.get(name):
+        if os.environ.get(name) or name in _UNREADABLE:
             continue
         try:
             value = backend.get_password(SERVICE, name)
         except Exception as exc:  # noqa: BLE001 - locked or denied Keychain: run without that key
-            log.warning("could not read %s from the Keychain: %s", name, type(exc).__name__)
+            _UNREADABLE.add(name)
+            log.debug("Keychain read of %s failed: %s", name, type(exc).__name__)
+            log.warning("%s", unreadable_message(name))
             continue
         if value:
             os.environ[name] = value
@@ -213,6 +237,7 @@ def set_secret(name: str, value: str) -> dict[str, Any]:
         raise SecretError(f"{name} must be a single line of visible characters (no line breaks, tabs or control characters)")
     backend = _keyring()
     store: Store = "file"
+    _UNREADABLE.discard(name)  # in os.environ from now on; a Keychain item saved by this build is readable by it
     if backend is not None:
         try:
             backend.set_password(SERVICE, name, value)
@@ -232,6 +257,7 @@ def set_secret(name: str, value: str) -> dict[str, Any]:
 def delete_secret(name: str) -> dict[str, Any]:
     """Remove ``name`` from both stores and from ``os.environ``."""
     check_name(name)
+    _UNREADABLE.discard(name)
     backend = _keyring()
     if backend is not None:
         with contextlib.suppress(Exception):  # not there (PasswordDeleteError) or refused

@@ -132,7 +132,13 @@ def agent_checks(cfg: Config) -> list[Check]:
         except ImportError:
             return [Check("agents", "agents", "warn", "agents: claude-agent-sdk not installed",
                           "pip install 'voicestream[agents]' or set agents.engine = 'api'")]
+        from ..agents.runner import find_claude_cli
+
         title = f"agents: {mode} via Agent SDK {claude_agent_sdk.__version__}"
+        if has_key and find_claude_cli() is None:
+            # what AgentRunner.engine() then does (the Mac app ships without Claude Code): say so, not "Agent SDK"
+            return [Check("agents", "agents", "ok", f"agents: {mode} via single API calls",
+                          "Claude Code isn't installed: agents draft their result with one Claude call, without web search")]
         if has_key:
             return [Check("agents", "agents", "ok", title, cfg.agents.model)]
         return [Check("agents", "agents", "warn", title,

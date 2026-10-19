@@ -45,8 +45,13 @@ shows the estimate for your settings). Agent work is extra and has its own budge
 
 For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. No terminal needed.
 
-1. Download `Voicestream-<version>-arm64.dmg`: from the project's Releases page, or from the
-   **mac app** workflow's artifacts on GitHub Actions.
+1. Download `Voicestream-<version>-arm64.dmg`:
+   - a released version: from the [Releases page](https://github.com/bybysker/always-on-voice-stream/releases),
+     under **Assets** (no GitHub account needed);
+   - the latest build, if it is newer: sign in to GitHub, open the
+     [mac app workflow](https://github.com/bybysker/always-on-voice-stream/actions/workflows/mac-app.yml?query=is%3Asuccess),
+     click the newest run (green check mark) and, under **Artifacts**, download
+     `Voicestream-…-arm64.dmg`. GitHub keeps these builds for a limited time (90 days by default).
 2. Open it and drag **Voicestream** onto **Applications**. Then open Voicestream from your
    Applications folder.
 3. macOS says it can't verify the app, because it isn't notarized by Apple. Close that message
@@ -57,6 +62,8 @@ For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. No terminal 
 4. Follow the setup: your name and languages, speech-to-text ("On this Mac" is free and private;
    it downloads a 547 MB model), your Claude key (saved in the macOS Keychain), then click the two
    permission tests so macOS asks for **Microphone** and **System Audio Recording**. Allow both.
+   If you keep **Apple Reminders** on, macOS then asks whether Voicestream may control Reminders:
+   click **OK**, or your to-dos can't reach Reminders.
 5. Voicestream now lives in the menu bar (the microphone icon). Closing the window doesn't stop
    it listening: click the icon → **Open Voicestream** to bring the window back, or **Quit
    Voicestream** to stop. **Open at login** in the same menu starts it with your Mac.
@@ -68,14 +75,20 @@ Screen & System Audio Recording**, remove Voicestream with the **−** button (o
 on again), open Voicestream and allow it when asked. The Keychain may also ask once whether the new
 version may read your saved keys: click **Always Allow**.
 
-To build the app yourself on a Mac: `packaging/mac/build.sh` (see the comments at its top).
+To build the app yourself on a Mac: `packaging/mac/build.sh` (the comments at its top list what to
+install first).
 
 ### Installer l'application (Mac)
 
 Pour un Mac Apple Silicon (M1 ou plus récent) sous macOS 14.2 ou plus. Aucun terminal nécessaire.
 
-1. Téléchargez `Voicestream-<version>-arm64.dmg` : sur la page Releases du projet, ou dans les
-   artefacts du workflow **mac app** de GitHub Actions.
+1. Téléchargez `Voicestream-<version>-arm64.dmg` :
+   - une version publiée : sur la [page Releases](https://github.com/bybysker/always-on-voice-stream/releases),
+     sous **Assets** (aucun compte GitHub nécessaire) ;
+   - la dernière construction, si elle est plus récente : connectez-vous à GitHub, ouvrez le
+     [workflow mac app](https://github.com/bybysker/always-on-voice-stream/actions/workflows/mac-app.yml?query=is%3Asuccess),
+     cliquez sur l'exécution la plus récente (coche verte) puis, sous **Artifacts**, téléchargez
+     `Voicestream-…-arm64.dmg`. GitHub ne garde ces fichiers qu'un temps (90 jours par défaut).
 2. Ouvrez-le et faites glisser **Voicestream** sur **Applications**, puis ouvrez Voicestream
    depuis votre dossier Applications.
 3. macOS indique qu'il ne peut pas vérifier l'app, car elle n'est pas notariée par Apple. Fermez ce
@@ -87,7 +100,9 @@ Pour un Mac Apple Silicon (M1 ou plus récent) sous macOS 14.2 ou plus. Aucun te
 4. Suivez l'assistant : votre nom et vos langues, la transcription (« Sur ce Mac » est gratuit et
    privé ; un modèle de 547 Mo est téléchargé), votre clé Claude (enregistrée dans le trousseau de
    macOS), puis cliquez sur les deux tests d'autorisation pour que macOS demande l'accès au
-   **Micro** et à l'**Enregistrement audio du système**. Autorisez les deux.
+   **Micro** et à l'**Enregistrement audio du système**. Autorisez les deux. Si vous gardez
+   **Rappels Apple**, macOS demande ensuite si Voicestream peut contrôler Rappels : cliquez sur
+   **OK**, sinon vos tâches ne pourront pas y arriver.
 5. Voicestream vit ensuite dans la barre des menus (l'icône de micro). Fermer la fenêtre ne coupe
    pas l'écoute : cliquez sur l'icône → **Ouvrir Voicestream** pour retrouver la fenêtre, ou
    **Quitter Voicestream** pour arrêter. **Ouvrir à la connexion**, dans le même menu, le lance

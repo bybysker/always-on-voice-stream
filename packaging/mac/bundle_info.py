@@ -138,7 +138,7 @@ def main(argv: list[str]) -> int:
     if what == "version":
         print(version)
     elif what == "plist":
-        sys.stdout.write(plistlib.dumps(info_plist(version)).decode())
+        sys.stdout.buffer.write(plistlib.dumps(info_plist(version)))  # UTF-8 bytes, whatever the console
     else:
         print("usage: bundle_info.py [version|plist]", file=sys.stderr)
         return 2

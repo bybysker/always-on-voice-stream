@@ -394,6 +394,7 @@ const S = {
   saving: false,
   lastMeetingLoaded: false,
   setupCompleted: false,
+  heldStt: null,             // {name, changes}: a speech-to-text choice saved, sent once its model has downloaded
   meetings: { q: '', rows: [], total: 0, loaded: false, error: null },
   detail: null,              // {folder, data, tab, error, summarizing, pushing, showDismissed, editing, expanded, filter}
   costHours: 4,
@@ -490,6 +491,10 @@ function handle(type, ev) {
       return toast(humanize(d.error || ''), 'error', t('toast.push_failed', { tool: sinkLabel(d.sink) }));
     case 'meeting.notes_updated':
       onNotesUpdated(d);
+      onDetailMeetingDone(d);
+      break;
+    case 'meeting.ended':
+      onDetailMeetingDone(d);
       break;
   }
   if (d.item && S.detail && S.detail.data && d.meeting_id === S.detail.data.meeting.id) detailUpsert(d.item);
@@ -544,6 +549,15 @@ const HOST_MESSAGES = [
   [/^system audio has been pure digital silence/, 'hm.system_silent'],
   [/^download of \S+ interrupted \(([^)]*)\); resuming/, 'hm.download_retry', true],
   [/^download of (\S+) failed/, 'hm.download_failed', true],
+  [/^Your microphone \((.+)\) isn't connected — using meeting audio only/, 'hm.mic_missing_only'],
+  [/^Your microphone \((.+)\) isn't connected — nothing is recorded/, 'hm.mic_missing_none'],
+  [/^Your microphone \((.+)\) isn't connected — using (.+) until it is back/, 'hm.mic_missing_default'],
+  [/^The speech-to-text model is still downloading: listening starts/, 'hm.model_wait_start'],
+  [/^The speech-to-text model is still downloading: Voicestream keeps/, 'hm.model_wait_switch'],
+  [/^Your new settings aren't used yet: (.*)$/s, 'hm.not_applied'],
+  [/^The Keychain didn't let Voicestream read (\S+):/, 'hm.keychain_denied'],
+  // sinks/reminders.py PERMISSION_HELP is written for the terminal (Terminal, tccutil…)
+  [/control Reminders \(error -1743\)/, 'hm.reminders_denied', true],
 ];
 
 function humanize(msg) {
@@ -552,7 +566,8 @@ function humanize(msg) {
     const m = text.match(re);
     if (m) {
       if (LANG === 'en' && key !== 'hm.not_listening' && !always) return text;  // already worded for people
-      return t(key, { name: m[1] || '', detail: m[1] || '' });
+      if (key === 'hm.not_applied') return t(key, { detail: humanize(m[1]) });  // the problem itself, in words too
+      return t(key, { name: m[1] || '', detail: m[2] || m[1] || '' });
     }
   }
   return text;
@@ -567,6 +582,9 @@ function fixFor(msg) {
   }
   if (/Screen & System Audio Recording/i.test(text) && mac) {
     return { label: t('fix.open_mac_settings'), run: () => openPane('screen_audio') };
+  }
+  if (/Privacy & Security → Automation/i.test(text) && mac) {
+    return { label: t('fix.open_mac_settings'), run: () => openPane('automation') };
   }
   if (/Settings → Speech-to-text|speech-to-text model|whisper-server|^download of /i.test(text)) {
     return { label: t('fix.stt_settings'), run: () => go('#/settings/stt') };
@@ -654,7 +672,7 @@ function renderTopbar() {
   if (st === 'listening') primary = btn(t('action.pause'), { cls: 'big', id: 'primary', onclick: (e) => listen('pause', e.currentTarget) }, 'pause');
   else if (st === 'paused') primary = btn(t('action.resume'), { cls: 'primary big', id: 'primary', onclick: (e) => listen('resume', e.currentTarget) }, 'play');
   else if (busy) primary = h('button', { type: 'button', class: 'btn primary big', id: 'primary', disabled: true }, spinner(), t('state.' + st));
-  else primary = btn(t('action.start'), { cls: 'primary big', id: 'primary', onclick: (e) => listen('start', e.currentTarget) }, 'play');
+  else primary = btn(t('action.start'), { cls: 'primary big', id: 'primary', onclick: (e) => listen(startAction(), e.currentTarget) }, 'play');
 
   const canStop = ['listening', 'paused', 'starting', 'stopping', 'error'].includes(st) && !(st === 'error' && !a.error);
   const stop = st === 'stopping'
@@ -688,8 +706,12 @@ async function listen(action, button) {
   if (res) setApp(res);
 }
 
+/** "Start listening" after a problem restarts: the problem can leave half of it running (the
+ *  microphone gave up, meeting audio is still recorded), and starting would then do nothing. */
+function startAction() { return stateKey() === 'error' ? 'restart' : 'start'; }
+
 async function stopListening(button) {
-  if (stateKey() === 'error') return listen('stop', button);
+  if (stateKey() === 'error' && !S.app.in_meeting) return listen('stop', button);  // "Dismiss"
   if (S.app.in_meeting) {
     const ok = await ask({ title: t('ask.stop_title'), body: t('ask.stop_body'), ok: t('action.stop'), danger: false });
     if (!ok) return;
@@ -1199,7 +1221,7 @@ function renderLiveNotices() {
     const fix = fixFor(S.app.error);
     out.push(notice('error', 'alert', h('span', {}, h('strong', {}, t('live.problem')), ' ', humanize(S.app.error)),
       fix && btn(fix.label, { cls: 'small', onclick: fix.run }),
-      btn(t('action.try_again'), { cls: 'small', onclick: (e) => listen('start', e.currentTarget) })));
+      btn(t('action.try_again'), { cls: 'small', id: 'try-again', onclick: (e) => listen(startAction(), e.currentTarget) })));
   }
   // two raw messages can say the same thing in plain words (one per model being downloaded…): shown once
   const seen = new Set([S.app.error ? humanize(S.app.error) : null]);
@@ -1328,8 +1350,11 @@ function onAssistantStarted(d) {
 }
 
 function onAssistantStopped(d) {
-  setMeters([], true);
   if (d.cost) setCost(d.cost);
+  // after a stop or restart the previous assistant may finish an ended meeting's agents for minutes:
+  // its "stopped" comes while listening again, and the meters are the new one's
+  if (['listening', 'paused', 'starting'].includes(stateKey())) return;
+  setMeters([], true);
   if (S.route.name === 'live') renderLive();
 }
 
@@ -1722,6 +1747,7 @@ function meetingChips(m) {
   const chips = [];
   if (m.live) chips.push(h('span', { class: 'pill ok' }, h('span', { class: 'dot-state', 'aria-hidden': 'true' }), t('meetings.live')));
   else if (m.in_progress) chips.push(h('span', { class: 'pill warn' }, t('meetings.in_progress')));
+  if (m.interrupted) chips.push(h('span', { class: 'pill warn', title: t('meetings.interrupted_note') }, t('meetings.interrupted')));
   if (c.action) chips.push(h('span', { class: 'pill' }, tp('count.actions', c.action)));
   if (m.my_actions) chips.push(h('span', { class: 'pill info' }, tp('count.mine', m.my_actions)));
   if (c.decision) chips.push(h('span', { class: 'pill' }, tp('count.decisions', c.decision)));
@@ -1850,6 +1876,7 @@ function drawDetail() {
 
   const notes = [];
   if (readOnly) notes.push(notice('warn', 'info', t('meetings.readonly')));
+  if (m.interrupted) notes.push(notice('info', 'info', t('meetings.interrupted_note')));
   if (liveHere) notes.push(notice('info', 'mic', t('meetings.live_here'), btn(t('meetings.go_live'), { cls: 'small', onclick: () => go('#/live') })));
 
   const tabs = h('div', { class: 'tabs', role: 'tablist', 'aria-label': t('meetings.sections') });
@@ -2026,6 +2053,24 @@ function onNotesUpdated(d) {
   if (d.error) toast(humanize(d.error), 'error', t('toast.rewrite_failed'));
   else toast(t('toast.rewritten'), 'ok');
   loadDetail();
+}
+
+/** The meeting whose page is open has ended (``meeting.ended``), or its late agents finished
+ *  (``meeting.notes_updated`` without a folder): reload it, under the folder's new name — it is
+ *  renamed after the meeting's title then, and the old name no longer exists. */
+function onDetailMeetingDone(d) {
+  const D = S.detail;
+  if (!D || !D.data || !d.meeting_id || d.meeting_id !== D.data.meeting.id || d.folder !== undefined) return;
+  const folder = basename(d.dir) || (d.notes ? basename(String(d.notes).replace(/[\\/][^\\/]*$/, '')) : '') || D.folder;
+  if (folder !== D.folder) {
+    D.folder = folder;
+    if (S.route.name === 'meetings') {
+      const tab = S.route.parts[1];
+      history.replaceState(null, '', '#/meetings/' + enc(folder) + (tab ? '/' + enc(tab) : ''));
+      S.route = parseRoute();
+    }
+  }
+  if (S.route.name === 'meetings' && !D.editing.size) loadDetail();  // never under an edit you are typing
 }
 
 function onMeetingSaved(d) {
@@ -2269,11 +2314,16 @@ function savedVal(path) {
   return dig(v, keys);
 }
 
-function val(path) { return path in S.draft ? S.draft[path] : savedVal(path); }
+function val(path) {
+  if (path in S.draft) return S.draft[path];
+  if (S.heldStt && path in S.heldStt.changes) return S.heldStt.changes[path];  // saved, applied once downloaded
+  return savedVal(path);
+}
 
 function same(a, b) { return JSON.stringify(a ?? null) === JSON.stringify(b ?? null); }
 
 function setDraft(path, value) {
+  if (S.heldStt && path in S.heldStt.changes) S.heldStt = null;  // a new choice replaces the one waiting
   if (same(value, savedVal(path))) delete S.draft[path];
   else S.draft[path] = value;
   if (S.fieldErrors[path]) { delete S.fieldErrors[path]; markField(path, null); }
@@ -2542,6 +2592,13 @@ function onDownload(d) {
       S.startAfterDownload = null;
       listen('start');
     }
+    if (S.heldStt && S.heldStt.name === d.name) {
+      if (d.state === 'done') applyHeldStt(S.heldStt);
+      else {  // failed or cancelled: the current speech-to-text stays, and so does what Settings shows
+        S.heldStt = null;
+        if (S.route.name === 'settings' && !dirty()) redrawSection();
+      }
+    }
   }
   loadModels().catch(() => {}).finally(refreshDownloadViews);
 }
@@ -2560,11 +2617,24 @@ const SECRET_LINKS = {
   HUBSPOT_TOKEN: 'https://app.hubspot.com/private-apps/',
 };
 
+// The last check of each key, {ok, pending, detail}, outside the fields: saving a key publishes
+// settings.changed, which redraws the section with new fields while the check is still running.
+const KEY_CHECKS = new Map();
+const KEY_FIELDS = new Set();  // {name, el, draw} of the key fields drawn, to show a check's result in
+
+function redrawKeyFields(name) {
+  for (const f of [...KEY_FIELDS]) {
+    if (!f.el.isConnected) { KEY_FIELDS.delete(f); continue; }
+    if (f.name === name) f.draw();
+  }
+}
+
 /** A key or token: "Saved in Keychain ✓" with Replace / Test / Remove, or a field to paste it. */
 function keyField(name, { label, help, onChange, testable = true } = {}) {
   const box = h('div', { class: 'keyfield', dataset: { path: 'secret:' + name, secret: name } });
-  let editing = false, result = null;
+  let editing = false;
   const draw = () => {
+    const result = KEY_CHECKS.get(name);
     const isSet = Boolean(S.settings && S.settings.secrets[name]);
     const store = S.app && S.app.capabilities.keychain ? t('key.saved_keychain') : t('key.saved_file');
     const head = h('div', { class: 'head' }, icon('key'), h('strong', { class: 'grow' }, label || name),
@@ -2586,17 +2656,17 @@ function keyField(name, { label, help, onChange, testable = true } = {}) {
           input.value = '';
           S.settings.secrets[name] = res.set;
           editing = false;
-          result = null;
+          KEY_CHECKS.delete(name);
           draw();
           toast(t('key.saved_toast', { name: label || name }), 'ok');
           if (onChange) onChange(res.set);
-          if (testable) test(box.querySelector('[data-act=test]'));
+          if (testable) test(true);
         });
       });
       parts.push(form);
     } else {
       parts.push(h('div', { class: 'entry' },
-        btn(t('key.replace'), { cls: 'small', onclick: () => { editing = true; result = null; draw(); box.querySelector('input')?.focus(); } }),
+        btn(t('key.replace'), { cls: 'small', onclick: () => { editing = true; KEY_CHECKS.delete(name); draw(); box.querySelector('input')?.focus(); } }),
         testable && btn(t('key.test'), { cls: 'small', dataset: { act: 'test' }, onclick: (e) => test(e.currentTarget) }),
         btn(t('key.remove'), { cls: 'small ghost danger', onclick: (e) => remove(e.currentTarget) }, 'trash')));
     }
@@ -2608,11 +2678,14 @@ function keyField(name, { label, help, onChange, testable = true } = {}) {
   };
   const test = async (button) => {
     if (!button) return;
-    result = { ok: true, pending: true, detail: '' };
-    draw();
+    const pending = { ok: true, pending: true, detail: '' };
+    KEY_CHECKS.set(name, pending);
+    redrawKeyFields(name);
     const res = await act(null, () => api('POST', '/api/secrets/' + enc(name) + '/test'));
-    result = res ? { ok: res.ok, detail: res.detail } : null;
-    draw();
+    if (KEY_CHECKS.get(name) !== pending) return;  // replaced or removed meanwhile
+    if (res) KEY_CHECKS.set(name, { ok: res.ok, detail: res.detail });
+    else KEY_CHECKS.delete(name);
+    redrawKeyFields(name);  // the field on the page now, which may not be this one any more
   };
   const remove = async (button) => {
     const ok = await ask({ title: t('key.remove_title', { name: label || name }), body: t('key.remove_body'), ok: t('key.remove'), danger: true });
@@ -2620,11 +2693,12 @@ function keyField(name, { label, help, onChange, testable = true } = {}) {
     await act(button, async () => {
       const res = await api('PUT', '/api/secrets/' + enc(name), { value: '' });
       S.settings.secrets[name] = res.set;
-      result = null;
+      KEY_CHECKS.delete(name);
       draw();
       if (onChange) onChange(res.set);
     });
   };
+  KEY_FIELDS.add({ name, el: box, draw });
   draw();
   return box;
 }
@@ -2739,18 +2813,52 @@ function discardSettings() {
   redrawSection();
 }
 
+const STT_KEYS = ['transcription.backend', 'transcription.whisper_cpp.model'];
+
+/** A speech-to-text choice whose model isn't downloaded yet, taken out of ``changes``: sent now, it
+ *  would restart listening on a model that can't run — nothing recorded until someone notices. It is
+ *  sent once the download is done (:func:`onDownload`); the current speech-to-text keeps working. */
+function holdUntilDownloaded(changes) {
+  if (!STT_KEYS.some((k) => k in changes)) return null;
+  const backend = 'transcription.backend' in changes ? changes['transcription.backend'] : savedVal('transcription.backend');
+  const name = 'transcription.whisper_cpp.model' in changes ? changes['transcription.whisper_cpp.model'] : savedVal('transcription.whisper_cpp.model');
+  const m = backend === 'whisper-cpp' && S.models && S.models.models.find((x) => x.name === name);
+  if (!m || m.installed) return null;
+  const held = { name, changes: {} };
+  for (const k of STT_KEYS) {
+    if (k in changes) { held.changes[k] = changes[k]; delete changes[k]; }
+  }
+  return held;
+}
+
+/** Start downloading a speech model you picked, unless it is there or on its way. */
+function fetchModel(name) {
+  const m = S.models && S.models.models.find((x) => x.name === name);
+  if (m && !m.installed && !S.downloads[name]) downloadModel(name, null);
+}
+
+async function applyHeldStt(held) {
+  if (S.heldStt !== held) return;
+  S.heldStt = null;
+  const label = modelLabel(S.models.models.find((x) => x.name === held.name) || { name: held.name, label: held.name });
+  const res = await act(null, () => api('PATCH', '/api/settings', { changes: held.changes }));
+  if (!res) return;
+  await Promise.all([loadSettings(), loadModels()]).catch(() => {});
+  toast(res.restart_required ? t('stt.switched_later', { name: label }) : t('stt.switched', { name: label }), 'ok');
+  if (S.route.name === 'settings' && !dirty()) redrawSection();
+}
+
 async function saveSettings() {
   const changes = { ...S.draft };
   const prefs = { ...S.prefsDraft };
+  const held = holdUntilDownloaded(changes);
   S.saving = true;
   S.saveError = null;
   renderSaveBar();
   let res = null;
   try {
-    if (Object.keys(changes).length) {
-      res = await api('PATCH', '/api/settings', { changes });
-      S.draft = {};
-    }
+    if (Object.keys(changes).length) res = await api('PATCH', '/api/settings', { changes });
+    S.draft = {};
     if (Object.keys(prefs).length) {
       setApp({ ...S.app, prefs: await api('PATCH', '/api/prefs', prefs) });
       S.prefsDraft = {};
@@ -2765,10 +2873,24 @@ async function saveSettings() {
     return;
   }
   S.saving = false;
-  const msg = res && res.restart_required ? t('set.saved_later') : res && res.restarting ? t('set.saved_restarting') : t('set.saved');
+  let msg = res && res.restart_required ? t('set.saved_later') : res && res.restarting ? t('set.saved_restarting') : t('set.saved');
+  if (held) {
+    S.heldStt = held;
+    const m = S.models.models.find((x) => x.name === held.name);
+    if (m.installed) {
+      applyHeldStt(held);  // it finished downloading while this was being saved
+    } else {
+      fetchModel(held.name);
+      msg = t('set.saved_after_download', { name: modelLabel(m) });
+    }
+  }
   toast(msg, 'ok', t('set.saved_title'));
   if (S.route.name === 'settings') redrawSection();
   if (S.route.name === 'live') renderLive();
+  // Reminders just turned on: check it now, so macOS asks for the permission while you are here
+  if (changes['sinks.reminders.enabled'] === true && S.route.name === 'settings' && $('test-reminders')) {
+    testTool('reminders', $('test-btn-reminders'), $('test-reminders'));
+  }
 }
 
 /** A refused save: open the section with the field, show the message under it, focus it. */
@@ -2854,9 +2976,12 @@ function sttSection() {
   if (!options.some((o) => o.value === backend)) options.push({ value: backend, title: t('stt.other', { name: backend }), desc: t('stt.other_desc') });
   let detail;
   if (backend === 'whisper-cpp') {
+    const held = S.heldStt && S.models && S.models.models.find((m) => m.name === S.heldStt.name);
     detail = h('div', { class: 'sub-card' },
       h('h3', {}, t('stt.models')), h('p', { class: 'help small muted' }, t('stt.models_help')),
-      modelList({ pick: (name) => { setDraft('transcription.whisper_cpp.model', name); redrawSection(); } }),
+      held && h('p', { class: 'help small', id: 'stt-held', role: 'status' }, icon('download'), ' ', t('stt.switch_after', { name: modelLabel(held) })),
+      // picking one that isn't here downloads it; it is used once it is there (see holdUntilDownloaded)
+      modelList({ pick: (name) => { setDraft('transcription.whisper_cpp.model', name); fetchModel(name); redrawSection(); } }),
       S.models && S.models.models_dir && h('p', { class: 'small faint' }, t('stt.models_dir', { dir: S.models.models_dir })));
   } else if (backend === 'openai' || backend === 'openai-realtime') {
     detail = h('div', { class: 'sub-card' }, keyField('OPENAI_API_KEY', { label: t('key.openai'), help: t('key.openai_help') }),
@@ -2902,6 +3027,7 @@ function audioSection() {
     card(t('audio.title'), t('audio.lead'),
       field('capture.mic.device', t('audio.mic'), dev ? selectInput('capture.mic.device', micOptions) : h('span', { class: 'muted' }, t('common.loading')),
         { help: dev && dev.error ? t('audio.no_devices', { detail: dev.error }) : t('audio.mic_help') }),
+      val('capture.mic.device') != null && settingSwitch('capture.mic.use_default_when_missing', t('audio.mic_fallback'), t('audio.mic_fallback_help')),
       switchRow('f-capture_sources', t('audio.system'), t('audio.system_help'), sources.includes('system'), (on) => {
         const base = sources.filter((s) => s !== 'system');
         setDraft('capture.sources', on ? [...base, 'system'] : base);
@@ -3028,6 +3154,23 @@ function googleSteps() {
       h('li', {}, t('tools.google.step6'))));
 }
 
+/** A tool's own check as saved, ``{status, detail}`` (``null``: it is off). GET /api/doctor runs
+ *  every enabled tool's; for Apple Reminders that is when macOS asks whether Voicestream may
+ *  control Reminders — better now, while you are here, than at a meeting's unattended wrap-up,
+ *  where the to-dos would wait on the question until they time out. */
+async function checkTool(name) {
+  const res = await api('GET', '/api/doctor');
+  return res.checks.find((c) => c.id === 'sink:' + name) || null;
+}
+
+/** A check's result as a line: ✓ Works… or ✗ the problem, with its fix when there is one. */
+function toolCheckLine(check) {
+  const ok = check.status === 'ok';
+  const fix = !ok && fixFor(check.detail);
+  return [icon(ok ? 'checkCircle' : 'xCircle'), ' ', ok ? t('tools.test_ok', { detail: check.detail }) : humanize(check.detail),
+    fix ? h('span', {}, ' ', btn(fix.label, { cls: 'small', onclick: fix.run })) : null];
+}
+
 async function testTool(name, button, out) {
   if (dirty()) {
     out.className = 'small error-text';
@@ -3035,16 +3178,15 @@ async function testTool(name, button, out) {
     return;
   }
   out.className = 'small muted';
-  fill(out, spinner(), ' ', t('tools.testing'));
-  const res = await act(button, () => api('GET', '/api/doctor'));
-  if (!res) { out.textContent = ''; return; }
-  const check = res.checks.find((c) => c.id === 'sink:' + name);
+  fill(out, spinner(), ' ', name === 'reminders' ? t('tools.reminders.asking') : t('tools.testing'));
+  const check = await act(button, () => checkTool(name));
+  if (check === undefined) { out.textContent = ''; return; }
   if (!check) {
     out.className = 'small muted';
     out.textContent = t('tools.test_off');
   } else {
     out.className = 'small ' + (check.status === 'ok' ? 'ok-text' : 'error-text');
-    fill(out, icon(check.status === 'ok' ? 'checkCircle' : 'xCircle'), ' ', check.status === 'ok' ? t('tools.test_ok', { detail: check.detail }) : check.detail);
+    fill(out, ...toolCheckLine(check));
   }
 }
 
@@ -3119,10 +3261,25 @@ function openSetup(forced = false) {
   document.body.classList.add('in-setup');
   document.title = t('setup.title') + ' · Voicestream';
   renderSetup();
+  // enterStep: reopened on the speech-to-text step (a reload), the model download starts there too
   Promise.all([S.settings ? null : loadSettings(), S.models ? null : loadModels()])
-    .then(() => { if (S.setup) { initChoices(); renderSetup(); } })
+    .then(() => { if (S.setup) { initChoices(); renderSetup(); enterStep(); } })
     .catch((err) => { if (S.setup) { S.setup.error = humanize(err.message); renderSetup(); } });
-  if (S.settings && S.models) { initChoices(); renderSetup(); }
+  if (S.settings && S.models) { initChoices(); renderSetup(); enterStep(); }
+}
+
+const CLOUD_STT_KEYS = { openai: 'OPENAI_API_KEY', deepgram: 'DEEPGRAM_API_KEY' };
+
+/** The speech-to-text the wizard starts on: on this Mac (free, private), unless this computer can't
+ *  run it, or you really set up a cloud service before — its key is saved too. A new install's
+ *  settings say OpenAI without anyone choosing it (the built-in default, and the file the first
+ *  save writes from the template). */
+function initialStt(backend) {
+  const caps = S.app.capabilities || {};
+  const key = CLOUD_STT_KEYS[backend];
+  if (key && S.settings.config_exists && S.settings.secrets[key]) return backend;
+  if (caps.local_stt === false) return key ? backend : 'openai';
+  return 'whisper-cpp';
 }
 
 function initChoices() {
@@ -3135,7 +3292,7 @@ function initChoices() {
   W.choice = {
     name: v.user_name && v.user_name !== 'Me' ? v.user_name : '',
     lang: lang === 'any' ? 'fr+en' : lang,
-    stt: ['openai', 'deepgram'].includes(backend) ? backend : 'whisper-cpp',
+    stt: initialStt(backend),
     reminders: S.settings.sinks.reminders ? (S.settings.sinks.reminders.enabled || mac) : mac,
     list: (v.sinks.reminders || {}).list_name || t('setup.tools.list_default'),  // the raw setting: the sink's default is English
     startAtLogin: S.app.prefs.start_at_login,
@@ -3224,7 +3381,10 @@ function renderSetupFoot() {
   const nextLabel = ready ? def.nextLabel() : t('setup.next');
   const next = h('button', { type: 'button', class: 'btn primary big', id: 'setup-next', disabled: !ready || W.busy, onclick: () => runStep(def.next) },
     W.busy ? spinner() : null, nextLabel);
-  if (W.errorBox) fill(W.errorBox, W.error && ready ? h('p', { class: 'field-error setup-error', role: 'alert', id: 'setup-error' }, W.error) : null);
+  if (W.errorBox) {
+    fill(W.errorBox, W.error && ready ? h('p', { class: 'field-error setup-error', role: 'alert', id: 'setup-error' }, W.error) : null,
+      W.error && ready && W.fileProblem ? btn(t('fix.show_config'), { cls: 'small', id: 'setup-show-config', onclick: () => reveal('config') }, 'folder') : null);
+  }
   const extra = ready && def.secondary ? btn(def.secondary.label(), { id: 'setup-secondary', disabled: W.busy, onclick: () => runStep(def.secondary.run) }) : null;
   fill(W.foot, back || h('span'), dl, skip, extra, next);
 }
@@ -3236,11 +3396,23 @@ async function runStep(fn) {
   W.busy = true;
   W.error = null;
   renderSetupFoot();
+  W.fileProblem = false;
+  W.sent = [];
   let ok = false;
   try {
     ok = await fn(W);
   } catch (err) {
-    W.error = err.status === 400 && err.body ? friendlyError(err.body.field || '', err.body.error) : humanize(err.message);
+    if (err.status === 400 && err.body) {
+      const field = err.body.field || '';
+      const own = W.sent.some((k) => field && (field === k || field.startsWith(k + '.') || k.startsWith(field + '.')));
+      // refused for something this step didn't send (a tool turned on by hand in the settings file…):
+      // say what and where, not as if the name you typed were wrong
+      W.fileProblem = !own;
+      W.error = own ? friendlyError(field, err.body.error)
+        : t('setup.file_problem', { what: fieldLabel(field), detail: friendlyError(field, err.body.error) });
+    } else {
+      W.error = humanize(err.message);
+    }
   }
   if (S.setup !== W) return;  // finished
   W.busy = false;
@@ -3249,8 +3421,16 @@ async function runStep(fn) {
 }
 
 async function saveSetting(changes) {
+  if (S.setup) S.setup.sent = Object.keys(changes);
   await api('PATCH', '/api/settings', { changes });
   await loadSettings();
+}
+
+/** A setting's place in words: the tool's name for ``sinks.<tool>…``. */
+function fieldLabel(field) {
+  const tool = (/^sinks\.([\w-]+)/.exec(field) || [])[1];
+  if (tool) return has('tool.' + tool + '.name') ? t('tool.' + tool + '.name') : tool;
+  return field || t('setup.file_problem_file');
 }
 
 function setupHead(title, lead) {
@@ -3363,12 +3543,19 @@ const SETUP_STEPS = {
       const mac = S.app.platform === 'darwin';
       const list = h('input', { type: 'text', id: 'setup-list', value: W.choice.list, autocomplete: 'off' });
       list.addEventListener('input', () => { W.choice.list = list.value; });
+      const rc = W.remindersCheck;
+      const checkLine = W.choice.reminders && (W.busy && W.checkingReminders
+        ? h('p', { class: 'small muted', role: 'status', id: 'setup-reminders-check' }, spinner(), ' ', t('tools.reminders.asking'))
+        : rc && h('p', { class: 'small ' + (rc.status === 'ok' ? 'ok-text' : 'error-text'), role: 'status', id: 'setup-reminders-check' },
+          ...toolCheckLine(rc), rc.status === 'ok' ? null : h('span', {}, ' ', btn(t('setup.tools.check_again'), {
+            cls: 'small', id: 'setup-reminders-again', onclick: () => { W.remindersCheck = null; runStep(SETUP_STEPS.tools.next); } }))));
       return [
         ...setupHead(t('setup.tools.title'), t('setup.tools.lead')),
         h('div', { class: 'sub-card' },
           switchRow('setup-reminders', t('tool.reminders.name'), mac ? t('setup.tools.reminders_help') : t('setup.tools.reminders_not_mac'), W.choice.reminders,
-            (on) => { W.choice.reminders = on; renderSetup(); }),
-          W.choice.reminders && h('div', { class: 'field' }, h('label', { for: 'setup-list' }, t('tools.reminders.list')), h('div', { class: 'control' }, list))),
+            (on) => { W.choice.reminders = on; W.remindersCheck = null; renderSetup(); }),
+          W.choice.reminders && h('div', { class: 'field' }, h('label', { for: 'setup-list' }, t('tools.reminders.list')), h('div', { class: 'control' }, list)),
+          checkLine),
         h('div', { class: 'sub-card' }, h('div', { class: 'promise' }, h('span', { class: 'bubble' }, icon('folder')),
           h('div', {}, h('strong', {}, t('tool.markdown.name')), h('span', {}, t('setup.tools.files'))))),
         h('p', { class: 'help muted' }, t('setup.tools.later')),
@@ -3379,7 +3566,19 @@ const SETUP_STEPS = {
       const changes = { 'sinks.reminders.enabled': W.choice.reminders };
       if (W.choice.reminders) changes['sinks.reminders.list_name'] = W.choice.list.trim();
       await saveSetting(changes);
-      return true;
+      if (!W.choice.reminders) return true;
+      // a problem already shown: carry on (it can be fixed later, Settings → Your tools → Test)
+      if (W.remindersCheck && W.remindersCheck.status !== 'ok') return true;
+      // check Reminders now: macOS asks whether Voicestream may control it while you are here,
+      // not at the first meeting's wrap-up, when nobody may be there to answer
+      W.checkingReminders = true;
+      renderSetup();
+      try {
+        W.remindersCheck = await checkTool('reminders') || { status: 'fail', detail: t('tools.test_off') };
+      } finally {
+        W.checkingReminders = false;
+      }
+      return W.remindersCheck.status === 'ok';
     },
   },
 
@@ -3401,7 +3600,8 @@ const SETUP_STEPS = {
           local ? row(m && m.installed, m && m.installed ? t('setup.done.stt_local') : downloading ? t('setup.done.stt_downloading') : t('setup.done.stt_missing'))
             : row(true, t('setup.done.stt_cloud', { name: v.transcription.backend === 'deepgram' ? 'Deepgram' : 'OpenAI' })),
           row(true, claude ? t('setup.done.claude') : t('setup.done.offline')),
-          rem ? row(true, t('setup.done.reminders', { list: savedVal('sinks.reminders.list_name') || '' })) : null,
+          rem ? row(!W.remindersCheck || W.remindersCheck.status === 'ok',
+            t('setup.done.reminders', { list: savedVal('sinks.reminders.list_name') || '' })) : null,
           row(true, t('setup.done.files'))),
         h('div', { class: 'sub-card' },
           caps.login_item ? switchRow('setup-login', t('set.start_at_login'), t('set.login_help'), W.choice.startAtLogin, (on) => { W.choice.startAtLogin = on; }) : null,
@@ -3509,6 +3709,14 @@ const STRINGS = {
     'hm.system_silent': "Meeting audio has been silent for a while: allow Voicestream under Privacy & Security → Screen & System Audio Recording, then restart it.",
     'hm.download_retry': 'The speech model download was interrupted ({detail}): trying again…',
     'hm.download_failed': "The speech model couldn't be downloaded: check your internet connection, then press Download again in Settings → Speech-to-text.",
+    'hm.mic_missing_default': "Your microphone ({name}) isn't connected — using {detail} until it is back",
+    'hm.mic_missing_only': "Your microphone ({name}) isn't connected — using meeting audio only until it is back",
+    'hm.mic_missing_none': "Your microphone ({name}) isn't connected — nothing is recorded until it is back",
+    'hm.model_wait_start': "The speech-to-text model is still downloading: listening starts by itself once it's ready (Settings → Speech-to-text shows the progress)",
+    'hm.model_wait_switch': "The speech-to-text model is still downloading: Voicestream keeps the current one until then and switches to it once it's ready (Settings → Speech-to-text shows the progress)",
+    'hm.not_applied': "Your new settings aren't used yet: {detail}",
+    'hm.keychain_denied': "The Keychain didn't let Voicestream read {name}: Voicestream works without it and won't ask again until it is reopened. To use it, paste it again in Settings, or choose “Always Allow” when macOS asks",
+    'hm.reminders_denied': 'Voicestream isn’t allowed to add reminders: System Settings → Privacy & Security → Automation → Voicestream → turn on Reminders, then test again.',
 
     'fix.open_mac_settings': 'Open System Settings', 'fix.stt_settings': 'Speech-to-text settings',
     'fix.tools_settings': 'Set up your tools', 'fix.claude_settings': 'Claude settings', 'fix.show_config': 'Show the settings file',
@@ -3585,6 +3793,8 @@ const STRINGS = {
     'meetings.finder': 'Show in Finder', 'meetings.folder': 'Show the folder',
     'meetings.readonly': 'This meeting is still being recorded by another copy of Voicestream. You can read it here, but not change it.',
     'meetings.live_here': 'This meeting is in progress.', 'meetings.go_live': 'Follow it live',
+    'meetings.interrupted': 'Interrupted',
+    'meetings.interrupted_note': 'Voicestream was closed while it recorded this meeting (a crash, a forced quit or a power cut): it ends at the last words heard and has basic notes. Nothing was sent yet: rewrite the notes and send its to-dos when you are ready.',
     'meetings.sections': 'Meeting sections', 'meetings.tab.notes': 'Notes', 'meetings.tab.actions': 'To-dos & decisions',
     'meetings.tab.transcript': 'Transcript', 'meetings.tab.email': 'Follow-up email',
     'meetings.no_notes': 'No notes yet', 'meetings.no_notes_text': 'Press “Rewrite notes” to write them now.',
@@ -3632,6 +3842,7 @@ const STRINGS = {
     'set.saved_title': 'Saved', 'set.saved': 'Your settings are saved.',
     'set.saved_later': 'Saved. They apply when the meeting in progress ends.',
     'set.saved_restarting': 'Saved. Listening restarts with the new settings.',
+    'set.saved_after_download': 'Saved. “{name}” is downloading: Voicestream keeps using the current speech-to-text until it is ready, then switches to it.',
     'set.fix_below': 'Nothing was saved: fix the field shown below.',
     'set.you': 'You', 'set.you_lead': 'So Voicestream knows which to-dos are yours.',
     'set.name': 'Your name', 'set.name_ph': 'e.g. Camille Martin',
@@ -3664,6 +3875,8 @@ const STRINGS = {
     'stt.download_size': 'Download ({size})', 'stt.download_named': 'Download {name}', 'stt.recommended': 'Recommended',
     'stt.size_ram': '{size} · uses about {ram} GB of memory', 'stt.downloading': 'Download progress',
     'stt.progress': '{pct}% · {done} of {total}', 'stt.download_done': '“{name}” is ready.', 'stt.download_failed': "Couldn't download “{name}”",
+    'stt.switch_after': '“{name}” is used as soon as it has downloaded. Until then, Voicestream keeps the current speech-to-text.',
+    'stt.switched': 'Speech-to-text now uses “{name}”.', 'stt.switched_later': '“{name}” is ready: it is used once the meeting in progress ends.',
 
     'model.large-v3-turbo-q5_0.label': 'Best for most Macs',
     'model.large-v3-turbo-q5_0.note': 'Near-best accuracy in French and English. Fine on an 8 GB Mac.',
@@ -3705,6 +3918,8 @@ const STRINGS = {
     'audio.title': 'Audio', 'audio.lead': 'What Voicestream listens to.', 'audio.mic': 'Microphone',
     'audio.default_mic': 'The Mac’s default microphone', 'audio.default_suffix': '(default)',
     'audio.mic_help': 'Usually the default is right; pick your headset if you use one.',
+    'audio.mic_fallback': 'Use the Mac’s default microphone while this one isn’t connected',
+    'audio.mic_fallback_help': 'Off: only the meeting audio is recorded until it is back. Either way Voicestream switches back to it by itself.',
     'audio.no_devices': 'No microphone found ({detail}).',
     'audio.system': 'Also listen to the meeting audio', 'audio.system_help': 'What the others say in Zoom, Teams, Meet… Without it, only your voice is noted.',
     'audio.system_ok': 'Meeting audio: {detail}', 'audio.system_missing': 'Meeting audio is not available: {detail}',
@@ -3715,6 +3930,7 @@ const STRINGS = {
     'tools.test': 'Test', 'tools.testing': 'Testing…', 'tools.mac_only': 'Mac only',
     'tools.save_first': 'Save your changes first, then test.', 'tools.test_off': 'Turn it on and save first.',
     'tools.test_ok': 'Works: {detail}',
+    'tools.reminders.asking': 'Checking Reminders… If macOS asks whether Voicestream may control Reminders, click OK.',
     'tools.only_mine': 'Only my own to-dos', 'tools.only_mine_help': 'Off: everyone’s to-dos.',
     'tools.reminders.list': 'Reminders list', 'tools.reminders.list_help': 'Created if it doesn’t exist.',
     'tools.reminders.time': 'Reminder time', 'tools.reminders.time_help': 'For to-dos with a date, e.g. 09:00. Empty: no time.',
@@ -3789,6 +4005,8 @@ const STRINGS = {
     'setup.stt.local_desc': 'Free, and the audio never leaves your Mac. One download of {size}, starting now.',
     'setup.stt.background': 'The download continues in the background while you finish the setup.',
     'setup.stt.need_key': 'Save your key first, or choose “On this Mac”.',
+    'setup.file_problem': 'Your settings file has a problem with {what}, set up outside this window: {detail}',
+    'setup.file_problem_file': 'a setting',
     'setup.claude.title': 'Connect Claude', 'setup.claude.lead': 'Claude writes the notes and finds the to-dos. Paste your Claude key from the Anthropic Console.',
     'setup.claude.cost': 'A typical day of meetings costs about $0.10 to $0.50, within a daily budget you control.',
     'setup.claude.privacy': 'Claude receives the transcript text only, never the audio.',
@@ -3803,6 +4021,7 @@ const STRINGS = {
     'setup.tools.reminders_not_mac': 'Works on a Mac only.',
     'setup.tools.files': 'Always on: a to-do list and the notes are saved in your Voicestream folder.',
     'setup.tools.later': 'Google, HubSpot, Shortcuts (Promethee) and more: set them up later in Settings → Your tools.',
+    'setup.tools.check_again': 'Check again',
     'setup.done.title': 'You’re all set, {name}', 'setup.done.lead': 'Here is how Voicestream is set up.',
     'setup.done.lang': 'Meetings in: {lang}', 'setup.done.stt_local': 'Speech-to-text on this Mac — free & private',
     'setup.done.stt_downloading': 'Speech-to-text on this Mac — the model is still downloading',
@@ -3878,6 +4097,14 @@ const STRINGS = {
     'hm.system_silent': 'Le son de la réunion est muet depuis un moment : autorisez Voicestream dans Confidentialité et sécurité → Enregistrement de l’écran et de l’audio système, puis redémarrez-le.',
     'hm.download_retry': 'Le téléchargement du modèle de transcription a été interrompu ({detail}) : nouvel essai…',
     'hm.download_failed': 'Le modèle de transcription n’a pas pu être téléchargé : vérifiez votre connexion, puis appuyez à nouveau sur Télécharger dans Réglages → Transcription.',
+    'hm.mic_missing_default': 'Votre micro ({name}) n’est pas branché : Voicestream utilise {detail} en attendant qu’il revienne',
+    'hm.mic_missing_only': 'Votre micro ({name}) n’est pas branché : seul le son de la réunion est enregistré en attendant qu’il revienne',
+    'hm.mic_missing_none': 'Votre micro ({name}) n’est pas branché : rien n’est enregistré en attendant qu’il revienne',
+    'hm.model_wait_start': 'Le modèle de transcription se télécharge encore : l’écoute démarrera d’elle-même dès qu’il sera prêt (Réglages → Transcription montre la progression)',
+    'hm.model_wait_switch': 'Le modèle de transcription se télécharge encore : Voicestream garde l’actuel et passera au nouveau dès qu’il sera prêt (Réglages → Transcription montre la progression)',
+    'hm.not_applied': 'Vos nouveaux réglages ne sont pas encore utilisés : {detail}',
+    'hm.keychain_denied': 'Le trousseau n’a pas laissé Voicestream lire {name} : Voicestream fonctionne sans et ne redemandera pas avant d’être rouvert. Pour l’utiliser, collez-la à nouveau dans les Réglages, ou choisissez « Toujours autoriser » quand macOS le demande',
+    'hm.reminders_denied': 'Voicestream n’a pas le droit d’ajouter des rappels : Réglages Système → Confidentialité et sécurité → Automatisation → Voicestream → activez Rappels, puis testez à nouveau.',
 
     'fix.open_mac_settings': 'Ouvrir les Réglages Système', 'fix.stt_settings': 'Réglages de transcription',
     'fix.tools_settings': 'Configurer vos outils', 'fix.claude_settings': 'Réglages de Claude', 'fix.show_config': 'Afficher le fichier de réglages',
@@ -3954,6 +4181,8 @@ const STRINGS = {
     'meetings.finder': 'Afficher dans le Finder', 'meetings.folder': 'Afficher le dossier',
     'meetings.readonly': 'Cette réunion est encore enregistrée par un autre Voicestream. Vous pouvez la lire ici, mais pas la modifier.',
     'meetings.live_here': 'Cette réunion est en cours.', 'meetings.go_live': 'La suivre en direct',
+    'meetings.interrupted': 'Interrompue',
+    'meetings.interrupted_note': 'Voicestream a été fermé pendant l’enregistrement de cette réunion (plantage, arrêt forcé ou coupure de courant) : elle s’arrête aux derniers mots entendus et ses notes sont sommaires. Rien n’a encore été envoyé : réécrivez les notes et envoyez ses tâches quand vous voulez.',
     'meetings.sections': 'Sections de la réunion', 'meetings.tab.notes': 'Notes', 'meetings.tab.actions': 'Tâches et décisions',
     'meetings.tab.transcript': 'Transcription', 'meetings.tab.email': 'E-mail de suivi',
     'meetings.no_notes': 'Pas encore de notes', 'meetings.no_notes_text': 'Appuyez sur « Réécrire les notes » pour les rédiger maintenant.',
@@ -4001,6 +4230,7 @@ const STRINGS = {
     'set.saved_title': 'Enregistré', 'set.saved': 'Vos réglages sont enregistrés.',
     'set.saved_later': 'Enregistré. Ils s’appliqueront à la fin de la réunion en cours.',
     'set.saved_restarting': 'Enregistré. L’écoute redémarre avec les nouveaux réglages.',
+    'set.saved_after_download': 'Enregistré. « {name} » se télécharge : Voicestream garde la transcription actuelle jusqu’à ce qu’il soit prêt, puis passe dessus.',
     'set.fix_below': 'Rien n’a été enregistré : corrigez le champ indiqué ci-dessous.',
     'set.you': 'Vous', 'set.you_lead': 'Pour que Voicestream sache quelles tâches sont les vôtres.',
     'set.name': 'Votre nom', 'set.name_ph': 'ex. Camille Martin',
@@ -4033,6 +4263,8 @@ const STRINGS = {
     'stt.download_size': 'Télécharger ({size})', 'stt.download_named': 'Télécharger {name}', 'stt.recommended': 'Recommandé',
     'stt.size_ram': '{size} · utilise environ {ram} Go de mémoire', 'stt.downloading': 'Progression du téléchargement',
     'stt.progress': '{pct} % · {done} sur {total}', 'stt.download_done': '« {name} » est prêt.', 'stt.download_failed': 'Échec du téléchargement de « {name} »',
+    'stt.switch_after': '« {name} » sera utilisé dès qu’il sera téléchargé. D’ici là, Voicestream garde la transcription actuelle.',
+    'stt.switched': 'La transcription utilise maintenant « {name} ».', 'stt.switched_later': '« {name} » est prêt : il sera utilisé à la fin de la réunion en cours.',
 
     'model.large-v3-turbo-q5_0.label': 'Idéal pour la plupart des Mac',
     'model.large-v3-turbo-q5_0.note': 'Presque la meilleure précision en français et en anglais. Convient à un Mac de 8 Go.',
@@ -4074,6 +4306,8 @@ const STRINGS = {
     'audio.title': 'Audio', 'audio.lead': 'Ce que Voicestream écoute.', 'audio.mic': 'Micro',
     'audio.default_mic': 'Le micro par défaut du Mac', 'audio.default_suffix': '(par défaut)',
     'audio.mic_help': 'En général, celui par défaut convient ; choisissez votre casque si vous en utilisez un.',
+    'audio.mic_fallback': 'Utiliser le micro par défaut du Mac tant que celui-ci n’est pas branché',
+    'audio.mic_fallback_help': 'Désactivé : seul le son de la réunion est enregistré en attendant. Dans les deux cas, Voicestream revient dessus de lui-même.',
     'audio.no_devices': 'Aucun micro trouvé ({detail}).',
     'audio.system': 'Écouter aussi le son de la réunion', 'audio.system_help': 'Ce que disent les autres dans Zoom, Teams, Meet… Sans cela, seule votre voix est notée.',
     'audio.system_ok': 'Son de la réunion : {detail}', 'audio.system_missing': 'Le son de la réunion n’est pas disponible : {detail}',
@@ -4084,6 +4318,7 @@ const STRINGS = {
     'tools.test': 'Tester', 'tools.testing': 'Test en cours…', 'tools.mac_only': 'Mac uniquement',
     'tools.save_first': 'Enregistrez d’abord vos modifications, puis testez.', 'tools.test_off': 'Activez-le et enregistrez d’abord.',
     'tools.test_ok': 'Fonctionne : {detail}',
+    'tools.reminders.asking': 'Vérification de Rappels… Si macOS demande si Voicestream peut contrôler Rappels, cliquez sur OK.',
     'tools.only_mine': 'Seulement mes tâches', 'tools.only_mine_help': 'Désactivé : les tâches de tout le monde.',
     'tools.reminders.list': 'Liste de Rappels', 'tools.reminders.list_help': 'Créée si elle n’existe pas.',
     'tools.reminders.time': 'Heure du rappel', 'tools.reminders.time_help': 'Pour les tâches datées, ex. 09:00. Vide : sans heure.',
@@ -4155,6 +4390,8 @@ const STRINGS = {
     'setup.stt.local_desc': 'Gratuit, et l’audio ne quitte jamais votre Mac. Un téléchargement de {size}, qui commence maintenant.',
     'setup.stt.background': 'Le téléchargement continue en arrière-plan pendant que vous terminez la configuration.',
     'setup.stt.need_key': 'Enregistrez d’abord votre clé, ou choisissez « Sur ce Mac ».',
+    'setup.file_problem': 'Votre fichier de réglages a un problème avec {what}, réglé en dehors de cette fenêtre : {detail}',
+    'setup.file_problem_file': 'un réglage',
     'setup.claude.title': 'Connecter Claude', 'setup.claude.lead': 'Claude rédige les notes et repère les tâches. Collez votre clé Claude depuis la console Anthropic.',
     'setup.claude.cost': 'Une journée type de réunions coûte environ 0,10 à 0,50 $, dans un budget quotidien que vous fixez.',
     'setup.claude.privacy': 'Claude reçoit uniquement le texte de la transcription, jamais l’audio.',
@@ -4169,6 +4406,7 @@ const STRINGS = {
     'setup.tools.reminders_not_mac': 'Fonctionne uniquement sur Mac.',
     'setup.tools.files': 'Toujours actif : une liste de tâches et les notes sont enregistrées dans votre dossier Voicestream.',
     'setup.tools.later': 'Google, HubSpot, Raccourcis (Promethee) et d’autres : à configurer plus tard dans Réglages → Vos outils.',
+    'setup.tools.check_again': 'Vérifier à nouveau',
     'setup.done.title': 'Tout est prêt, {name}', 'setup.done.lead': 'Voici comment Voicestream est configuré.',
     'setup.done.lang': 'Réunions en : {lang}', 'setup.done.stt_local': 'Transcription sur ce Mac — gratuite et privée',
     'setup.done.stt_downloading': 'Transcription sur ce Mac — le modèle est encore en téléchargement',

@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import logging
 import math
+import sys
 import time
 from collections.abc import AsyncIterator, Callable
 from datetime import date, datetime, timedelta
@@ -33,7 +34,7 @@ from .audio import AudioSource, CaptureSetupError, Clock, build_source
 from .audio.base import aclose_quietly
 from .brain.extractor import Extractor
 from .brain.llm import LLM, ClaudeLLM, LLMUnavailable
-from .brain.summarizer import known_language, rerender, summarize
+from .brain.summarizer import is_short_clip, known_language, rerender, summarize
 from .brain.tracker import ItemTracker
 from .config import Config
 from .costs import CostMeter
@@ -58,6 +59,23 @@ FORCE_GRACE_S = 3.0
 flight) still gets before it is cancelled. Steps not started yet are skipped."""
 
 
+_SLEEP_CLOCK: int | None = (
+    getattr(time, "CLOCK_MONOTONIC", None) if sys.platform == "darwin"  # unlike mach_absolute_time, runs on in sleep
+    else getattr(time, "CLOCK_BOOTTIME", None) if sys.platform.startswith("linux")
+    else None
+)  # fmt: skip
+
+
+def sleep_inclusive_now() -> float:
+    """Seconds on a clock that keeps running while the computer sleeps.
+
+    ``time.monotonic()`` stops while a Mac sleeps (CPython reads ``mach_absolute_time``; Linux's
+    CLOCK_MONOTONIC skips suspend too), and with it the meeting :class:`~voicestream.audio.Clock` and
+    asyncio's timers. Measured on it, "10 minutes of silence" could take all night with the lid closed,
+    and the evening's meeting would absorb the next morning's. Elsewhere: the wall clock."""
+    return time.clock_gettime(_SLEEP_CLOCK) if _SLEEP_CLOCK is not None else time.time()
+
+
 def _moved(path: str, old: Path, new: Path) -> str:
     p = Path(path)
     return str(new / p.relative_to(old)) if p.is_relative_to(old) else path
@@ -69,10 +87,14 @@ class MeetingSession:
     wrapup_wait_s = 10.0
     """How long :meth:`finish` waits for the extraction and push loops before the final pass."""
 
-    def __init__(self, app: Assistant, t0: float, title: str | None = None, started_at: datetime | None = None) -> None:
+    def __init__(self, app: Assistant, t0: float, title: str | None = None, started_at: datetime | None = None,
+                 auto: bool = False) -> None:
         self.app = app
         cfg = app.cfg
         self.t0 = t0
+        self.auto = auto
+        """Opened by always-on listening on the first speech heard, not by you: a few stray lines are a
+        short clip rather than a meeting (see :func:`~voicestream.brain.summarizer.is_short_clip`)."""
         self.meeting = Meeting(title=title, language=known_language(cfg))
         filed_at = self.meeting.started_at
         if started_at is not None:
@@ -86,9 +108,7 @@ class MeetingSession:
             day = started_at.astimezone(ZoneInfo(cfg.timezone) if cfg.timezone else None).date()
         self.day = day
         self.tracker = ItemTracker(self.meeting, app.bus, cfg.user_name, today=day)
-        self.extractor = Extractor(
-            cfg, self.meeting, self.tracker, app.llm, app.costs, app.bus, today=(lambda: day) if day else date.today
-        )
+        self.extractor = Extractor(cfg, self.meeting, self.tracker, app.llm, app.costs, app.bus, today=self.speech_day)
         self.dispatcher = Dispatcher(cfg, self.meeting, app.sinks, app.bus, on_change=self.save_soon)
         self.agents = AgentRunner(
             cfg,
@@ -101,7 +121,9 @@ class MeetingSession:
             on_change=self.save_soon,
             commands_trusted=lambda: not app.echo_unprotected,
         )
-        self.last_speech = t0
+        self.last_speech_wall = app.wall()
+        """When speech was last heard, on :attr:`Assistant.wall` (time asleep counts as silence)."""
+        self.last_heard_at = utcnow()
         self.finished = False
         self._tasks: list[asyncio.Task[Any]] = []
         self._save_handle: asyncio.TimerHandle | None = None
@@ -130,6 +152,19 @@ class MeetingSession:
             if item is not None:
                 self.agents.consider(item)
                 self.save_soon()
+
+    def heard(self) -> None:
+        """Speech just came in: the silence that ends the meeting starts over."""
+        self.last_speech_wall = self.app.wall()
+        self.last_heard_at = utcnow()
+
+    def speech_day(self) -> date:
+        """The day "demain" / "by Friday" are relative to: the meeting's own date for an import, else the
+        date speech was last heard — not the wrap-up's, which comes the next morning when the Mac slept."""
+        if self.day is not None:
+            return self.day
+        tz = ZoneInfo(self.app.cfg.timezone) if self.app.cfg.timezone else None
+        return self.last_heard_at.astimezone(tz).date()
 
     def add_segment(self, seg: TranscriptSegment) -> None:
         seg = seg.model_copy(update={"t_start": max(0.0, seg.t_start - self.t0), "t_end": max(0.0, seg.t_end - self.t0)})
@@ -201,16 +236,25 @@ class MeetingSession:
         if self.replayed_at is not None:
             spoken = max((s.t_end for s in self.meeting.segments), default=0.0)
             self.meeting.ended_at = self.replayed_at + timedelta(seconds=spoken)
+        elif reason == "idle":
+            # it ended when the talking stopped, not N minutes later (or the next morning, when the Mac slept)
+            self.meeting.ended_at = self.last_heard_at
         else:
             self.meeting.ended_at = utcnow()
+        # the extraction above has run, so a "Hey Claude" request in it is an item (and its agent runs)
+        short = self.auto and is_short_clip(cfg, self.meeting)
+        if short:
+            self.meeting.short_clip = True
+            log.info("only %.0fs of speech in %d line(s): kept as a short clip, no summary and no notes sent",
+                     self.meeting.speech_seconds(), len(self.meeting.segments))
         try:
             summarized, notes = await self.app.unless_forced(
                 summarize(
                     cfg,
                     self.meeting,
                     self.tracker,
-                    self.app.llm if cfg.brain.provider == "anthropic" else None,
-                    today=self.day,
+                    self.app.llm if cfg.brain.provider == "anthropic" and not short else None,
+                    today=self.speech_day(),
                     budget_ok=not self.app.costs.over_budget(),
                 )
             )
@@ -223,7 +267,8 @@ class MeetingSession:
             notes = rerender(self.meeting, cfg.user_name)  # the agents' files moved with the folder
         self._save_notes(notes)
         try:
-            await self.app.unless_forced(self.dispatcher.finalize(notes))
+            # a short clip's to-dos go out like any others, its notes stay on this computer
+            await self.app.unless_forced(self.dispatcher.finalize(None if short else notes))
         except Exception:
             log.exception("final push failed")
         if not self.app.forced:
@@ -238,6 +283,7 @@ class MeetingSession:
             notes=str(notes_path),
             dir=str(self.store.dir),
             items=len([i for i in self.meeting.items.values() if not i.dismissed]),
+            short_clip=short,
         )
         if self.agents.busy:
             # agents keep working; refresh the notes when they're done
@@ -344,6 +390,8 @@ class Assistant:
         self.bus = bus or EventBus()
         self.costs = costs or CostMeter(cfg, self.bus)
         self.clock = Clock()
+        self.wall: Callable[[], float] = sleep_inclusive_now
+        """What the silence that ends a meeting is measured on: unlike :attr:`clock`, it runs while asleep."""
         self.title = title
         self.always_on = (cfg.always_on.idle_split_minutes > 0) if always_on is None else always_on
         self.replay_speed = replay_speed
@@ -372,9 +420,14 @@ class Assistant:
         self._mic_speech_s = 0.0  # your speech heard while it hadn't
         self._silent_warned = False
         self._paused = False
+        self._paused_at = 0.0  # on self.wall
         self._force = asyncio.Event()
         self.keep_open = False
         """After a replay/import, keep running (the dashboard) until :meth:`stop`."""
+        self.wound_down = asyncio.Event()
+        """Set once a stopping :meth:`run` has closed capture and speech-to-text and wrapped up the meeting
+        in progress: all that is left is background work (an ended meeting's agents, push retries), which
+        can take many minutes. The app starts the next assistant then instead of waiting for it."""
 
     # ----------------------------------------------------------------- setup
 
@@ -413,6 +466,20 @@ class Assistant:
             self._last_level_pub[source] = now
             self.bus.publish("level", source=source, db=round(db, 1), speech=speech)
 
+    def _on_backlog(self, source: str, behind_s: float, queued: int, backend: str) -> None:
+        """Transcription can't keep up (or caught up again, ``behind_s`` 0): the app's banner shows the warning."""
+        self.bus.publish("transcription.backlog", source=source, behind_s=behind_s, queued=queued, backend=backend)
+        if behind_s <= 0:
+            log.info("%s: speech-to-text has caught up", source)
+            return
+        if backend in ("whisper-cpp", "local"):
+            advice = ("This computer is too slow for the speech model in use: choose a smaller one "
+                      "(Settings → Speech-to-text), or a cloud service (OpenAI or Deepgram).")
+        else:
+            advice = "The speech-to-text service is answering slowly: check the internet connection."
+        log.warning("Speech-to-text is falling behind (%s): what was said %.0f s ago is still waiting to be written "
+                    "down (%d waiting). %s", self.cfg.source_label(source), behind_s, queued, advice)
+
     def track(self, task: asyncio.Task[Any]) -> None:
         self._background.add(task)
         task.add_done_callback(self._background.discard)
@@ -428,7 +495,10 @@ class Assistant:
             self.echo.system_active = "system" in names and "mic" in names
             self._system_live = any(s.name == "system" and s.live for s in self.sources)
             for src in self.sources:
-                self.transcribers[src.name] = self._make_transcriber(src.name)
+                t = self._make_transcriber(src.name)
+                if src.live and hasattr(t, "on_backlog"):  # a file replayed at full speed queues up by design
+                    t.on_backlog = self._on_backlog  # type: ignore[attr-defined]
+                self.transcribers[src.name] = t
         except BaseException:
             # a missing key or device: the app keeps running and may start another assistant, so the
             # transcribers built so far (a whisper-server child…), the Claude client and the sinks are closed
@@ -467,6 +537,12 @@ class Assistant:
                 if t is not None:
                     t.cancel()
             await self.end_meeting("stopped")
+            # the background work doesn't need speech-to-text: free it now (a whisper-server and its model
+            # in memory) for an assistant started meanwhile (see wound_down); _close_clients does it again
+            for t in self.transcribers.values():
+                with contextlib.suppress(Exception):
+                    await t.aclose()
+            self.wound_down.set()
             if self._background:
                 log.info("waiting for background work (agents) to finish… Ctrl+C again to abort")
             await self._finish_background()
@@ -542,6 +618,7 @@ class Assistant:
         if self._paused:
             return False
         self._paused = True
+        self._paused_at = self.wall()
         log.info("paused: nothing is recorded until resumed")
         self.bus.publish("assistant.paused")
         return True
@@ -550,6 +627,12 @@ class Assistant:
         if not self._paused:
             return False
         self._paused = False
+        cur = self.current
+        if cur is not None and not cur.finished:
+            # the meeting stayed open while paused, and the pause doesn't count as silence: the idle timer goes on
+            # from where it stood (a line that came in during the pause started it over)
+            silent_before = max(0.0, self._paused_at - cur.last_speech_wall)
+            cur.last_speech_wall = self.wall() - silent_before
         log.info("resumed")
         self.bus.publish("assistant.resumed")
         return True
@@ -613,7 +696,7 @@ class Assistant:
             if speed > 0:
                 await asyncio.sleep(max(0.0, (seg.t_end - prev) / speed))
                 prev = seg.t_end
-            session.last_speech = self.clock.now()
+            session.heard()
             session.add_segment(seg)
             if speed <= 0:
                 await asyncio.sleep(0)
@@ -755,41 +838,69 @@ class Assistant:
     async def _route(self, seg: TranscriptSegment) -> None:
         self._check_system_audio(seg)
         session = await self._ensure_meeting(seg.t_start)
-        session.last_speech = self.clock.now()
+        session.heard()
         session.add_segment(seg)
 
     async def _ensure_meeting(self, t_first: float, started_at: datetime | None = None) -> MeetingSession:
         async with self._meeting_lock:
+            if self.current is not None and self._silent_too_long(self.current):
+                # just woke up from sleep: this speech came before the idle monitor's next look, and it
+                # belongs to a new meeting
+                if (session := self._detach()) is not None:
+                    self.track(asyncio.ensure_future(self._wrap_up(session, "idle")))
             if self.current is None or self.current.finished:
                 t0 = max(0.0, min(t_first, self.clock.now()) - 0.5)
-                self.current = MeetingSession(self, t0=t0, title=self.title, started_at=started_at)
+                auto = self.always_on and self.title is None and started_at is None
+                self.current = MeetingSession(self, t0=t0, title=self.title, started_at=started_at, auto=auto)
                 self.title = None  # only the first meeting gets the CLI title
                 self.current.start()
             return self.current
 
-    async def _idle_monitor(self) -> None:
+    def _silent_too_long(self, session: MeetingSession) -> bool:
+        """Always-on: no speech in ``session`` for ``idle_split_minutes``, counting time asleep (the Mac
+        with its lid closed) but not time on Pause, when the meeting stays open."""
         idle_s = self.cfg.always_on.idle_split_minutes * 60
+        if not self.always_on or idle_s <= 0 or self._paused or session.finished or not session.meeting.segments:
+            return False
+        return self.wall() - session.last_speech_wall >= idle_s
+
+    async def _idle_monitor(self) -> None:
+        wall, awake = self.wall(), time.monotonic()
         while True:
             await asyncio.sleep(self.idle_poll_s)
+            # time.monotonic() (and this sleep) stand still while the computer sleeps, self.wall() doesn't
+            slept = (self.wall() - wall) - (time.monotonic() - awake)
+            wall, awake = self.wall(), time.monotonic()
+            if slept >= 60:
+                log.info("the computer was asleep for about %.0f min", slept / 60)
             cur = self.current
-            if cur is None or cur.finished or not self.always_on or idle_s <= 0:
-                continue
-            if cur.meeting.segments and self.clock.now() - cur.last_speech >= idle_s:
-                log.info("no speech for %.0f min: closing the meeting", idle_s / 60)
+            if cur is not None and self._silent_too_long(cur):
+                log.info("no speech for %.0f min: closing the meeting", self.cfg.always_on.idle_split_minutes)
                 self.track(asyncio.ensure_future(self.end_meeting("idle")))
 
-    async def end_meeting(self, reason: str = "manual") -> Path | None:
-        async with self._meeting_lock:
-            session = self.current
-            if session is None or session.finished:
-                return None
-            self.current = None
-            # listed right away: its items can still be edited, pushed and run while it wraps up
-            self.finished_meetings.append(session)
+    def _detach(self) -> MeetingSession | None:
+        """Take the meeting in progress out of :attr:`current` (with :attr:`_meeting_lock` held): the next
+        speech starts a new one while this one wraps up."""
+        session = self.current
+        if session is None or session.finished:
+            return None
+        self.current = None
+        # listed right away: its items can still be edited, pushed and run while it wraps up
+        self.finished_meetings.append(session)
+        return session
+
+    async def _wrap_up(self, session: MeetingSession, reason: str) -> Path | None:
         path = await session.finish(reason)
         if path is None:
             self.finished_meetings.remove(session)  # nothing was said: nothing to keep
         return path
+
+    async def end_meeting(self, reason: str = "manual") -> Path | None:
+        async with self._meeting_lock:
+            session = self._detach()
+        if session is None:
+            return None
+        return await self._wrap_up(session, reason)
 
     async def _screen(self) -> None:
         try:

@@ -7,8 +7,10 @@ to PyInstaller (binaries, data, hidden imports, EXE/BUNDLE options) is checked w
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import plistlib
+import re
 import shutil
 import stat
 import subprocess
@@ -261,10 +263,84 @@ def test_build_script() -> None:
     assert 'WHISPER_CPP_VERSION="${WHISPER_CPP_VERSION:-v1.9.5}"' in script
     assert "--depth 1 --branch" in script and "codesign --verify --deep --strict" in script
     assert "hdiutil create" in script and "ln -s /Applications" in script and "otool -L" in script
-    if shutil.which("bash"):
+    if os.name == "posix" and shutil.which("bash"):
         subprocess.run(["bash", "-n", str(MAC / "build.sh")], check=True)
     if os.name == "posix":
         assert os.access(MAC / "build.sh", os.X_OK)
+
+
+def test_build_script_prerequisites_match_ci() -> None:
+    """The header's install line is what a by-hand build follows: it must bring what CI installs
+    (Pillow, for the icon, comes with the dev extra), or the build stops at the icon step."""
+    script = (MAC / "build.sh").read_text(encoding="utf-8")
+    wf = (ROOT / ".github" / "workflows" / "mac-app.yml").read_text(encoding="utf-8")
+    header = re.search(r"pip install -e '\.\[([\w,]+)\]' (pyinstaller==\S+)", script)
+    ci = re.search(r'pip install -e "\.\[([\w,]+)\]" (pyinstaller==\S+)', wf)
+    assert header and ci
+    assert set(header.group(1).split(",")) >= set(ci.group(1).split(",")) and header.group(2) == ci.group(2)
+    assert "import PIL" in script  # and says so clearly if it is missing anyway
+
+
+def test_selftest_launches_without_the_build_trees_whisper_server() -> None:
+    script = (MAC / "build.sh").read_text(encoding="utf-8")
+    body = script[script.index("step_selftest() {"):script.index("step_dmg() {")]
+    assert 'env -u VOICESTREAM_WHISPER_SERVER \\\n    "$APP/Contents/MacOS/Voicestream" --selftest' in body
+    assert 'check_selftest.py "$SELFTEST_DIR/selftest.json" "$APP"' in body
+
+
+check_selftest = _load("check_selftest")
+
+
+def _native_report(app: Path, **changes: Any) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "ok": True, "mode": "native", "frozen": True, "errors": [],
+        "whisper_server": str(app / "Contents" / "Frameworks" / "bin" / "whisper-server"),
+        "checks": dict.fromkeys(check_selftest.NATIVE_CHECKS, True),
+        "quit": {"graceful": True, "shutdown_s": 0.3},
+    }
+    report.update(changes)
+    return report
+
+
+def test_selftest_verdict(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    app = tmp_path / "dist" / "Voicestream.app"
+    assert check_selftest.problems(_native_report(app), app) == []
+    # pywebview or a PyObjC framework missing from the bundle: the app falls back to the browser, runs
+    # only the HTTP checks, passes them and says ok — still a failure here
+    browser = _native_report(app, mode="browser", checks={"app_page": True, "api_app": True})
+    found = check_selftest.problems(browser, app)
+    assert "fell back to the browser" in found[0] and "status_item" in found[1]
+    elsewhere = _native_report(app, whisper_server=str(tmp_path / "build" / "whisper" / "bin" / "whisper-server"))
+    assert check_selftest.problems(elsewhere, app) == [
+        f"the app did not find its own whisper-server inside Voicestream.app (found: {elsewhere['whisper_server']})"]
+    checks = dict.fromkeys(check_selftest.NATIVE_CHECKS, True) | {"app_delegate_patched": False}
+    hung = _native_report(app, ok=False, checks=checks, errors=["the app did not quit within 50 s"])
+    del hung["quit"]
+    assert check_selftest.problems(hung, app) == [
+        "failed checks: app_delegate_patched", "error: the app did not quit within 50 s",
+        "the app did not finish quitting (its last report, written as it quits, is missing)"]
+
+    report = tmp_path / "selftest.json"
+    report.write_text(json.dumps(browser), encoding="utf-8")
+    assert check_selftest.main([str(report), str(app)]) == 1
+    assert "self-test: FAILED" in capsys.readouterr().out
+    report.write_text(json.dumps(_native_report(app)), encoding="utf-8")
+    assert check_selftest.main([str(report), str(app)]) == 0
+    assert check_selftest.main([str(tmp_path / "missing.json"), str(app)]) == 1
+
+
+def test_release_job_publishes_tagged_builds_only() -> None:
+    wf = (ROOT / ".github" / "workflows" / "mac-app.yml").read_text(encoding="utf-8")
+    release = wf[wf.index("\n  release:"):]
+    assert "permissions:\n  contents: read" in wf  # everything else stays read-only
+    assert "needs: app" in release and "if: startsWith(github.ref, 'refs/tags/v')" in release
+    assert "permissions:\n      contents: write" in release
+    assert "actions/download-artifact@v8" in release and "name: ${{ needs.app.outputs.dmg }}" in release
+    assert 'gh release create "$GITHUB_REF_NAME" "$DMG"' in release
+    assert "dmg: ${{ steps.dmg.outputs.name }}" in wf
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "https://github.com/bybysker/always-on-voice-stream/releases" in readme
+    assert "actions/workflows/mac-app.yml?query=is%3Asuccess" in readme
 
 
 def test_ci_workflow() -> None:

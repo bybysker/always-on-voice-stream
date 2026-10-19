@@ -10,10 +10,12 @@
 #   app            PyInstaller -> dist/Voicestream.app (whisper-server bundled through the spec)
 #   verify         codesign --verify --deep --strict, Info.plist, architecture, bundled whisper-server runs
 #   selftest       launch the app with --selftest, take screenshots, check the JSON report
+#                  (packaging/mac/check_selftest.py: its own window, its own whisper-server)
 #   dmg            dist/Voicestream-<version>-arm64.dmg (the app + an Applications shortcut)
 #
-# Needs: Xcode command line tools, cmake, git, and a Python 3.12 with
-#   pip install -e '.[audio,dashboard,agents,app,mac]' pyinstaller==6.22.3
+# Needs: Xcode command line tools, cmake, git, and a Python 3.12 with what CI installs (the dev
+# extra brings Pillow, which draws the icon):
+#   pip install -e '.[audio,dashboard,agents,app,mac,dev]' pyinstaller==6.22.3
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -65,6 +67,7 @@ step_check_whisper() {
 
 step_icon() {
   say_step "app icon"
+  "$PYTHON" -c "import PIL" 2>/dev/null || fail "drawing the icon needs Pillow: $PYTHON -m pip install pillow"
   "$PYTHON" packaging/mac/make_icon.py --out "$(dirname "$VOICESTREAM_ICON")"
 }
 
@@ -114,8 +117,10 @@ wait_phase() {  # wait_phase <phase> <seconds>: the self-test writes how far it 
 step_selftest() {
   say_step "self-test launch (${SELFTEST_SECONDS} s)"
   rm -rf "$SELFTEST_DIR"; mkdir -p "$SELFTEST_DIR"
-  # run the binary itself, not `open`: the job's own permissions apply and its output stays here
-  "$APP/Contents/MacOS/Voicestream" --selftest "$SELFTEST_SECONDS" --selftest-report "$SELFTEST_DIR/selftest.json" \
+  # run the binary itself, not `open`: the job's own permissions apply and its output stays here.
+  # Without the build tree's whisper-server (exported above and by CI): the app must find its own.
+  env -u VOICESTREAM_WHISPER_SERVER \
+    "$APP/Contents/MacOS/Voicestream" --selftest "$SELFTEST_SECONDS" --selftest-report "$SELFTEST_DIR/selftest.json" \
     >"$SELFTEST_DIR/selftest.log" 2>&1 &
   local pid=$! status=0
   if wait_phase window 90; then screencapture -x "$SELFTEST_DIR/window.png" || echo "screenshot failed"; fi
@@ -128,14 +133,8 @@ step_selftest() {
   wait "$pid" || status=$?
   echo "exit status: $status"
   cat "$SELFTEST_DIR/selftest.log" || true
-  "$PYTHON" - "$SELFTEST_DIR/selftest.json" <<'EOF'
-import json, sys
-report = json.load(open(sys.argv[1], encoding="utf-8"))
-print(json.dumps(report, indent=2))
-failed = [name for name, ok in report.get("checks", {}).items() if not ok]
-print("failed checks:", failed or "none", "| errors:", report.get("errors") or "none")
-sys.exit(0 if report.get("ok") else 1)
-EOF
+  # not just the report's "ok": a fallback to the browser passes the checks it runs
+  "$PYTHON" packaging/mac/check_selftest.py "$SELFTEST_DIR/selftest.json" "$APP"
   return "$status"
 }
 

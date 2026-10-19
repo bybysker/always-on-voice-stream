@@ -517,20 +517,50 @@ async def test_real_whisper_server_transcribes_speech(cfg: Config, lang: str) ->
     with wave.open(str(wav)) as w:
         assert (w.getframerate(), w.getnchannels(), w.getsampwidth()) == (SAMPLE_RATE, 1, 2)
         pcm = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+    audio_s = len(pcm) / SAMPLE_RATE
+    speech = Utterance(source="mic", samples=pcm, t_start=0, t_end=audio_s, speech_seconds=audio_s)
     t = build_transcriber(cfg, "mic")
-    started = time.monotonic()
+    server = t.server  # type: ignore[attr-defined]
+    timings: list[tuple[str, float, str]] = []
+
+    async def timed(phase: str, step: Any) -> Any:
+        started = time.monotonic()
+        result = await step
+        timings.append((phase, time.monotonic() - started, f" · {result.text!r}" if result is not None else ""))
+        return result
+
     try:
-        res = await t.transcribe_utterance(  # type: ignore[attr-defined]
-            Utterance(source="mic", samples=pcm, t_start=0, t_end=len(pcm) / SAMPLE_RATE, speech_seconds=len(pcm) / SAMPLE_RATE), None)
-        took = time.monotonic() - started
-        used_vad = t.server.vad_model is not None  # type: ignore[attr-defined]
+        # where the time goes on a slow machine: loading the model, the first request, a warm one, and what
+        # auto-detecting the language costs (an extra pass over the audio) next to a fixed language
+        await timed("server start until ready", server.ensure_started())
+        res = await timed("first utterance (auto language)", t.transcribe_utterance(speech, None))  # type: ignore[attr-defined]
+        await timed("same utterance again (warm)", t.transcribe_utterance(speech, None))  # type: ignore[attr-defined]
+        t.language = lang  # type: ignore[attr-defined]
+        await timed(f"same utterance, language fixed to {lang}", t.transcribe_utterance(speech, None))  # type: ignore[attr-defined]
+        used_vad = server.vad_model is not None
     finally:
-        await t.aclose()
+        await t.aclose()  # whisper-server prints its timings when it shuts down
     words = lambda s: {w.strip(".,!?;:'’").lower() for w in s.split() if len(w) > 3}  # noqa: E731
     overlap = len(words(res.text) & words(expected)) / max(1, len(words(expected)))
-    print(f"[{lang}] {'GPU' if GPU else 'CPU'}{' + VAD' if used_vad else ''} · {took:.1f}s · {overlap:.0%} words · {res.text!r}")
+    threads = cfg.transcription.whisper_cpp.threads or wc.default_threads()
+    print(f"\n[{lang}] {'GPU' if GPU else 'CPU'}{' + VAD' if used_vad else ''} · {threads} threads · "
+          f"{audio_s:.1f}s of audio · {overlap:.0%} words")
+    for phase, took, text in timings:
+        print(f"[{lang}] {phase}: {took:.1f}s{text}")
+    for line in _server_timings(server):
+        print(f"[{lang}] whisper-server: {line}")
     assert used_vad == bool(TEST_VAD)
     assert res.language == lang and overlap >= 0.6, res.text
+
+
+def _server_timings(server: wc.WhisperServer) -> list[str]:
+    """The last ``whisper_print_timings`` block of the server's log (load, mel, encode, decode, total…)."""
+    try:
+        text = server._log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ["(no log)"]
+    lines = [ln.split("whisper_print_timings:", 1)[1].strip() for ln in text.splitlines() if "whisper_print_timings:" in ln]
+    return lines[-12:] or ["(no whisper_print_timings lines in its log)"]
 
 
 def test_silence_reaches_no_one(whisper_cfg: Config) -> None:

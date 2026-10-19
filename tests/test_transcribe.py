@@ -272,6 +272,38 @@ async def test_levels_are_reported_with_the_source_name() -> None:
     assert any(speech for *_, speech in levels) and not all(speech for *_, speech in levels)
 
 
+class _SlowFake(FakeTranscriber):
+    """Each utterance takes 0.15 s to transcribe, much longer than the stream takes to deliver them."""
+
+    backlog_after_s, backlog_max_queued, backlog_poll_s = 0.3, 3, 0.02
+
+    async def transcribe_utterance(self, utt: Utterance, prompt: str | None) -> TranscribeResult:
+        await asyncio.sleep(0.15)
+        return await super().transcribe_utterance(utt, prompt)
+
+
+async def test_falling_behind_is_said_once_and_so_is_catching_up() -> None:
+    """A model too slow for the computer (large-v3 on a CI runner's CPU: ~70 s for an 8 s sentence) falls
+    further behind with every sentence, silently: the transcript and the to-dos come minutes late."""
+    t = _SlowFake([f"line {i}" for i in range(6)])
+    seen: list[tuple[str, float, int, str]] = []
+    t.on_backlog = lambda *report: seen.append(report)
+    texts = [s.text async for s in t.stream("mic", "Me", _frames(bursts(6)))]
+    assert texts == [f"line {i}" for i in range(6)]  # nothing lost, nothing out of order
+    (source, behind_s, queued, backend), cleared = seen  # one warning per episode, not one per poll
+    assert (source, backend) == ("mic", "fake") and (queued > 3 or behind_s >= 0.3) and behind_s > 0
+    assert cleared == ("mic", 0.0, 0, "fake")
+
+
+async def test_keeping_up_reports_nothing() -> None:
+    t = FakeTranscriber(["one", "two", "three"])
+    t.backlog_poll_s = 0.01
+    seen: list[Any] = []
+    t.on_backlog = lambda *report: seen.append(report)
+    assert len([s async for s in t.stream("mic", "Me", _frames(bursts(3)))]) == 3
+    assert seen == []
+
+
 async def test_capture_errors_surface_after_pending_segments() -> None:
     async def broken() -> AsyncIterator[AudioFrame]:
         async for f in _frames(bursts(1)):

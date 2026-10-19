@@ -243,9 +243,9 @@ def _check_values(data: dict[str, Any]) -> None:
                                     field=field) from None
 
 
-def validate_text(text: str) -> Config:
+def validate_text(text: str, *, skip_sinks: Collection[str] = ()) -> Config:
     """What :func:`~voicestream.config.load_config` would make of ``text`` — the config and every
-    enabled sink — or :class:`SettingsError` naming the first problem."""
+    enabled sink but ``skip_sinks`` — or :class:`SettingsError` naming the first problem."""
     from ..sinks.base import sink_class
 
     try:
@@ -260,7 +260,7 @@ def validate_text(text: str) -> Config:
         field = _loc(e["loc"])
         raise SettingsError(f"{field or 'settings'}: {e['msg']}", field=field or None) from None
     for name, raw in cfg.sinks.items():
-        if not isinstance(raw, dict) or not raw.get("enabled", name == "markdown"):
+        if name in skip_sinks or not isinstance(raw, dict) or not raw.get("enabled", name == "markdown"):
             continue
         try:
             cls = sink_class(name)
@@ -275,6 +275,21 @@ def validate_text(text: str) -> Config:
             field = f"sinks.{name}" + (f".{_loc(e['loc'])}" if e["loc"] else "")
             raise SettingsError(f"[sinks.{name}] {_loc(e['loc']) or name}: {e['msg']}", field=field) from None
     return cfg
+
+
+def _broken_sinks(text: str) -> set[str]:
+    """The enabled sinks that already fail validation in ``text``: turned on by hand (or from the
+    CLI) but not set up. Running, the app skips them (sinks/base.py build_sinks)."""
+    broken: set[str] = set()
+    while True:
+        try:
+            validate_text(text, skip_sinks=broken)
+            return broken
+        except SettingsError as exc:
+            parts = (exc.field or "").split(".")
+            if len(parts) < 2 or parts[0] != "sinks" or parts[1] in broken:
+                return broken  # not a sink's own problem: the full check after the change reports it
+            broken.add(parts[1])
 
 
 def save_changes(path: Path, changes: dict[str, Any]) -> Config:
@@ -298,9 +313,14 @@ def save_checked(
             before = flatten(tomllib.loads(tomlkit.dumps(doc)))
         except tomllib.TOMLDecodeError as exc:  # tomlkit is more lenient than the loader
             raise SettingsError(f"{path} can't be read as TOML: {exc} — fix or remove it", field=None) from None
+        # refuse only what this change breaks: a tool already left half set up in the file must not
+        # block saving anything else (the setup wizard's name could never be saved), unless it is
+        # the tool being changed
+        touched = {k.split(".")[1] for k in changes if k.startswith("sinks.")}
+        broken = _broken_sinks(tomlkit.dumps(doc)) - touched
         apply_changes(doc, changes)
         text = tomlkit.dumps(doc)
-        cfg = validate_text(text)
+        cfg = validate_text(text, skip_sinks=broken)
         changed = _changed(before, flatten(tomllib.loads(text)))
         _refuse_locked(changed, locked)
         write_private(path, text)

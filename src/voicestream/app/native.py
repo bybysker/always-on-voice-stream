@@ -10,8 +10,9 @@ changes reach the main thread through ``AppHelper.callAfter``, and menu clicks r
 through ``host.call()``, which returns at once. Nothing on the main thread waits for the host,
 so a slow stop can never freeze the menu bar.
 
-pywebview 6.2.1 is pinned because this reaches into its Cocoa backend: an ``objc.Category`` on
-``webview.platforms.cocoa.BrowserView.AppDelegate`` adds what its app delegate lacks.
+pywebview 6.2.1 is pinned because this reaches into its Cocoa backend: it creates its app
+delegate from the class attribute ``webview.platforms.cocoa.BrowserView.AppDelegate`` with its
+first window, so a subclass put there before ``webview.start()`` adds what that delegate lacks.
 
 * ``applicationShouldHandleReopen:hasVisibleWindows:``: clicking the Dock icon, or opening the
   app again from Finder, shows the hidden window.
@@ -19,7 +20,11 @@ pywebview 6.2.1 is pinned because this reaches into its Cocoa backend: an ``objc
   ours hides the window instead of closing it, so the app could never quit. Ours asks first
   while listening, then stops the host gracefully (``NSTerminateLater``, capped), then quits.
 * ``applicationWillTerminate:``: AppKit ends the process with ``exit()``, which skips Python's
-  own shutdown, so the ``atexit`` handlers (they stop whisper-server children) run here.
+  own shutdown, so the ``atexit`` handlers (they stop whisper-server children) run here. The
+  shell also observes the notification itself, so this runs even without our delegate.
+
+If the delegate can't be installed, the window and the menu bar still work and Quit still quits
+(through pywebview's own handler); the self-test reports it.
 
 Closing the window hides it and the Dock icon (activation policy "accessory"): the app keeps
 listening from the menu bar. "Open Voicestream", the Dock or Finder brings both back.
@@ -55,6 +60,9 @@ LOAD_TIMEOUT_S = 45.0
 MAIN_THREAD_TIMEOUT_S = 10.0
 SELFTEST_PAUSE_S = 3.0  # time for CI's screenshot at each self-test phase
 WATCHDOG_EXTRA_S = 90.0
+SELFTEST_QUIT_S = launcher.GRACEFUL_STOP_S + launcher.FORCE_STOP_S + 15.0
+"""After the self-test asks the app to quit: longer than the capped host shutdown, then the
+process ends itself (report written) so the CI job never waits on a quit that went nowhere."""
 
 # AppKit values, spelled out so this module doesn't depend on which constants PyObjC exports
 POLICY_REGULAR, POLICY_ACCESSORY = 0, 1  # NSApplicationActivationPolicy
@@ -68,6 +76,16 @@ ACTIVITY_OPTIONS = 0x00EFFFFF
 and no sudden termination while listening, but the Mac may still go to sleep when idle."""
 QUIT_REASON = int.from_bytes(b"why?", "big")
 """keyAEQuitReason: set on the quit Apple event when macOS quits apps for a logout or shutdown."""
+WILL_TERMINATE = "NSApplicationWillTerminateNotification"
+
+# Type encodings of the app delegate methods pywebview's class lacks. PyObjC refuses a whole class
+# (objc.BadPrototypeError) when a method overrides one the class already has with another encoding:
+# that is how the macOS CI run lost the delegate ("I@:@ != Q@:@", the runtime's first). pywebview's
+# own applicationShouldTerminate: got b"I@:@" from PyObjC 12.2's AppKit metadata, ours said
+# objc._C_NSUInteger (b"Q" on 64-bit). So that override carries no encoding: PyObjC then copies the
+# one of the method it overrides, whatever this PyObjC's metadata says.
+SIG_REOPEN = b"Z@:@Z"  # (BOOL)applicationShouldHandleReopen:(NSApplication *) hasVisibleWindows:(BOOL)
+SIG_WILL_TERMINATE = b"v@:@"  # (void)applicationWillTerminate:(NSNotification *)
 
 LISTENING_STATES = frozenset({"starting", "listening", "paused"})
 SYMBOLS = {
@@ -271,7 +289,9 @@ def needs_quit_confirmation(state: dict[str, Any]) -> bool:
 
 _SHELL: MacShell | None = None
 _PATCHED = False
+"""Our app delegate class is the one pywebview creates: we answer ``applicationShouldTerminate:``."""
 _TARGET_CLASS: Any = None
+_DELEGATE_CLASS: Any = None
 
 
 def _app() -> Any:
@@ -288,50 +308,66 @@ def _guard(fn: Callable[[], Any]) -> None:
         log.exception("menu-bar action failed")
 
 
-def install_delegate_patches(delegate_cls: Any) -> None:
-    """Add the reopen / terminate handlers to pywebview's app delegate class (once)."""
+def _app_delegate_class(base: Any) -> Any:
+    """pywebview's app delegate class plus what it lacks (defined once: Objective-C class names are
+    process-wide). A subclass, not an ``objc.Category``: pywebview's own class stays as it is."""
+    global _DELEGATE_CLASS
+    if _DELEGATE_CLASS is None:
+        import objc
+
+        class VoicestreamAppDelegate(base):
+            # no typedSelector: overrides pywebview's, so it must keep that method's encoding (above)
+            def applicationShouldTerminate_(self, app):  # noqa: ANN001, ANN202
+                shell = _SHELL
+                if shell is None:
+                    return TERMINATE_NOW
+                try:
+                    return shell.should_terminate()
+                except Exception:  # noqa: BLE001 - quitting must always remain possible
+                    log.exception("quit handler failed")
+                    return TERMINATE_NOW
+
+            @objc.typedSelector(SIG_REOPEN)
+            def applicationShouldHandleReopen_hasVisibleWindows_(self, app, has_visible):  # noqa: ANN001, ANN202
+                shell = _SHELL
+                if shell is not None:
+                    _guard(shell.show_window)
+                return False  # handled: AppKit has nothing more to do
+
+            @objc.typedSelector(SIG_WILL_TERMINATE)
+            def applicationWillTerminate_(self, notification):  # noqa: ANN001, ANN202
+                shell = _SHELL
+                if shell is not None:
+                    _guard(shell.will_terminate)
+
+            def voicestreamPatched(self):  # noqa: ANN202 - lets the self-test see it is our delegate
+                return True
+
+        _DELEGATE_CLASS = VoicestreamAppDelegate
+    return _DELEGATE_CLASS
+
+
+def install_app_delegate(browser_view: Any) -> None:
+    """Make pywebview create our app delegate instead of its own (once).
+
+    pywebview 6.2.1 creates it with its first window, inside ``webview.start()``:
+    ``BrowserView._shared_app_delegate = BrowserView.AppDelegate.alloc().init()`` in
+    ``BrowserView.__init__``, then ``app.setDelegate_`` (again after a window was closed and a new
+    one opened). It reads the class attribute each time, so the subclass must be there before
+    ``webview.start()``."""
     global _PATCHED
     if _PATCHED:
         return
-    import objc
-
-    if delegate_cls.__name__ != "AppDelegate":  # pragma: no cover - pywebview renamed it: unpinned upgrade
-        raise RuntimeError(f"unexpected pywebview app delegate {delegate_cls.__name__!r}")
-
-    class AppDelegate(objc.Category(delegate_cls)):  # a category must carry its class's name
-        @objc.typedSelector(objc._C_NSUInteger + b"@:@")
-        def applicationShouldTerminate_(self, app):  # noqa: ANN001, ANN202
-            shell = _SHELL
-            if shell is None:
-                return TERMINATE_NOW
-            try:
-                return shell.should_terminate()
-            except Exception:  # noqa: BLE001 - quitting must always remain possible
-                log.exception("quit handler failed")
-                return TERMINATE_NOW
-
-        @objc.typedSelector(objc._C_NSBOOL + b"@:@" + objc._C_NSBOOL)
-        def applicationShouldHandleReopen_hasVisibleWindows_(self, app, has_visible):  # noqa: ANN001, ANN202
-            shell = _SHELL
-            if shell is not None:
-                _guard(shell.show_window)
-            return False  # handled: AppKit has nothing more to do
-
-        @objc.typedSelector(b"v@:@")
-        def applicationWillTerminate_(self, notification):  # noqa: ANN001, ANN202
-            shell = _SHELL
-            if shell is not None:
-                _guard(shell.will_terminate)
-
-        def voicestreamPatched(self):  # noqa: ANN202 - lets the self-test see the category is in place
-            return True
-
+    base = browser_view.AppDelegate
+    if base.__name__ != "AppDelegate":  # pragma: no cover - pywebview renamed it: unpinned upgrade
+        raise RuntimeError(f"unexpected pywebview app delegate {base.__name__!r}")
+    browser_view.AppDelegate = _app_delegate_class(base)
     _PATCHED = True
 
 
 def _menu_target_class() -> Any:
-    """The NSObject that receives menu clicks, menuWillOpen: and the timer (defined once:
-    Objective-C class names are process-wide)."""
+    """The NSObject that receives menu clicks, menuWillOpen:, the timer and the will-terminate
+    notification (defined once: Objective-C class names are process-wide)."""
     global _TARGET_CLASS
     if _TARGET_CLASS is None:
         import objc
@@ -349,6 +385,10 @@ def _menu_target_class() -> Any:
             @objc.typedSelector(b"v@:@")
             def tick_(self, timer):  # noqa: ANN001, ANN202
                 _guard(self.shell.render)
+
+            @objc.typedSelector(SIG_WILL_TERMINATE)
+            def appWillTerminate_(self, notification):  # noqa: ANN001, ANN202
+                _guard(self.shell.will_terminate)
 
         _TARGET_CLASS = VoicestreamMenuTarget
     return _TARGET_CLASS
@@ -477,7 +517,10 @@ class MacShell:
         self.quitting = False
         self.exit_code = 0
         self.report: dict[str, Any] = {}
+        self.delegate_error: str | None = None  # why our app delegate couldn't be installed
         self._terminating = False
+        self._terminated = False
+        self._watchdog: threading.Timer | None = None
         self._login = "unsupported"
         self._item: Any = None  # strong refs: AppKit doesn't keep the status item, menu or target alive
         self._menu: Any = None
@@ -502,9 +545,11 @@ class MacShell:
 
         _SHELL = self
         try:
-            install_delegate_patches(cocoa.BrowserView.AppDelegate)
-        except Exception:  # noqa: BLE001 - window and menu still work; Quit then skips the wrap-up
-            log.exception("could not patch pywebview's app delegate")
+            install_app_delegate(cocoa.BrowserView)
+        except Exception as exc:  # noqa: BLE001 - window and menu still work, and Quit still quits (see quit())
+            log.exception("could not install the app delegate")
+            self.delegate_error = f"{type(exc).__name__}: {exc}"
+        self._observe_termination()
         self.state = launcher.safe_state(self.host)
         self.lang = self._language()
         self.window = webview.create_window(
@@ -545,6 +590,25 @@ class MacShell:
         launcher.shutdown_host(self.host)
         return self.exit_code
 
+    def _menu_target(self) -> Any:
+        if self._target is None:
+            target = _menu_target_class().alloc().init()
+            target.shell = self
+            self._target = target
+        return self._target
+
+    def _observe_termination(self) -> None:
+        """Hear NSApplicationWillTerminateNotification directly too: AppKit posts it to every
+        observer, so :meth:`will_terminate` (the exit handlers, the self-test's last report) runs
+        even when the app delegate isn't ours — its install failed, or pywebview detached it."""
+        try:
+            import Foundation
+
+            Foundation.NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+                self._menu_target(), "appWillTerminate:", WILL_TERMINATE, None)
+        except Exception:  # noqa: BLE001 - the delegate's applicationWillTerminate: still does it
+            log.exception("could not watch for the app quitting")
+
     def _start_menu_bar(self) -> None:
         try:
             self._create_status_item()
@@ -576,8 +640,14 @@ class MacShell:
 
     def _on_closing(self) -> bool | None:
         """pywebview's ``closing`` event (main thread, synchronous): returning False keeps the
-        window; we hide it instead so the app keeps listening from the menu bar."""
-        if self.quitting:
+        window; we hide it instead so the app keeps listening from the menu bar.
+
+        Only pywebview's own ``applicationShouldTerminate:`` (our delegate failed to install) needs
+        the window to really close for a quit. While our delegate wraps a quit up (up to ~35 s, the
+        window still takes clicks), a close must hide it too: closing the last window makes
+        pywebview detach the app delegate, and AppKit would then quit without our
+        ``applicationWillTerminate:``."""
+        if self.quitting and not _PATCHED:
             return None
         from PyObjCTools import AppHelper
 
@@ -617,8 +687,7 @@ class MacShell:
         button.setImagePosition_(IMAGE_LEFT)
         with contextlib.suppress(Exception):  # digits of equal width: the timer doesn't jiggle
             button.setFont_(AppKit.NSFont.monospacedDigitSystemFontOfSize_weight_(AppKit.NSFont.systemFontSize(), 0.0))
-        target = _menu_target_class().alloc().init()
-        target.shell = self
+        target = self._menu_target()
         menu = AppKit.NSMenu.alloc().initWithTitle_("Voicestream")
         menu.setAutoenablesItems_(False)
         menu.setDelegate_(target)
@@ -633,7 +702,7 @@ class MacShell:
             menu.addItem_(mi)
             self._entries[entry.key] = mi
         item.setMenu_(menu)
-        self._item, self._menu, self._target = item, menu, target
+        self._item, self._menu = item, menu
 
     def _image(self, symbol: str) -> Any:
         if symbol not in self._images:
@@ -727,7 +796,11 @@ class MacShell:
         elif key == "pause":
             self._post(self.host.listen_resume() if current == "paused" else self.host.listen_pause())
         elif key == "listen":
-            if current in ("stopped", "error"):
+            if current == "error":
+                # "error" can leave half the assistant running (the microphone gave up, meeting audio
+                # is still recorded): starting is then a no-op, a restart replaces it
+                self._post(self.host.listen_restart())
+            elif current == "stopped":
                 self._post(self.host.listen_start())
             else:
                 self._post(self.host.listen_stop())
@@ -736,9 +809,13 @@ class MacShell:
         elif key == "login":
             self._toggle_login()
         elif key == "quit":
-            if not _PATCHED:  # pywebview's own quit asks the window, which would only hide itself
-                self.quitting = True
-            _app().terminate_(None)
+            self.quit()
+
+    def quit(self) -> None:
+        """Main thread: Quit in the menu (and the self-test's own quit)."""
+        if not _PATCHED:  # pywebview's own quit asks the window, which would only hide itself
+            self.quitting = True
+        _app().terminate_(None)
 
     def _post(self, coro: Any) -> None:
         try:
@@ -837,7 +914,17 @@ class MacShell:
         AppHelper.callAfter(lambda: _app().replyToApplicationShouldTerminate_(True))
 
     def will_terminate(self) -> None:
-        """``applicationWillTerminate:``: the last Python code before AppKit's ``exit()``."""
+        """``applicationWillTerminate:``: the last Python code before AppKit's ``exit()``. Reached
+        twice (our delegate, and the notification observer): only the first does anything."""
+        if self._terminated:
+            return
+        self._terminated = True
+        if not self._terminating and not self._quit_info:
+            # quitting through pywebview's applicationShouldTerminate: (ours couldn't be installed):
+            # nothing stopped the host, so stop it here — a meeting in progress is still saved
+            t0 = time.monotonic()
+            graceful = launcher.shutdown_host(self.host)
+            self._quit_info = {"graceful": graceful, "shutdown_s": round(time.monotonic() - t0, 2), "delegate": False}
         if self._activity is not None:
             with contextlib.suppress(Exception):
                 import Foundation
@@ -879,9 +966,7 @@ class MacShell:
         from PyObjCTools import AppHelper
 
         started = time.monotonic()
-        watchdog = threading.Timer((self.selftest or 0) + WATCHDOG_EXTRA_S, self._selftest_hung)
-        watchdog.daemon = True
-        watchdog.start()
+        self._arm_watchdog((self.selftest or 0) + WATCHDOG_EXTRA_S, "the self-test did not finish in time")
         report = self.report = launcher.selftest_report(self.host, self.url, mode="native")
         checks = report["checks"]
         try:
@@ -897,7 +982,12 @@ class MacShell:
             report["status_item"] = item = self._on_main(self._status_item_info) or {}
             checks["status_item"] = bool(item.get("created") and item.get("image"))
             report["delegate"] = patches = self._on_main(self._delegate_info) or {}
-            checks["app_delegate_patched"] = bool(patches.get("patched") and patches.get("reopen"))
+            patches["install_error"] = self.delegate_error
+            checks["app_delegate_patched"] = bool(patches.get("patched") and patches.get("reopen")
+                                                  and patches.get("will_terminate"))
+            if report["frozen"]:  # the packaged app: its own whisper-server, not one from the build tree
+                report["whisper_server_check"] = ws = launcher.whisper_server_check()
+                checks["whisper_server_bundled"] = bool(ws.get("ok"))
             report["hide_on_close"] = hidden = self._check_hide_and_reopen()
             checks["hide_on_close_and_reopen"] = bool(hidden.get("ok"))
             launcher.write_phase(self.report_path, "window")
@@ -913,11 +1003,23 @@ class MacShell:
         launcher.write_report(self.report_path, report)
         self.exit_code = 0 if report["ok"] else 1
         time.sleep(max(0.0, (self.selftest or 0) - (time.monotonic() - started)))
-        AppHelper.callAfter(lambda: _app().terminate_(None))
+        # quit like the menu does (it also works when our delegate isn't installed), with a deadline
+        self._arm_watchdog(SELFTEST_QUIT_S, f"the app did not quit within {SELFTEST_QUIT_S:.0f} s")
+        AppHelper.callAfter(self.quit)
 
-    def _selftest_hung(self) -> None:
-        self.report.setdefault("errors", []).append("the self-test did not finish in time")
+    def _arm_watchdog(self, seconds: float, reason: str) -> None:
+        """(Re)start the self-test's hard deadline: past it the process ends itself, report written."""
+        if self._watchdog is not None:
+            self._watchdog.cancel()
+        self._watchdog = threading.Timer(seconds, self._selftest_hung, args=(reason,))
+        self._watchdog.daemon = True
+        self._watchdog.start()
+
+    def _selftest_hung(self, reason: str = "the self-test did not finish in time") -> None:
+        self.report.setdefault("errors", []).append(reason)
         self.report["ok"] = False
+        if self._quit_info:
+            self.report["quit"] = self._quit_info
         launcher.write_report(self.report_path, self.report)
         launcher.write_phase(self.report_path, "hung")
         os._exit(3)

@@ -9,7 +9,10 @@ Three rules keep a meeting from ever existing as two diverging copies:
   during this run) is changed through that in-memory session, never by rewriting its file — the
   session's next save would undo the change;
 * a meeting that is still being recorded by *another* process (``voicestream run`` in a
-  terminal) is read-only here: that process owns its file;
+  terminal) is read-only here: that process owns its file. One whose recording was cut off (a
+  crash, a force quit, a power cut: nobody holds its ``.recording`` lock any more, see
+  :func:`voicestream.storage.is_recording`) is ended here instead (:func:`finish_interrupted`), so
+  it can be edited, re-summarized and sent like any other;
 * while a push, a sync of an edit or new notes are under way for a past meeting, everything uses
   that work's copy (:class:`_Held`) and the work runs one at a time per meeting — otherwise its
   final save would undo an edit made meanwhile, and two pushes at once would each create the items.
@@ -24,7 +27,7 @@ import asyncio
 import logging
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 from zoneinfo import ZoneInfo
@@ -35,7 +38,7 @@ from ..config import Config
 from ..dispatch import Dispatcher
 from ..events import EventBus
 from ..models import Event, ItemKind, Meeting
-from ..storage import atomic_write, list_sessions, load_meeting
+from ..storage import RECORDING_LOCK, atomic_write, is_recording, list_sessions, load_meeting, read_transcript
 
 if TYPE_CHECKING:
     from ..brain.llm import LLM
@@ -116,6 +119,8 @@ def summary(meeting: Meeting, folder: Path, user_name: str, *, live: bool = Fals
         ),
         "pushed": pushed,
         "has_notes": (folder / "notes.md").is_file() or bool(meeting.summary_markdown),
+        "short_clip": meeting.short_clip,
+        "interrupted": meeting.interrupted,
     }
 
 
@@ -188,6 +193,34 @@ async def summarize_meeting(
     return await summarize(cfg, meeting, tracker, llm, today=day, budget_ok=budget_ok)
 
 
+def finish_interrupted(cfg: Config, folder: Path) -> Meeting | None:
+    """End a meeting whose recording was cut off — its process died before the wrap-up (a crash, a
+    force quit, a power cut), and nothing else would ever end it. Returns it, or ``None`` (nothing
+    changed) when it has ended already or a live process is still recording it.
+
+    It ends at the last words heard, with the whole transcript from ``transcript.jsonl`` (``meeting.json``
+    is only saved when items change, so it may hold few lines or none). The notes are the basic ones a
+    forced stop writes, and nothing is sent: "Rewrite notes" and "Send to my tools" do the rest."""
+    if is_recording(folder):  # first: once its lock is free, a recorder has saved its final state
+        return None
+    try:
+        meeting, d = load_meeting(folder)
+    except (OSError, ValueError):
+        return None
+    if meeting.ended_at is not None:
+        return None
+    heard = read_transcript(d)
+    if len(heard) > len(meeting.segments):
+        meeting.segments = heard
+    spoken = max((s.t_end for s in meeting.segments), default=0.0)
+    meeting.ended_at = meeting.started_at + timedelta(seconds=spoken)
+    meeting.interrupted = True
+    save_meeting(d, meeting, rerender(meeting, cfg.user_name))
+    (d / RECORDING_LOCK).unlink(missing_ok=True)
+    log.info("%s: its recording was cut off before the wrap-up; ended at its last words (%.0f s)", d.name, spoken)
+    return meeting
+
+
 # --------------------------------------------------------------------- the app's view
 
 
@@ -202,6 +235,9 @@ class MeetingsHost(Protocol):
     def assistant(self) -> Assistant | None: ...
 
     def track(self, task: asyncio.Task[Any]) -> None: ...
+
+    # optional: ``assistants`` — the running assistant and earlier ones still finishing a meeting's
+    # agents after a restart (AppHost); without it, only ``assistant``
 
 
 @dataclass
@@ -234,10 +270,12 @@ class Meetings:
     # ---------------------------------------------------------------- lookups
 
     def _sessions(self) -> list[MeetingSession]:
-        a = self.host.assistant
-        if a is None:
-            return []
-        return [s for s in [a.current, *a.finished_meetings] if s is not None]
+        # after a restart, the previous assistant may still be finishing a meeting's agents: that
+        # meeting is still held in memory (and saved from there), so it is changed there too
+        assistants = getattr(self.host, "assistants", None)
+        if assistants is None:
+            assistants = [self.host.assistant] if self.host.assistant is not None else []
+        return [s for a in assistants for s in [a.current, *a.finished_meetings] if s is not None]
 
     def live_session(self, folder: str) -> MeetingSession | None:
         for s in self._sessions():
@@ -295,6 +333,8 @@ class Meetings:
             if s is not None:  # fresher than its file, which is saved a second later
                 rows.append((summary(s.meeting, d, self.cfg.user_name, live=not s.finished), _search_text(s.meeting, d)))
             elif (hit := self._summary(d)) is not None:
+                if hit[0]["in_progress"] and self._recover(d.name, d) is not None:
+                    hit = self._summary(d) or hit  # cut off, and ended just now
                 rows.append(hit)
         needle = q.strip().casefold()
         if needle:
@@ -302,10 +342,37 @@ class Meetings:
         rows.sort(key=lambda r: r[0]["started_at"], reverse=True)
         return {"meetings": [r[0] for r in rows[offset : offset + limit]], "total": len(rows)}
 
+    def _recover(self, folder: str, d: Path) -> Meeting | None:
+        """End ``folder``'s meeting if its recording was cut off (:func:`finish_interrupted`); never one
+        this app holds in memory or has work in flight on."""
+        if folder in self._held or self.live_session(folder) is not None:
+            return None
+        meeting = finish_interrupted(self.cfg, d)
+        if meeting is not None:
+            self._cache.pop(folder, None)  # a coarse file clock could leave the old mtime
+            self.host.bus.publish("meeting.saved", meeting_id=meeting.id, folder=folder)
+        return meeting
+
+    def recover_interrupted(self) -> list[str]:
+        """At start-up: end the meetings a crash or a force quit left open (their ``.recording`` lock
+        file stayed behind, unlocked). Returns their folders. Older ones without a lock file are ended
+        when they are listed or opened."""
+        done = []
+        for d in list_sessions(self.cfg.data_path):
+            if (d / RECORDING_LOCK).exists() and self._recover(d.name, d) is not None:
+                done.append(d.name)
+        return done
+
     def detail(self, folder: str) -> dict[str, Any]:
         d = resolve_folder(self.cfg, folder)
         s = self.live_session(folder)
         meeting = s.meeting if s is not None else self._load(folder)[0]
+        if s is None and meeting.ended_at is None:
+            meeting = self._recover(folder, d) or meeting
+            if meeting.ended_at is None:  # being recorded elsewhere: its transcript file is the up-to-date one
+                heard = read_transcript(d)
+                if len(heard) > len(meeting.segments):
+                    meeting = meeting.model_copy(update={"segments": heard})
         return {
             "meeting": meeting.model_dump(mode="json"),
             "notes_markdown": notes_markdown(d, meeting),
@@ -316,7 +383,9 @@ class Meetings:
     def _editable(self, folder: str) -> tuple[Meeting, Path]:
         meeting, d = self._load(folder)
         if meeting.ended_at is None:
-            raise MeetingBusy("this meeting is still being recorded by another voicestream (end it there first)")
+            if self._recover(folder, d) is None:
+                raise MeetingBusy("this meeting is still being recorded by another voicestream (end it there first)")
+            meeting, d = self._load(folder)
         return meeting, d
 
     # -------------------------------------------------------------------- edit
@@ -335,9 +404,8 @@ class Meetings:
 
     def edit_item(self, folder: str, item_id: str, **fields: Any) -> dict[str, Any]:
         s = self.live_session(folder)
-        a = self.host.assistant
-        if s is not None and a is not None:
-            return a.edit_item(item_id, meeting_id=s.meeting.id, **fields)
+        if s is not None:
+            return s.app.edit_item(item_id, meeting_id=s.meeting.id, **fields)  # its own assistant: maybe not the running one
         meeting, d = self._editable(folder)
         if item_id not in meeting.items:
             raise KeyError(item_id)
@@ -349,9 +417,8 @@ class Meetings:
 
     def dismiss_item(self, folder: str, item_id: str, dismissed: bool = True) -> dict[str, Any]:
         s = self.live_session(folder)
-        a = self.host.assistant
-        if s is not None and a is not None:
-            a.dismiss_item(item_id, dismissed=dismissed, meeting_id=s.meeting.id)
+        if s is not None:
+            s.app.dismiss_item(item_id, dismissed=dismissed, meeting_id=s.meeting.id)
             return s.meeting.items[item_id].model_dump(mode="json")
         meeting, d = self._editable(folder)
         if item_id not in meeting.items:
@@ -411,7 +478,9 @@ class Meetings:
             )
         meeting, d = self._load(folder)
         if meeting.ended_at is None and not force:
-            raise MeetingBusy("this meeting is still in progress in another voicestream: end it there first")
+            if self._recover(folder, d) is None:
+                raise MeetingBusy("this meeting is still in progress in another voicestream: end it there first")
+            meeting, d = self._load(folder)
         held = self._hold(folder, meeting, d)
         try:
             async with held.lock:  # a second push waits, then finds the items already pushed

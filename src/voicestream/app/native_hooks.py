@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -105,6 +106,36 @@ def microphone_status() -> str:
     return status
 
 
+_device_observers: list[Any] = []  # AppKit doesn't keep the observer tokens alive
+
+
+def watch_audio_devices(callback: Callable[[], None]) -> bool:
+    """Call ``callback`` (from any thread) when an audio input is connected or removed — AirPods out
+    of their case — so the app looks for a microphone that wasn't there at once, rather than at its
+    next periodic look (:class:`voicestream.app.host.ChosenMic`). Returns whether it is watching
+    (off macOS, or without AVFoundation: ``False``)."""
+    av = _avfoundation()
+    if av is None:
+        return False
+
+    def changed(_note: Any) -> None:
+        try:
+            callback()
+        except Exception:  # noqa: BLE001 - an exception must not cross into Objective-C
+            log.debug("audio device callback failed", exc_info=True)
+
+    try:
+        import Foundation
+
+        center = Foundation.NSNotificationCenter.defaultCenter()
+        for name in (av.AVCaptureDeviceWasConnectedNotification, av.AVCaptureDeviceWasDisconnectedNotification):
+            _device_observers.append(center.addObserverForName_object_queue_usingBlock_(name, None, None, changed))
+    except Exception as exc:  # noqa: BLE001 - the periodic look still finds the microphone
+        log.warning("not watching for audio devices: %s", exc)
+        return False
+    return True
+
+
 # ------------------------------------------------------------- launch at login
 
 
@@ -129,8 +160,7 @@ def app_location_problem() -> str | None:
     app = bundle_path()
     if app is None:
         return None
-    where = str(app)
-    if "/AppTranslocation/" in where:
+    if "AppTranslocation" in app.parts:
         return (
             "Voicestream is running from a temporary copy macOS made of the download: "
             "drag it to the Applications folder and open it from there."

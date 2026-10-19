@@ -270,6 +270,16 @@ class _Api:
             raise NotListening()
         return a
 
+    def holder(self, meeting_id: str | None) -> Assistant:
+        """The assistant holding ``meeting_id`` (default: the running one). After a stop or restart an
+        earlier one may still be finishing that meeting's agents (``AppHost.assistants``): approving,
+        editing or pushing its items goes through it, not through a newer one that never had it."""
+        if meeting_id:
+            for a in getattr(self.host, "assistants", ()):
+                if any(s is not None and s.meeting.id == meeting_id for s in [a.current, *a.finished_meetings]):
+                    return a
+        return self.assistant
+
     @property
     def data_root(self) -> Path:
         return self.host.cfg.data_path  # follows a data_dir changed in the app's settings
@@ -402,29 +412,29 @@ class _Api:
     async def edit_item(self, request: Request) -> JSONResponse:
         item_id, meeting_id = _target(request)
         fields = (await _parse(request, ItemEdit)).model_dump(mode="json", exclude_unset=True)
-        return JSONResponse(self.assistant.edit_item(item_id, meeting_id=meeting_id, **fields))
+        return JSONResponse(self.holder(meeting_id).edit_item(item_id, meeting_id=meeting_id, **fields))
 
     async def push(self, request: Request) -> JSONResponse:
         item_id, meeting_id = _target(request)
-        return JSONResponse({"results": await self.assistant.push_item(item_id, meeting_id=meeting_id)})
+        return JSONResponse({"results": await self.holder(meeting_id).push_item(item_id, meeting_id=meeting_id)})
 
     async def dismiss(self, request: Request) -> JSONResponse:
         item_id, meeting_id = _target(request)
-        return _outcome(self.assistant.dismiss_item(item_id, dismissed=True, meeting_id=meeting_id), "item not found")
+        return _outcome(self.holder(meeting_id).dismiss_item(item_id, dismissed=True, meeting_id=meeting_id), "item not found")
 
     async def restore(self, request: Request) -> JSONResponse:
         item_id, meeting_id = _target(request)
-        return _outcome(self.assistant.dismiss_item(item_id, dismissed=False, meeting_id=meeting_id), "item not found")
+        return _outcome(self.holder(meeting_id).dismiss_item(item_id, dismissed=False, meeting_id=meeting_id), "item not found")
 
     async def run_agent(self, request: Request) -> JSONResponse:
         item_id, meeting_id = _target(request)
         body = await _parse(request, AgentApproval)
-        ok = self.assistant.approve_agent(item_id, prompt=body.prompt or None, meeting_id=meeting_id)
+        ok = self.holder(meeting_id).approve_agent(item_id, prompt=body.prompt or None, meeting_id=meeting_id)
         return _outcome(ok, "nothing to run: no agent task, already queued or running, or the meeting has closed")
 
     async def reject_agent(self, request: Request) -> JSONResponse:
         item_id, meeting_id = _target(request)
-        ok = self.assistant.reject_agent(item_id, meeting_id=meeting_id)
+        ok = self.holder(meeting_id).reject_agent(item_id, meeting_id=meeting_id)
         return _outcome(ok, "only a suggested or failed agent task can be rejected")
 
     async def end_meeting(self, request: Request) -> JSONResponse:

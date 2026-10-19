@@ -352,3 +352,28 @@ def test_prefs_defaults_save_and_validation(tmp_path: Path) -> None:
     path.write_text("{not json", encoding="utf-8")
     assert prefs_mod.load_prefs(path) == prefs_mod.Prefs()  # a broken file never stops the app
     assert prefs_mod.prefs_path() == Path("~/.voicestream/app.json").expanduser()
+
+
+def test_a_key_the_keychain_refuses_is_asked_for_once_per_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Refusing(FakeKeychain):
+        """After an update macOS asks again for each item; Deny was clicked for one."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.asked: list[str] = []
+
+        def get_password(self, service: str, name: str) -> str | None:
+            self.asked.append(name)
+            if name == "HUBSPOT_TOKEN":
+                raise PermissionError("User canceled the operation")
+            return super().get_password(service, name)
+
+    kc = Refusing()
+    monkeypatch.setattr(secrets, "_keyring", lambda: kc)
+    monkeypatch.setattr(secrets, "_UNREADABLE", set())
+    secrets.load_into_env()
+    secrets.load_into_env()  # every settings save reloads: the prompt must not come back each time
+    assert kc.asked.count("HUBSPOT_TOKEN") == 1 and secrets.unreadable() == ["HUBSPOT_TOKEN"]
+    assert "HUBSPOT_TOKEN" in secrets.unreadable_message("HUBSPOT_TOKEN")
+    secrets.set_secret("HUBSPOT_TOKEN", "pat-again")  # pasted again in Settings: this build may read it
+    assert secrets.unreadable() == [] and os.environ["HUBSPOT_TOKEN"] == "pat-again"

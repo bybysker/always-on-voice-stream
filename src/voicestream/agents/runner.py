@@ -23,6 +23,7 @@ import asyncio
 import logging
 import os
 import re
+import shutil
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -154,6 +155,34 @@ def _read_summary(workspace: Path, fallback: str | None) -> str:
 def secret_files(cfg: Config) -> list[Path]:
     """The ``.env`` files voicestream reads keys from (see :func:`~voicestream.config.load_config`)."""
     return list(dict.fromkeys(p / ".env" for p in (Path.cwd(), cfg.data_path, Path("~/.voicestream").expanduser())))
+
+
+def _bundled_cli() -> Path | None:
+    """The Claude Code CLI shipped inside the claude-agent-sdk wheel (``_bundled/claude``)."""
+    try:
+        import claude_agent_sdk
+    except ImportError:
+        return None
+    return Path(claude_agent_sdk.__file__).parent / "_bundled" / ("claude.exe" if os.name == "nt" else "claude")
+
+
+def find_claude_cli() -> str | None:
+    """The Claude Code CLI the Agent SDK would start, looked up where it looks (claude-agent-sdk 0.2.x
+    ``SubprocessCLITransport._find_cli``), or ``None``. The Mac app leaves the SDK's 200 MB copy out
+    unless built with ``VOICESTREAM_BUNDLE_AGENT_CLI=1``, and a fresh Mac has none of its own."""
+    home = Path.home()
+    candidates = [_bundled_cli()]
+    if (found := shutil.which("claude")) and not (os.name == "nt" and found.lower().endswith((".cmd", ".bat"))):
+        candidates.append(Path(found))  # the SDK refuses npm's claude.cmd shim on Windows
+    if os.name == "nt":
+        candidates.append(home / ".local/bin/claude.exe")
+    else:
+        candidates += [home / ".npm-global/bin/claude", Path("/usr/local/bin/claude"), home / ".local/bin/claude",
+                       home / "node_modules/.bin/claude", home / ".yarn/bin/claude", home / ".claude/local/claude"]
+    for path in candidates:
+        if path is not None and path.is_file():
+            return str(path)
+    return None
 
 
 class AgentSDKEngine(Engine):
@@ -351,7 +380,14 @@ class AgentRunner:
 
     def engine(self) -> Engine:
         if self._engine is None:
-            if self.ac.engine == "api":
+            use_api = self.ac.engine == "api"
+            if not use_api and self._llm is not None and find_claude_cli() is None:
+                # without the CLI every task would fail at once with "npm install -g @anthropic-ai/claude-code",
+                # which someone who just installed the app can't act on: draft with one Claude call instead
+                log.info("agents: Claude Code isn't installed, so agents draft their result with a single "
+                         "Claude call, without web search (as with agents.engine = 'api')")
+                use_api = True
+            if use_api:
                 if self._llm is None:
                     raise RuntimeError("agents.engine = 'api' needs a Claude API key")
                 price = self.costs.llm_cost if self.costs else None

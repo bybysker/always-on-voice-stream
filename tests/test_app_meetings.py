@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import sys
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -20,7 +24,8 @@ from voicestream.costs import CostMeter
 from voicestream.events import EventBus
 from voicestream.models import Item, ItemKind, ItemStatus, Meeting
 from voicestream.sinks.base import Sink, SinkConfig
-from voicestream.storage import atomic_write, load_meeting
+from voicestream import storage
+from voicestream.storage import RECORDING_LOCK, SessionStore, atomic_write, is_recording, load_meeting
 
 
 class Rec(Sink):
@@ -254,3 +259,101 @@ async def test_a_meeting_held_in_memory_is_changed_there(cfg: Config) -> None:
         await asyncio.wait_for(run, 30)
     finally:
         run.cancel()
+
+
+# ------------------------------------------------------------- cut-off recordings
+
+_RECORDER = """
+import os, sys
+from datetime import datetime, timezone
+from pathlib import Path
+from voicestream.models import Item, ItemKind, Meeting, TranscriptSegment
+from voicestream.storage import SessionStore
+
+root, mode = Path(sys.argv[1]), sys.argv[2]
+meeting = Meeting(started_at=datetime(2026, 10, 16, 9, 0, tzinfo=timezone.utc))
+store = SessionStore(root, meeting)
+meeting.items["A1"] = Item(id="A1", kind=ItemKind.ACTION, title="Send the deck", owner="Alex", confidence=0.9)
+store.save()  # meeting.json is saved when items change, not for every line
+for i in range(5):
+    store.append_segment(TranscriptSegment(source="mic", speaker="Me", text=f"line {i}", t_start=i * 10.0,
+                                           t_end=i * 10.0 + 8.0))
+print(store.dir.name, flush=True)
+if mode == "crash":
+    os._exit(1)  # no wrap-up at all: what a force quit, a crash or a power cut leaves behind
+sys.stdin.readline()  # still recording, until told to go away
+"""
+
+
+def _recorder(cfg: Config, mode: str) -> subprocess.Popen[str]:
+    """Another voicestream process recording a meeting into ``cfg``'s data folder."""
+    return subprocess.Popen([sys.executable, "-c", _RECORDER, str(cfg.data_path), mode], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, text=True)
+
+
+def crashed_meeting(cfg: Config) -> str:
+    """The folder of a meeting whose recording process died mid-meeting."""
+    proc = _recorder(cfg, "crash")
+    out, _ = proc.communicate(timeout=60)
+    return out.strip()
+
+
+async def test_a_meeting_cut_off_by_a_crash_can_be_finished(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    rec = Rec(cfg)
+    monkeypatch.setattr("voicestream.sinks.base.build_sinks", lambda app, only=None: [rec])
+    folder = crashed_meeting(cfg)
+    host = StubHost(cfg)
+    m = Meetings(host)
+    row = next(r for r in m.list()["meetings"] if r["folder"] == folder)
+    # ended at its last words, not "in progress in another voicestream" for ever
+    assert not row["in_progress"] and row["interrupted"] and row["duration_s"] == 48.0 and row["has_notes"]
+    detail = m.detail(folder)["meeting"]
+    assert detail["ended_at"].startswith("2026-10-16T09:00:48") and detail["interrupted"]
+    assert [s["text"] for s in detail["segments"]] == [f"line {i}" for i in range(5)]  # the whole transcript
+    assert not (cfg.data_path / "sessions" / folder / ".recording").exists()
+    assert m.edit_item(folder, "A1", status="done")["status"] == "done"  # editable…
+    result = await m.push(folder)  # …its to-dos can be sent…
+    assert result["errors"] == [] and ("create", "A1") in rec.calls
+    m.start_summarize(folder)  # …and its notes rewritten
+    await asyncio.gather(*host.tasks)
+    assert "error" not in [e for e in host.bus.history if e.type == "meeting.notes_updated"][-1].data
+
+
+async def test_a_meeting_another_voicestream_records_is_left_alone(cfg: Config) -> None:
+    proc = _recorder(cfg, "record")
+    try:
+        assert proc.stdout is not None
+        folder = proc.stdout.readline().strip()
+        m = Meetings(StubHost(cfg))
+        assert m.list()["meetings"][0]["in_progress"] and m.recover_interrupted() == []
+        with pytest.raises(MeetingBusy):
+            m.edit_item(folder, "A1", title="x")
+        with pytest.raises(MeetingBusy):
+            await m.push(folder)
+        assert len(m.detail(folder)["meeting"]["segments"]) == 5  # read from its transcript as it records
+        assert load_meeting(cfg.data_path / "sessions" / folder)[0].ended_at is None  # untouched
+    finally:
+        assert proc.stdin is not None
+        proc.stdin.close()
+        proc.wait(30)
+    # it went away without wrapping the meeting up: now it is ended here
+    assert Meetings(StubHost(cfg)).recover_interrupted() == [folder]
+
+
+def test_the_recording_lock_follows_the_session(cfg: Config) -> None:
+    store = SessionStore(cfg.data_path, Meeting())
+    assert is_recording(store.dir)  # this process holds it: a second look sees it taken
+    store.close()  # the meeting is over
+    assert not (store.dir / RECORDING_LOCK).exists()
+    store = SessionStore(cfg.data_path, Meeting())
+    os.close(store._lock_fd)  # its process died: the OS drops the lock, the file stays
+    store._lock_fd = None
+    assert (store.dir / RECORDING_LOCK).exists() and not is_recording(store.dir)
+    # a folder from a voicestream without the lock: busy while it was written to recently
+    old = cfg.data_path / "sessions" / "2026-01-01_000000"
+    old.mkdir(parents=True)
+    (old / "transcript.jsonl").write_text("", encoding="utf-8")
+    assert is_recording(old)
+    stale = time.time() - storage.UNLOCKED_STALE_S - 60
+    os.utime(old / "transcript.jsonl", (stale, stale))
+    assert not is_recording(old)

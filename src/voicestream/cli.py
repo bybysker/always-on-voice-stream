@@ -248,10 +248,11 @@ def cmd_sessions(args: argparse.Namespace) -> int:
 
 
 def _in_progress(folder: Path) -> bool:
-    from .storage import load_meeting
+    """Being recorded right now. A meeting a crash cut off has no end either, but nobody records it."""
+    from .storage import is_recording, load_meeting
 
     try:
-        return load_meeting(folder)[0].ended_at is None
+        return load_meeting(folder)[0].ended_at is None and is_recording(folder)
     except Exception:  # noqa: BLE001
         return False
 
@@ -315,9 +316,14 @@ def cmd_push(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     meeting, folder = load_meeting(_resolve_session(cfg, args.session))
     if meeting.ended_at is None and not args.force:
-        print(f"error: {folder.name} is still in progress (is `voicestream run` recording it?). "
-              "End the meeting first, or pass --force.", file=sys.stderr)
-        return 2
+        if _in_progress(folder):
+            print(f"error: {folder.name} is still in progress (is `voicestream run` recording it?). "
+                  "End the meeting first, or pass --force.", file=sys.stderr)
+            return 2
+        from .app.meetings import finish_interrupted
+
+        meeting = finish_interrupted(cfg, folder) or meeting  # cut off by a crash: end it, then push
+        print(f"{folder.name}: its recording was cut off; ended at its last words")
     sinks = build_sinks(cfg, only=args.sink or None)
     if not sinks:
         print("no enabled sinks (configure [sinks.<name>] in voicestream.toml)")

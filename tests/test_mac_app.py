@@ -106,6 +106,9 @@ class FakeHost:
     async def listen_stop(self, force: bool = False) -> None:
         self.calls.append(("listen_stop", force))
 
+    async def listen_restart(self, force: bool = False) -> None:
+        self.calls.append(("listen_restart", force))
+
     def update_prefs(self, changes: dict[str, Any]) -> None:
         self.calls.append(("update_prefs", changes))
 
@@ -496,7 +499,18 @@ def test_closing_the_window_hides_it_and_the_dock_icon(host: FakeHost, appkit: R
     assert "unhide_" in appkit.names() and ("activateIgnoringOtherApps_", (True,)) in appkit.calls
     assert shell.window.native.names()[-1] == "makeKeyAndOrderFront_"
     shell.quitting = True
-    assert shell._on_closing() is None  # when quitting, the window may really close
+    assert shell._on_closing() is None  # pywebview's own quit (no delegate of ours) needs it to really close
+
+
+def test_closing_the_window_while_our_delegate_wraps_up_a_quit_only_hides_it(
+        host: FakeHost, appkit: Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Closing the last window makes pywebview detach the app delegate: during our quit (up to ~35 s)
+    that would skip applicationWillTerminate: (exit handlers, whisper-server cleanup)."""
+    monkeypatch.setattr(native, "_PATCHED", True)
+    shell = _shell(host)
+    shell.quitting = True
+    assert shell._on_closing() is False
+    assert shell.window.native.names() == ["orderOut_"]
 
 
 def test_menu_actions_only_post_to_the_host(host: FakeHost, appkit: Recorder) -> None:
@@ -514,10 +528,13 @@ def test_menu_actions_only_post_to_the_host(host: FakeHost, appkit: Recorder) ->
         shell.state = _state(state)
         shell.on_menu(key)
     assert _wait(lambda: len(host.calls) == 5 and ended)
+    # "error" may leave half the assistant running (the microphone gave up, meeting audio still
+    # recorded): "Start listening" there restarts it, as starting would do nothing
     assert host.calls == [("listen_pause", None), ("listen_resume", None), ("listen_start", None),
-                          ("listen_start", None), ("listen_stop", False)]
+                          ("listen_restart", False), ("listen_stop", False)]
     shell.on_menu("quit")
     assert appkit.names() == ["terminate_"]
+    assert shell.quitting  # without our delegate, pywebview's quit asks the window: it must let go
 
 
 def test_quit_while_listening_asks_then_stops_gracefully(host: FakeHost, appkit: Recorder,
@@ -567,6 +584,185 @@ def test_will_terminate_finishes_the_selftest_report(host: FakeHost, tmp_path: P
     assert json.loads(report.read_text())["quit"] == {"graceful": True, "shutdown_s": 0.4}
     assert (tmp_path / "r.json.phase").read_text().strip() == "done"
     assert ran == ["atexit"]
+
+
+class FakeNSObject:
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """PyObjC's rule when it builds a class (objc.BadPrototypeError): a method that overrides one
+        the class already has must keep that method's encoding."""
+        super().__init_subclass__(**kwargs)
+        for name, fn in vars(cls).items():
+            mine = getattr(fn, "signature", None)
+            inherited = next((vars(base)[name] for base in cls.__mro__[1:] if name in vars(base)), None)
+            theirs = getattr(inherited, "signature", None)
+            if mine is not None and theirs is not None and mine != theirs:
+                raise RuntimeError(f"objc.BadPrototypeError: {name} has signature that is not compatible "
+                                   f"with ObjC runtime: {theirs!r} != {mine!r}")
+
+    @classmethod
+    def alloc(cls) -> Any:
+        return cls.__new__(cls)
+
+    def init(self) -> Any:
+        return self
+
+
+@pytest.fixture
+def pyobjc(monkeypatch: pytest.MonkeyPatch, appkit: Recorder) -> Any:
+    """Stand-ins for objc (typedSelector records the encoding), Foundation, webview and pywebview's
+    Cocoa backend, with the classes the shell defines once made fresh for each test."""
+    def typed_selector(signature: bytes) -> Any:
+        def mark(fn: Any) -> Any:
+            fn.signature = signature
+            return fn
+
+        return mark
+
+    objc = types.SimpleNamespace(typedSelector=typed_selector, _C_NSUInteger=b"Q", _C_NSBOOL=b"Z")  # 64-bit
+    center = Recorder()
+    foundation = types.SimpleNamespace(NSObject=FakeNSObject,
+                                       NSNotificationCenter=types.SimpleNamespace(defaultCenter=lambda: center))
+
+    class AppDelegate(FakeNSObject):  # pywebview's own: only applicationShouldTerminate_ (asks the windows)
+        @typed_selector(b"I@:@")  # the encoding PyObjC 12.2's AppKit metadata gave it on the macOS runner
+        def applicationShouldTerminate_(self, app: Any) -> bool:
+            return True
+
+    browser_view = types.SimpleNamespace(AppDelegate=AppDelegate, _shared_app_delegate=None)
+    cocoa = types.ModuleType("webview.platforms.cocoa")
+    cocoa.BrowserView = browser_view  # type: ignore[attr-defined]
+    started: list[dict[str, Any]] = []
+
+    class Hook(list):  # pywebview's events: ``window.events.closing += handler``
+        def __iadd__(self, fn: Any) -> Any:
+            self.append(fn)
+            return self
+
+    def create_window(*args: Any, **kwargs: Any) -> Any:
+        return types.SimpleNamespace(events=types.SimpleNamespace(before_show=Hook(), closing=Hook()), native=Recorder())
+
+    def start(**kwargs: Any) -> None:  # the delegate class pywebview would instantiate now
+        started.append({**kwargs, "delegate_class": browser_view.AppDelegate})
+
+    webview = types.ModuleType("webview")
+    webview.create_window = create_window  # type: ignore[attr-defined]
+    webview.start = start  # type: ignore[attr-defined]
+    platforms = types.ModuleType("webview.platforms")
+    platforms.cocoa = cocoa  # type: ignore[attr-defined]
+    for name, module in (("objc", objc), ("Foundation", foundation), ("webview", webview),
+                         ("webview.platforms", platforms), ("webview.platforms.cocoa", cocoa)):
+        monkeypatch.setitem(sys.modules, name, module)
+    for name, value in (("_PATCHED", False), ("_DELEGATE_CLASS", None), ("_TARGET_CLASS", None), ("_SHELL", None)):
+        monkeypatch.setattr(native, name, value)
+    monkeypatch.setattr(native_hooks, "app_support_dir", lambda: Path.home() / "vs-support")
+    return types.SimpleNamespace(objc=objc, base=AppDelegate, browser_view=browser_view, center=center, started=started)
+
+
+def test_app_delegate_is_a_subclass_with_the_runtime_encodings(host: FakeHost, pyobjc: Any,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """The macOS CI run: PyObjC refused the old objc.Category whole (BadPrototypeError, ``I@:@ != Q@:@``:
+    pywebview's applicationShouldTerminate: is b"I@:@", ours said b"Q@:@"), so Dock-reopen and our quit
+    were missing and the self-test hung on quitting. A subclass meets the same rule (the fake objc
+    enforces it), so the override carries no encoding of its own: PyObjC copies pywebview's."""
+    native.install_app_delegate(pyobjc.browser_view)
+    cls = pyobjc.browser_view.AppDelegate
+    assert cls is not pyobjc.base and issubclass(cls, pyobjc.base) and cls.__name__ == "VoicestreamAppDelegate"
+    assert not hasattr(vars(cls)["applicationShouldTerminate_"], "signature")  # inherits b"I@:@"
+    assert cls.applicationShouldHandleReopen_hasVisibleWindows_.signature == b"Z@:@Z"
+    assert cls.applicationWillTerminate_.signature == b"v@:@"
+    assert pyobjc.base().applicationShouldTerminate_(None) is True  # pywebview's own class is left alone
+    native.install_app_delegate(pyobjc.browser_view)  # once
+    assert pyobjc.browser_view.AppDelegate is cls
+
+    shell = _shell(host)
+    monkeypatch.setattr(native, "_SHELL", shell)
+    seen: list[str] = []
+    monkeypatch.setattr(shell, "should_terminate", lambda: seen.append("terminate") or native.TERMINATE_LATER)
+    monkeypatch.setattr(shell, "show_window", lambda: seen.append("show"))
+    monkeypatch.setattr(shell, "will_terminate", lambda: seen.append("will_terminate"))
+    delegate = cls.alloc().init()
+    assert delegate.applicationShouldTerminate_(None) == native.TERMINATE_LATER
+    assert delegate.applicationShouldHandleReopen_hasVisibleWindows_(None, False) is False
+    delegate.applicationWillTerminate_(None)
+    assert seen == ["terminate", "show", "will_terminate"] and delegate.voicestreamPatched()
+
+
+def test_the_delegate_is_in_place_before_the_window_opens(host: FakeHost, pyobjc: Any) -> None:
+    host.thread.start()
+    shell = native.MacShell(host, f"http://127.0.0.1:1/app?token={TOKEN}")
+    assert shell.run() == 0
+    (started,) = pyobjc.started
+    assert started["delegate_class"].__name__ == "VoicestreamAppDelegate" and shell.delegate_error is None
+    # the shell also hears NSApplicationWillTerminateNotification itself, whichever delegate the app has
+    ((name, (target, selector, notification, _obj)),) = pyobjc.center.calls
+    assert (name, selector, notification, target.shell) == ("addObserver_selector_name_object_", "appWillTerminate:",
+                                                          "NSApplicationWillTerminateNotification", shell)
+    assert host.calls == [("shutdown", False)]  # the run loop stopped without AppKit ending the process
+
+
+def test_a_failed_delegate_install_is_reported_and_quitting_still_works(
+        host: FakeHost, pyobjc: Any, appkit: Recorder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The self-test with no delegate of ours: the failure is in the report, its quit goes through
+    pywebview's own handler (the window lets go), and the will-terminate notification still stops the
+    host, writes the last report and ends the process with the self-test's status."""
+    typed_selector = pyobjc.objc.typedSelector
+
+    def refuse(signature: bytes) -> Any:
+        if signature == native.SIG_REOPEN:  # as if this PyObjC disagreed with the runtime
+            raise RuntimeError("objc.BadPrototypeError: has signature that is not compatible with ObjC runtime")
+        return typed_selector(signature)
+
+    pyobjc.objc.typedSelector = refuse
+    report = tmp_path / "selftest.json"
+    shell = native.MacShell(host, host.run_in_thread(), selftest=0.0, report_path=report)
+    shell.run()
+    assert "BadPrototypeError" in (shell.delegate_error or "") and not native._PATCHED
+    assert pyobjc.started[0]["delegate_class"] is pyobjc.base  # pywebview's own, still usable
+    host.calls.clear()
+    loaded = threading.Event()
+    loaded.set()
+    page = json.dumps({"ready": "complete", "path": "/app", "body_chars": 120})
+    shell.window = types.SimpleNamespace(events=types.SimpleNamespace(loaded=loaded), native=Recorder(isMiniaturized=False),
+                                         run_js=lambda script: page)
+    monkeypatch.setattr(native, "time", types.SimpleNamespace(monotonic=time.monotonic, sleep=lambda s: None))
+    try:
+        shell._selftest()
+        data = json.loads(report.read_text())
+        assert data["delegate"]["install_error"] == shell.delegate_error
+        assert data["checks"]["app_delegate_patched"] is False and data["ok"] is False and shell.exit_code == 1
+        assert data["checks"]["window_loaded"] and data["checks"]["page_rendered"]
+        assert appkit.names()[-1] == "terminate_" and shell.quitting  # quit like the menu: the window lets go
+        assert shell._on_closing() is None
+        assert shell._watchdog is not None and shell._watchdog.interval == native.SELFTEST_QUIT_S  # a deadline on quitting
+
+        exits: list[int] = []
+        monkeypatch.setattr(native, "os", types.SimpleNamespace(_exit=exits.append))
+        monkeypatch.setattr(native, "_run_exit_handlers", lambda: exits.append(-1))  # not pytest's own!
+        shell.will_terminate()  # from the notification: our applicationShouldTerminate: never ran
+        shell.will_terminate()  # and again from a delegate: once is enough
+        assert host.calls == [("shutdown", False)] and exits == [-1, 1]
+        data = json.loads(report.read_text())
+        assert data["quit"]["delegate"] is False and data["quit"]["graceful"] is True
+        assert (tmp_path / "selftest.json.phase").read_text().strip() == "done"
+    finally:
+        if shell._watchdog is not None:
+            shell._watchdog.cancel()  # it would end this very process
+
+
+def test_the_selftest_ends_the_process_when_quitting_goes_nowhere(host: FakeHost, tmp_path: Path,
+                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    exited = threading.Event()
+    codes: list[int] = []
+    monkeypatch.setattr(native, "os", types.SimpleNamespace(_exit=lambda code: (codes.append(code), exited.set())))
+    report = tmp_path / "selftest.json"
+    shell = _shell(host, selftest=1.0, report_path=report)
+    shell.report = {"ok": True, "checks": {"window_loaded": True}, "errors": []}
+    shell._arm_watchdog(30, "never")
+    shell._arm_watchdog(0.05, "the app did not quit within 50 s")  # re-armed: only the last deadline counts
+    assert exited.wait(5) and codes == [3]
+    data = json.loads(report.read_text())
+    assert data["ok"] is False and data["errors"] == ["the app did not quit within 50 s"]
+    assert (tmp_path / "selftest.json.phase").read_text().strip() == "hung"
 
 
 def test_login_toggle_goes_through_the_host_prefs(host: FakeHost, appkit: Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -692,7 +888,8 @@ def test_login_item_register_and_unregister(bundle: Any) -> None:
     assert bundle.svc.calls == ["register"]
     state = native_hooks.app_support_dir() / "login-item.json"
     assert json.loads(state.read_text())["build"] == native_hooks.build_identity()
-    assert oct(state.stat().st_mode & 0o777) == "0o600"
+    if os.name == "posix":  # Windows has no permission bits
+        assert oct(state.stat().st_mode & 0o777) == "0o600"
     assert native_hooks.set_login_item(False) == "disabled"
     assert bundle.svc.calls == ["register", "unregister"] and not state.exists()
     native_hooks.set_start_at_login(True)  # host.py's hook: no exception when it worked
@@ -720,6 +917,51 @@ def test_login_item_refused(bundle: Any) -> None:
         native_hooks.set_login_item(True)
     with pytest.raises(native_hooks.LoginItemError):
         native_hooks.set_start_at_login(True)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a shell script stands in for whisper-server")
+def test_the_packaged_selftest_checks_its_own_whisper_server(bundle: Any, monkeypatch: pytest.MonkeyPatch,
+                                                            tmp_path: Path) -> None:
+    """CI exports VOICESTREAM_WHISPER_SERVER (the build tree's copy) and find_binary reads it first: the
+    self-test must find the copy inside the app, and run it (--help: no model needed)."""
+    frameworks = bundle.app / "Contents" / "Frameworks"
+    monkeypatch.setattr(sys, "_MEIPASS", str(frameworks), raising=False)
+    monkeypatch.delenv("VOICESTREAM_WHISPER_SERVER", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))  # nor one on PATH
+    assert launcher.whisper_server_check() == {"path": None, "bundled": False, "runs": False, "ok": False,
+                                               "error": "no whisper-server found"}
+    ws = frameworks / "bin" / "whisper-server"
+    ws.parent.mkdir(parents=True)
+    ws.write_text("#!/bin/sh\necho 'usage: whisper-server [options]'\n[ \"$1\" = --help ]\n")
+    ws.chmod(0o755)
+    found = launcher.whisper_server_check()
+    assert found["ok"] and found["bundled"] and found["runs"] and found["path"] == str(ws)
+    assert found["usage"] == "usage: whisper-server [options]" and found["exit_code"] == 0
+
+    outside = tmp_path / "build" / "whisper-server"
+    outside.parent.mkdir()
+    outside.write_text(ws.read_text())
+    outside.chmod(0o755)
+    monkeypatch.setenv("VOICESTREAM_WHISPER_SERVER", str(outside))
+    found = launcher.whisper_server_check()
+    assert found["runs"] and not found["bundled"] and not found["ok"]  # works, but isn't what users get
+
+    monkeypatch.delenv("VOICESTREAM_WHISPER_SERVER")
+    ws.write_text("#!/bin/sh\necho 'dyld: Library not loaded: libggml.dylib' >&2\nexit 134\n")
+    found = launcher.whisper_server_check()
+    assert found["bundled"] and not found["runs"] and not found["ok"]
+    assert found["exit_code"] == 134 and "Library not loaded" in found["usage"]
+
+
+def test_local_speech_to_text_is_offered_where_it_runs(monkeypatch: pytest.MonkeyPatch, host: FakeHost) -> None:
+    monkeypatch.setattr(launcher, "_whisper_server", lambda: "/Applications/Voicestream.app/Contents/Frameworks/bin/whisper-server")
+    assert launcher.local_stt_available("darwin", "arm64")
+    assert not launcher.local_stt_available("darwin", "x86_64")  # the app's server is arm64; Intel: too slow anyway
+    assert launcher.local_stt_available("linux", "x86_64")
+    monkeypatch.setattr(launcher, "_whisper_server", lambda: None)
+    assert not launcher.local_stt_available("darwin", "arm64")
+    launcher._set_capabilities(host)
+    assert host.capabilities["local_stt"] is False
 
 
 def test_app_location_problems(monkeypatch: pytest.MonkeyPatch, mac: None, tmp_path: Path) -> None:
@@ -766,8 +1008,11 @@ def test_half_installed_native_mode_falls_back_to_the_browser(monkeypatch: pytes
     monkeypatch.setattr(native, "run", lambda *a, **k: pytest.fail("native mode must not start"))
     report = tmp_path / "r.json"
     try:
-        assert launcher.main(["--selftest", "0.1", "--selftest-report", str(report)]) == 0
+        # the app still opens (in the browser), but its self-test fails: it was meant to test the window
+        assert launcher.main(["--selftest", "0.1", "--selftest-report", str(report)]) == 1
     finally:
         for h in hosts:
             h.close()
-    assert json.loads(report.read_text())["mode"] == "browser"
+    data = json.loads(report.read_text())
+    assert data["mode"] == "browser" and data["ok"] is False and data["checks"] == {"app_page": True, "api_app": True}
+    assert data["errors"] == ["no native window (No module named 'webview'): fell back to the browser"]

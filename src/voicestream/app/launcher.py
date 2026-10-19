@@ -28,6 +28,7 @@ import logging
 import os
 import platform
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -62,6 +63,7 @@ class Host(Protocol):
     async def listen_pause(self) -> None: ...
     async def listen_resume(self) -> None: ...
     async def listen_stop(self, force: bool = False) -> None: ...
+    async def listen_restart(self, force: bool = False) -> None: ...
 
 
 # ------------------------------------------------------------------- arguments
@@ -123,6 +125,7 @@ def run(args: argparse.Namespace) -> int:
     report = Path(args.selftest_report).expanduser() if args.selftest_report else None
     if args.selftest is not None and report is None:
         report = Path(tempfile.gettempdir()) / "voicestream-selftest.json"
+    fallback = None
     if mode == "native":
         try:
             from . import native
@@ -130,10 +133,10 @@ def run(args: argparse.Namespace) -> int:
             native.preflight()
         except ImportError as exc:  # pywebview or PyObjC half-installed: still usable in the browser
             log.warning("no native window (%s): opening the app in the browser", exc)
-            mode = "browser"
+            mode, fallback = "browser", f"no native window ({exc}): fell back to the browser"
         else:
             return native.run(host, selftest=args.selftest, report_path=report)
-    return serve(host, mode=mode, selftest=args.selftest, report_path=report)
+    return serve(host, mode=mode, selftest=args.selftest, report_path=report, fallback=fallback)
 
 
 def choose_mode(args: argparse.Namespace, platform_name: str | None = None) -> str:
@@ -174,13 +177,23 @@ def make_host(config: str | os.PathLike[str] | None, port: int | None) -> Host:
 
 
 def _set_capabilities(host: Any) -> None:
-    """What the UI may offer: launch at login only exists for the installed app on macOS."""
+    """What the UI may offer: launch at login only exists for the installed app on macOS; the setup
+    suggests speech-to-text on this computer only where it can run."""
     caps = getattr(host, "capabilities", None)
     if not isinstance(caps, dict):
         return
     from . import native_hooks
 
     caps["login_item"] = native_hooks.login_item_status() != "unsupported"
+    caps["local_stt"] = local_stt_available()
+
+
+def local_stt_available(platform_name: str | None = None, machine: str | None = None) -> bool:
+    """A whisper-server is there (in the app: the one it bundles) and, on a Mac, it runs on Apple
+    Silicon: the app's server is arm64, and an Intel Mac would transcribe slower than people talk."""
+    if (platform_name or sys.platform) == "darwin" and (machine or platform.machine()) != "arm64":
+        return False
+    return _whisper_server() is not None
 
 
 def _ensure_std_streams() -> None:
@@ -243,8 +256,13 @@ def serve(
     report_path: Path | None = None,
     stop: StopRequest | None = None,
     open_url: Callable[[str], Any] = webbrowser.open,
+    fallback: str | None = None,
 ) -> int:
-    """Browser and headless mode: keep the host alive until asked to stop, then stop it."""
+    """Browser and headless mode: keep the host alive until asked to stop, then stop it.
+
+    ``fallback``: why native mode, wanted here, couldn't start. The app still opens, but a self-test
+    fails: it is there to test the window and the menu bar (a bundle missing pywebview or a PyObjC
+    framework would otherwise pass, the HTTP checks being all it runs)."""
     stop = stop or StopRequest()
     started = time.monotonic()
     try:
@@ -267,6 +285,8 @@ def serve(
             report = selftest_report(host, url, mode=mode)
             report["http"] = check_http(url)
             report["checks"].update(http_checks(report["http"]))
+            if fallback:
+                report["errors"].append(fallback)
             finish_report(report, started)
             write_report(report_path, report)
             write_phase(report_path, "ready")
@@ -367,6 +387,29 @@ def _whisper_server() -> str | None:
         return None
     found = find_binary(WhisperCppConfig())
     return str(found) if found else None
+
+
+def whisper_server_check(timeout: float = 20.0) -> dict[str, Any]:
+    """For the packaged app's self-test: the whisper-server it finds is its own — inside the
+    bundle, not one that ``$VOICESTREAM_WHISPER_SERVER`` or Homebrew points at — and it runs
+    (``--help`` prints the usage and exits 0; no model needed). ``ok`` when both hold."""
+    found = _whisper_server()
+    out: dict[str, Any] = {"path": found, "bundled": False, "runs": False, "ok": False}
+    if found is None:
+        out["error"] = "no whisper-server found"
+        return out
+    contents = Path(sys.executable).resolve().parent.parent  # Voicestream.app/Contents
+    out["bundled"] = contents.name == "Contents" and Path(found).resolve().is_relative_to(contents)
+    try:
+        proc = subprocess.run([found, "--help"], capture_output=True, text=True, timeout=timeout,  # noqa: S603
+                              stdin=subprocess.DEVNULL, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+    lines = [ln.strip() for ln in (proc.stdout + "\n" + proc.stderr).splitlines() if ln.strip()]
+    out.update(exit_code=proc.returncode, usage=lines[0][:200] if lines else "", runs=proc.returncode == 0)
+    out["ok"] = bool(out["bundled"] and out["runs"])
+    return out
 
 
 def redact(url: str) -> str:

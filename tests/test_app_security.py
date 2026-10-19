@@ -121,7 +121,16 @@ def test_key_values_never_leave_the_store(client: TestClient, host: AppHost, cap
     seen += [r.getMessage() for r in caplog.records]
     assert not any(value in s for s in seen)
     assert value in keys.env_file().read_text(encoding="utf-8")  # the store itself
-    assert oct(keys.env_file().stat().st_mode & 0o777) == "0o600"
+    if os.name == "posix":  # Windows has no permission bits
+        assert oct(keys.env_file().stat().st_mode & 0o777) == "0o600"
+
+
+def test_a_key_saved_in_one_test_is_gone_in_the_next() -> None:
+    """Runs right after the test above, which saved ANTHROPIC_API_KEY through the app: the app writes
+    os.environ directly, and the key used to stay set for the rest of the run (later tests then built a real
+    Claude client with it, and the doctor test failed depending on the order)."""
+    assert "ANTHROPIC_API_KEY" not in os.environ
+    assert os.environ["VOICESTREAM_SECRET_STORE"] == "file"  # what the autouse fixture sets is still there
 
 
 # --------------------------------------------------------- two writes at the same time
@@ -155,7 +164,8 @@ def test_concurrent_private_writes_never_mix(tmp_path: Path, monkeypatch: pytest
         t.join()
     assert errors == [] and path.read_text() in ("A" * 1000, "B" * 10)
     assert [p.name for p in tmp_path.iterdir()] == ["x.toml"]  # no temporary file left behind
-    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    if os.name == "posix":  # Windows has no permission bits
+        assert oct(path.stat().st_mode & 0o777) == "0o600"
 
 
 def test_write_private_never_follows_a_planted_temporary_file(tmp_path: Path) -> None:

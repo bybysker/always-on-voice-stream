@@ -346,6 +346,19 @@ def test_j4_push_last_skips_the_meeting_in_progress(tmp_path: Path, capsys: pyte
     assert load_meeting(live)[0].items["A1"].pushed
 
 
+def test_push_ends_a_meeting_a_crash_cut_off_then_pushes_it(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from voicestream.storage import RECORDING_LOCK
+
+    cfgp = _write_cfg(tmp_path)
+    cut = _saved_meeting(tmp_path / "data", "2026-10-15_100000", ended=False)
+    (cut / RECORDING_LOCK).write_text("")  # its recorder held this lock and died: nobody holds it now
+    assert not cli._in_progress(cut)
+    assert cli.main(["-c", str(cfgp), "push", cut.name]) == 0
+    assert "cut off" in capsys.readouterr().out
+    meeting = load_meeting(cut)[0]
+    assert meeting.ended_at is not None and meeting.interrupted and meeting.items["A1"].pushed
+
+
 def test_j4_running_session_keeps_refs_written_by_another_process(tmp_path: Path) -> None:
     m = Meeting(title="Live")
     m.items["A1"] = Item(id="A1", kind=ItemKind.ACTION, title="Task 1")

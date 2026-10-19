@@ -415,3 +415,36 @@ def test_reveal_elsewhere_opens_the_folder(tmp_path: Path, monkeypatch: pytest.M
     assert desktop.reveal_command(f) == ["xdg-open", str(tmp_path)]
     with pytest.raises(desktop.DesktopError):
         desktop.reveal(tmp_path / "missing")
+
+
+def test_the_settings_screen_shows_a_hand_edited_file(client: TestClient, host: AppHost) -> None:
+    path = host.config_path
+    path.write_text(path.read_text(encoding="utf-8").replace('user_name = "Alex"', 'user_name = "Camille Martin"'),
+                    encoding="utf-8")  # edited by hand, as the app asks for some settings
+    assert client.get("/api/settings").json()["values"]["user_name"] == "Camille Martin"
+    assert host.cfg.user_name == "Camille Martin"
+
+
+def test_a_meeting_cut_off_by_a_crash_is_finished_over_http(client: TestClient, host: AppHost,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    from test_app_meetings import crashed_meeting
+
+    monkeypatch.setattr("voicestream.sinks.base.build_sinks", lambda app, only=None: [Rec(host.cfg)])
+    folder = crashed_meeting(host.cfg)
+    row = next(r for r in client.get("/api/meetings").json()["meetings"] if r["folder"] == folder)
+    assert row["interrupted"] and not row["in_progress"]
+    assert client.post(f"/api/meetings/{folder}/push", json={}).status_code == 200  # no force needed
+    assert client.get(f"/api/meetings/{LIVE_ELSEWHERE}").json()["meeting"]["ended_at"] is None  # recorded elsewhere
+
+
+def test_live_item_routes_reach_the_assistant_holding_the_meeting() -> None:
+    from types import SimpleNamespace
+
+    from voicestream.dashboard.server import _Api
+
+    def assistant(*ids: str) -> Any:
+        return SimpleNamespace(current=None, finished_meetings=[SimpleNamespace(meeting=SimpleNamespace(id=i)) for i in ids])
+
+    new, old = assistant("m3"), assistant("m1", "m2")  # after a restart, the old one finishes m2's agents
+    api = _Api(SimpleNamespace(assistant=new, assistants=[new, old], is_app_host=True), "")
+    assert api.holder("m2") is old and api.holder("m3") is new and api.holder(None) is new and api.holder("m9") is new

@@ -15,14 +15,28 @@ event stream is subscribed to the host's bus and never notices.
 
 Settings and key changes apply at once when no meeting is in progress, else after it ends
 (``restart_pending``): a restart would end the meeting (summary, pushes). The UI offers "apply
-now" (``listen_restart``).
+now" (``listen_restart``). New settings that can't run yet never stop working listening: a speech
+model still downloading is switched to once it is in (:attr:`AppHost.awaiting_model`), anything
+else is a warning until it is fixed. ``voicestream.toml`` edited by hand is read again on Start,
+Stop, restart and when the Settings screen loads (when the file changed); the reads run in a worker
+thread, since loading the keys can wait on a Keychain prompt.
+
+A stop (or restart) waits for the capture to close and the meeting in progress to be wrapped up;
+an ended meeting's agents may work on for many minutes after that, so the assistant then finishes
+them in the background (:attr:`AppHost.assistants`) while listening can start again at once.
+
+The microphone picked in Settings may be a headset that isn't connected: listening goes on with
+the default input (or meeting audio alone) and takes it back when it is (:class:`ChosenMic`).
 
 The native shell talks to the host from its main thread with :meth:`AppHost.run_in_thread`,
 :meth:`AppHost.call` and :meth:`AppHost.add_state_listener`. Optional platform glue lives in
 ``voicestream.app.native_hooks`` when the shell provides it (all functions optional):
 
 * ``microphone_status() -> "granted" | "denied" | "undetermined" | "restricted"`` (AVFoundation);
-* ``set_start_at_login(enabled: bool) -> None`` (SMAppService; raises on failure).
+* ``set_start_at_login(enabled: bool) -> None`` (SMAppService; raises on failure);
+* ``watch_audio_devices(callback: Callable[[], None]) -> bool``: call ``callback`` (from any thread)
+  when an audio device is connected or removed, so a missing microphone is looked for at once
+  rather than at the next periodic look.
 
 The console printer, signal handlers and stdin commands of ``voicestream run`` are not used here.
 """
@@ -32,22 +46,27 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import functools
 import importlib
 import logging
 import os
 import secrets as stdlib_secrets
 import sys
 import threading
+import time
 from collections import deque
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from .. import __version__, stt_models
+from ..audio import CaptureSetupError, Clock
+from ..audio.base import aclose_quietly
+from ..audio.mic import MicSource, resolve_device
 from ..config import Config, ConfigError, DashboardConfig
 from ..costs import CostMeter
 from ..events import EventBus
-from ..models import Event
+from ..models import AudioFrame, Event
 from . import logs
 from . import secrets as keys
 from .meetings import Meetings
@@ -72,6 +91,18 @@ DOWNLOAD_EVENT_S = 0.25
 MAX_WARNINGS = 10
 EXTRA_PATH = ("/opt/homebrew/bin", "/usr/local/bin")
 """A Finder-launched app gets PATH=/usr/bin:/bin:/usr/sbin:/sbin: no ffmpeg, no Homebrew whisper-server."""
+MIC_RETRY_S = 15.0
+"""The chosen microphone isn't connected and nothing records in its place: look for it this often."""
+MIC_RETRY_FALLBACK_S = 60.0
+"""… and while the default input records instead: each look closes it for a moment (see :class:`ChosenMic`)."""
+MIC_STALL_S = 5.0
+"""A device that delivers nothing for this long was unplugged: PortAudio just stops calling back."""
+MIC_MISSING = "Your microphone ("
+"""How the warnings about a microphone that isn't connected start (replaced, then dropped when it is back)."""
+MODEL_WAIT = "The speech-to-text model is still downloading"
+"""How the notices about a speech model listening waits for start."""
+NOT_APPLIED = "Your new settings aren't used yet"
+"""How the warning about saved settings that can't run (listening goes on with the previous ones) starts."""
 
 _STT_KEYS = {"openai": ("OPENAI_API_KEY", "OpenAI"), "openai-realtime": ("OPENAI_API_KEY", "OpenAI"),
              "deepgram": ("DEEPGRAM_API_KEY", "Deepgram")}  # fmt: skip
@@ -79,7 +110,6 @@ _STT_KEYS = {"openai": ("OPENAI_API_KEY", "OpenAI"), "openai-realtime": ("OPENAI
 
 def human_error(exc: BaseException | str) -> str:
     """A message for the person, not the log: what is wrong and where to fix it in the app."""
-    from ..audio import CaptureSetupError
     from ..transcribe import TranscriptionError
 
     text = str(exc) if not isinstance(exc, str) else exc
@@ -131,6 +161,147 @@ def _prepend_path() -> None:
         os.environ["PATH"] = os.pathsep.join([*extra, *parts])
 
 
+def _restart_portaudio() -> None:
+    """PortAudio lists the devices it saw when it started: restart it to see one plugged in since.
+    Closes every PortAudio stream, so only call it with none open."""
+    from ..audio.mic import _sd
+
+    sd = _sd()
+    try:
+        sd._terminate()  # python-sounddevice's own (private) pair, the documented way to rescan
+        sd._initialize()
+    except Exception as exc:  # noqa: BLE001 - a sounddevice without them: the list stays as it was
+        log.debug("could not rescan the audio devices: %s", exc)
+
+
+def _named_device(device: str | int | None) -> bool:
+    """A device chosen by name (``"AirPods"``), the kind that comes and goes; not an index or the default."""
+    return isinstance(device, str) and bool(device.strip()) and not device.strip().isdigit()
+
+
+class ChosenMic(MicSource):
+    """The microphone picked in Settings (``capture.mic.device``), which may not be connected: a
+    headset, AirPods with a flat battery.
+
+    A plain :class:`MicSource` gives up for good when its device is missing (``CaptureSetupError``):
+    no voice of yours for the rest of the day while meeting audio still records. This one goes on —
+    on the default input meanwhile (``capture.mic.use_default_when_missing``), else with nothing from
+    the microphone — and takes your device back once it is there again: looked for every
+    :data:`MIC_RETRY_S` (:data:`MIC_RETRY_FALLBACK_S` while the default input records), at once when
+    the native shell reports a device change (:meth:`poke`), and when it goes quiet mid-meeting.
+    ``on_change(missing, using)`` tells the host (on the loop) when it goes missing or comes back.
+
+    PortAudio's device list is the one it saw when it started, so each look restarts it, which
+    closes every stream it has open: this source closes its own first, and the look is only made
+    when no other source uses PortAudio (``may_rescan``, set by :func:`_default_assistant`).
+    """
+
+    def __init__(self, device: str, clock: Clock, *, use_default: bool, on_change: Callable[[bool, str | None], None],
+                 may_rescan: bool = True) -> None:
+        super().__init__("mic", device=device, clock=clock)
+        self.chosen = device
+        self.use_default = use_default
+        self.on_change = on_change
+        self.may_rescan = may_rescan
+        self.missing = False
+        """The chosen device isn't connected (the default input or nothing records instead)."""
+        self._reported = False
+        self._rescan = False
+        self._last_audio = time.monotonic()
+        self._last_look = time.monotonic()
+        self._wake: asyncio.Event | None = None
+
+    def describe(self) -> str:
+        if self.missing and self._stream is None:
+            return f"{self.name}: input device {self.chosen} (not connected)"
+        return super().describe()
+
+    def push_from_thread(self, data: Any, rate: int) -> None:
+        self._last_audio = time.monotonic()
+        super().push_from_thread(data, rate)
+
+    def _connected(self, rescan: bool) -> bool:
+        if rescan and self.may_rescan:
+            _restart_portaudio()
+        try:
+            resolve_device(self.chosen)
+        except CaptureSetupError:
+            return False
+        return True
+
+    def start_capture(self) -> None:
+        """(Worker thread.) Open the chosen device, else the default input or nothing."""
+        # a second look (after a stall or a failure) starts from a fresh device list: one unplugged since
+        # PortAudio started is still in the old one; the first look only rescans when it needs to
+        rescanned, self._rescan = self._rescan, False
+        self._last_audio = time.monotonic()  # opening isn't a stall
+        found = self._connected(rescan=rescanned)
+        if not found and not rescanned and self.may_rescan:
+            found = self._connected(rescan=True)  # plugged in since PortAudio started?
+        self.missing = not found
+        self.device = self.chosen if found else None  # None: the OS default input
+        if found or self.use_default:
+            super().start_capture()
+        self._last_audio = time.monotonic()
+        self._report()
+
+    def _report(self) -> None:
+        if self.missing == self._reported:
+            return
+        self._reported = self.missing
+        using = self._device_name if self.missing and self._stream is not None else None
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(self.on_change, self.missing, using)
+
+    def poke(self) -> None:
+        """An audio device was connected or removed: look again now (on the loop thread)."""
+        if self._wake is not None:
+            self._wake.set()
+
+    async def frames(self) -> AsyncIterator[AudioFrame]:
+        self._wake = asyncio.Event()
+        watcher = asyncio.ensure_future(self._watch())
+        inner = super().frames()
+        try:
+            async for frame in inner:
+                yield frame
+        finally:
+            watcher.cancel()
+            await aclose_quietly(inner)  # closes the device now, not whenever the generator is collected
+
+    async def _watch(self) -> None:
+        assert self._wake is not None
+        while not self.stopped:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._wake.wait(), timeout=1.0)
+            poked = self._wake.is_set()
+            self._wake.clear()
+            if self.stopped or self._loop is None:
+                return
+            now = time.monotonic()
+            every = MIC_RETRY_FALLBACK_S if self._stream is not None else MIC_RETRY_S
+            stalled = self._stream is not None and now - self._last_audio > MIC_STALL_S
+            if stalled or (self.missing and (poked or now - self._last_look >= every)):
+                await self._look_again()
+
+    async def _look_again(self) -> None:
+        self._last_look = time.monotonic()
+        try:
+            await asyncio.to_thread(self._reopen)
+        except Exception as exc:  # noqa: BLE001 - e.g. the default input failed to open: try again later
+            log.warning("%s: could not open the microphone: %s", self.name, exc)
+            self.missing = True
+            self._report()
+
+    def _reopen(self) -> None:
+        self.stop_capture()
+        # the next device's frames are stamped on the meeting clock from where they begin
+        self._resampler, self._device_rate, self._samples_out, self._t_origin = None, None, 0, None
+        self._rescan = True
+        self.start_capture()
+
+
 class HostError(RuntimeError):
     """A request the host can't carry out right now (the message is for the person)."""
 
@@ -160,7 +331,11 @@ class AppHost:
         self.prefs_path = prefs_path
         self.prefs: Prefs = load_prefs(prefs_path)
         self.bus = EventBus(history=2000)
+        self.warnings: deque[str] = deque(maxlen=MAX_WARNINGS)
         self.config_error: str | None = None
+        self._stamp: tuple[int, int, int] | None = None
+        """The config file's identity when it was last read: a hand edit changes it."""
+        self._warned_keys: set[str] = set()
         self.cfg: Config = self._load_config() or Config()
         self.costs = CostMeter(self.cfg, self.bus)
         self.meetings = Meetings(self)
@@ -175,7 +350,11 @@ class AppHost:
         if self.error:
             self.status = "error"
         self.restart_pending = False
-        self.warnings: deque[str] = deque(maxlen=MAX_WARNINGS)
+        self.awaiting_model: str | None = None
+        """A speech model the settings name that is still downloading: listening switches to it (or
+        starts, see :attr:`_start_when_ready`) once it is in, instead of failing now."""
+        self._start_when_ready = False
+        """Start was asked for while :attr:`awaiting_model` downloads (state "starting" meanwhile)."""
         self.token = stdlib_secrets.token_urlsafe(24)
         self.url: str | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -188,6 +367,11 @@ class AppHost:
         self._stop_pressed = False
         """Stop was asked for (not by a restart): a restart under way must not start listening again."""
         self._last_source_error: str | None = None
+        self._dead_sources: set[str] = set()
+        """Sources of the running assistant that gave up for good (``source.stopped``)."""
+        self._retiring: dict[Assistant, asyncio.Task[None]] = {}
+        """Assistants stopped (or replaced by a restart) whose capture is closed, still finishing an
+        ended meeting's agents in the background (see :meth:`_stop`)."""
         self._factory = assistant_factory or _default_assistant
         self._background: set[asyncio.Task[Any]] = set()
         self._downloads: dict[str, dict[str, Any]] = {}
@@ -199,24 +383,32 @@ class AppHost:
 
     # ------------------------------------------------------------------ config
 
-    def _load_config(self) -> Config | None:
+    def _read_config(self) -> tuple[Config | None, str | None]:
+        """``(config, None)`` or ``(None, the problem)``. Touches no host state: it runs in a worker
+        thread too (loading the keys may wait on a Keychain prompt)."""
         try:
-            cfg = load_app_config(self.config_path)
+            return load_app_config(self.config_path), None
         except (ConfigError, OSError, ValueError) as exc:
-            self.config_error = f"Your settings file has a problem: {exc}"
-            log.error("%s", self.config_error)
-            return None
+            problem = f"Your settings file has a problem: {exc}"
         except RuntimeError as exc:  # Path.expanduser: "~name/…" of an account that doesn't exist
-            self.config_error = (f"Your settings file has a problem: {exc} "
-                                 "(a path starts with ~name/ — write ~/… for your own folder)")
-            log.error("%s", self.config_error)
+            problem = f"Your settings file has a problem: {exc} (a path starts with ~name/ — write ~/… for your own folder)"
+        log.error("%s", problem)
+        return None, problem
+
+    def _config_stamp(self) -> tuple[int, int, int] | None:
+        try:
+            st = self.config_path.stat()
+        except OSError:
             return None
-        self.config_error = None
+        return st.st_ino, st.st_mtime_ns, st.st_size  # the app's own saves replace the file: a new inode
+
+    def _load_config(self) -> Config | None:
+        self._stamp = self._config_stamp()  # before reading: an edit made meanwhile is seen next time
+        cfg, self.config_error = self._read_config()
+        self._warn_unreadable_keys()
         return cfg
 
-    def reload_config(self) -> None:
-        """Re-read the config (after a settings change); the running assistant keeps its own until restarted."""
-        cfg = self._load_config()
+    def _adopt(self, cfg: Config | None) -> None:
         if cfg is None:
             return
         self.cfg = cfg
@@ -224,10 +416,42 @@ class AppHost:
         if self.status == "error" and self.error and self.error.startswith("Your settings file"):
             self.error, self.status = None, "stopped"
 
+    def _warn_unreadable_keys(self) -> None:
+        """Keys the Keychain refused (asked once per launch, see ``secrets.load_into_env``): say so in the banner."""
+        for name in keys.unreadable():
+            if name not in self._warned_keys:
+                self._warned_keys.add(name)
+                self.add_warning(keys.unreadable_message(name))
+
+    def reload_config(self) -> None:
+        """Re-read the config now, on this thread; the running assistant keeps its own until restarted.
+        On the host's loop, :meth:`refresh_config` does it without blocking it."""
+        self._adopt(self._load_config())
+
+    async def refresh_config(self, force: bool = False) -> bool:
+        """Re-read ``voicestream.toml`` if it changed since it was last read — edited by hand, as the app
+        asks for the settings it can't change itself — or always with ``force`` (after a save). Off the
+        loop: loading the keys can wait on a Keychain prompt, which would freeze the audio, the event
+        stream and every request meanwhile. Returns whether it was read."""
+        stamp = self._config_stamp()
+        if not force and stamp == self._stamp:
+            return False
+        self._stamp = stamp
+        cfg, self.config_error = await asyncio.to_thread(self._read_config)
+        self._warn_unreadable_keys()
+        self._adopt(cfg)
+        return True
+
     @property
     def assistant(self) -> Assistant | None:
         """The running assistant (``None`` when not listening); live-meeting routes go through it."""
         return self._assistant
+
+    @property
+    def assistants(self) -> list[Assistant]:
+        """The running assistant first, then earlier ones still finishing an ended meeting's agents
+        after a stop or restart: their meetings are still held (and saved) in memory there."""
+        return [a for a in (self._assistant, *self._retiring) if a is not None]
 
     def track(self, task: asyncio.Task[Any]) -> None:
         self._background.add(task)
@@ -257,6 +481,7 @@ class AppHost:
             "meeting": meeting,
             "error": self.error,
             "restart_pending": self.restart_pending,
+            "waiting_for_model": self.awaiting_model,
             "warnings": list(self.warnings),
             "prefs": {
                 "listen_on_launch": self.prefs.listen_on_launch,
@@ -300,6 +525,31 @@ class AppHost:
                 message = min(old, message, key=len)
         self.warnings.appendleft(message)
 
+    def _drop_warnings(self, prefix: str) -> None:
+        """The problem these warnings are about is over (a microphone is back, a download done)."""
+        for old in [w for w in self.warnings if w.startswith(prefix)]:
+            self.warnings.remove(old)
+
+    def _on_mic_change(self, chosen: str, missing: bool, using: str | None, *, others: bool) -> None:
+        """:class:`ChosenMic` went missing (``using``: what records instead) or came back."""
+        self._drop_warnings(MIC_MISSING)
+        if missing:
+            instead = (f"using {using}" if using else "using meeting audio only" if others else "nothing is recorded")
+            message = f"{MIC_MISSING}{chosen}) isn't connected — {instead} until it is back"
+            log.warning("%s", message)
+            self.add_warning(message)
+        else:
+            log.info("your microphone (%s) is connected again", chosen)
+        self._publish_state()
+
+    def audio_devices_changed(self) -> None:
+        """A device was connected or removed (the native shell's ``watch_audio_devices``; on the loop):
+        a microphone that isn't connected is looked for again at once."""
+        for a in self.assistants:
+            for src in a.sources:
+                if isinstance(src, ChosenMic):
+                    src.poke()
+
     def _on_log_warning(self, message: str) -> None:
         self.add_warning(message)
         self.bus.publish("app.warning", message=message)
@@ -309,9 +559,17 @@ class AppHost:
             msg = human_error(str(ev.data.get("error") or ""))
             self._last_source_error = msg
             self.add_warning(msg)
-        elif ev.type == "source.stopped" and ev.data.get("source") == "mic" and self.status in ("listening", "paused", "starting"):
-            # your microphone gave up for good (missing device, package or permission): not really listening
-            self._set_status("error", human_error(str(ev.data.get("error") or "the microphone stopped")))
+        elif ev.type == "source.stopped" and self.status in ("listening", "paused", "starting"):
+            # a source gave up for good (a missing package or permission…): its source.error is in the
+            # warnings already. While another one still records it stays at that — an error state would
+            # say listening stopped, and Start would do nothing — else nothing is recorded any more
+            name = str(ev.data.get("source") or "")
+            self._dead_sources.add(name)
+            a = self._assistant
+            if a is not None and any(s.live and s.name not in self._dead_sources for s in a.sources):
+                self._publish_state()
+            else:
+                self._set_status("error", human_error(str(ev.data.get("error") or f"{name} stopped")))
         elif ev.type in ("meeting.started", "assistant.paused", "assistant.resumed"):
             self._publish_state()
         elif ev.type == "meeting.ended":
@@ -338,21 +596,84 @@ class AppHost:
                 return human_error(detail)
         return None
 
-    async def listen_start(self, paused: bool = False) -> None:
-        """Start listening (idempotent); ``paused`` starts it paused (a restart while paused). A failure
-        becomes state ``error`` with a plain message."""
-        if self._run_task is not None and self._stop_requested:
-            await asyncio.wait({self._run_task})  # a stop (or restart) still winding down
-        if self._assistant is not None or self._closing:
-            return
+    def _checked_preflight(self) -> str | None:
         try:
-            problem = self._preflight()
+            return self._preflight()
         except Exception as exc:  # noqa: BLE001 - e.g. a hand-edited path that can't be expanded: shown, not raised
             log.warning("could not start listening: %s", exc)
-            problem = human_error(exc)
+            return human_error(exc)
+
+    def _missing_model(self) -> str | None:
+        """The on-device speech model the settings name, when it isn't downloaded (else ``None``)."""
+        tc = self.cfg.transcription
+        name = tc.whisper_cpp.model
+        if tc.backend != "whisper-cpp" or name not in stt_models.CATALOG:
+            return None
+        if stt_models.is_installed(self.cfg, name) or stt_models.model_path(self.cfg, name).is_file():
+            return None
+        return name
+
+    def _wait_for_model(self, problem: str, then: str) -> bool:
+        """The preflight's ``problem`` is that the speech model the settings name isn't downloaded:
+        download it (or let the download under way go on) and wait for it rather than fail — choosing
+        a model in Settings, or quitting during the first download, must not leave listening off for
+        the day. ``then`` says what happens once it is in. Returns whether a download is coming."""
+        name = self._missing_model()
+        if name is None or problem != human_error(f"model {name} not downloaded"):
+            return False  # something else is wrong (whisper-server missing…): that is what to say
+        self.model_download(name)  # a no-op while it is downloading already
+        if name not in self._downloads:
+            return False
+        self.awaiting_model = name
+        self._drop_warnings(MODEL_WAIT)
+        self.add_warning(f"{MODEL_WAIT}: {then} once it's ready (Settings → Speech-to-text shows the progress)")
+        return True
+
+    def _done_waiting(self) -> None:
+        self.awaiting_model = None
+        self._start_when_ready = False
+        self._drop_warnings(MODEL_WAIT)
+
+    async def _model_ready(self) -> None:
+        """:attr:`awaiting_model` is in: switch to it (between meetings, as any settings change), or start."""
+        start = self._start_when_ready
+        self._done_waiting()
+        if self._closing:
+            return
+        if self._assistant is not None:
+            log.info("the speech model is ready: switching to it")
+            await self.apply_settings()
+        elif start:
+            await self.listen_start()
+        else:
+            self._publish_state()
+
+    async def listen_start(self, paused: bool = False) -> None:
+        """Start listening (idempotent); ``paused`` starts it paused (a restart while paused). A failure
+        becomes state ``error`` with a plain message; a speech model still downloading, state
+        ``starting`` until it is in."""
+        if self._run_task is not None and self._stop_requested:
+            await asyncio.wait({self._run_task})  # a stop (or restart) still winding down
+        if self._closing:
+            return
+        if self._assistant is not None:
+            if self.status == "error":
+                # what failed may have left the rest running (a source gave up): a restart replaces it
+                await self.listen_restart()
+            return
+        await self.refresh_config()  # edited by hand since?
+        if self._assistant is not None or self._closing:
+            return
+        problem = self._checked_preflight()
+        if problem and self._wait_for_model(problem, "listening starts by itself"):
+            self._start_when_ready = True
+            self._set_status("starting")
+            return
         if problem:
             self._set_status("error", problem)
             return
+        self._done_waiting()
+        self._drop_warnings(NOT_APPLIED)  # what starts now is the current settings
         self._set_status("starting")
         try:
             assistant = self._factory(self)
@@ -363,6 +684,7 @@ class AppHost:
         self._assistant = assistant
         self._stop_requested = False
         self._last_source_error = None
+        self._dead_sources = set()
         if paused:
             assistant.pause()
         started = asyncio.Event()
@@ -387,20 +709,28 @@ class AppHost:
             failure = exc
             log.warning("listening stopped: %s", exc)
         finally:
-            if self._assistant is assistant:
-                self._assistant = None
-            stopped_on_purpose = self._stop_requested
-            self._stop_requested = False
-            self._run_task = None
-            if stopped_on_purpose:
-                self.restart_pending = False  # the next assistant is built from the current settings anyway
-            if failure is not None:
-                self._set_status("error", human_error(failure))
-            elif not stopped_on_purpose:
-                # run() returned by itself: every capture ended (a device unplugged, a fatal source error)
-                self._set_status("error", self._last_source_error or "Listening stopped unexpectedly (see the log)")
+            for s in [assistant.current, *assistant.finished_meetings]:
+                if s is not None and s.meeting.ended_at is None:
+                    # its wrap-up was cut short (a forced stop cancelled it): unlocked, its lock file left
+                    # in place marks it as cut off, so Meetings finishes it now (not in an hour)
+                    s.store.release(ended=False)
+            if self._retiring.pop(assistant, None) is not None:
+                pass  # it had handed listening over already (see _stop): its agents are done now
             else:
-                self._set_status("stopped")
+                if self._assistant is assistant:
+                    self._assistant = None
+                stopped_on_purpose = self._stop_requested
+                self._stop_requested = False
+                self._run_task = None
+                if stopped_on_purpose:
+                    self.restart_pending = False  # the next assistant is built from the current settings anyway
+                if failure is not None:
+                    self._set_status("error", human_error(failure))
+                elif not stopped_on_purpose:
+                    # run() returned by itself: every capture ended (a device unplugged, a fatal source error)
+                    self._set_status("error", self._last_source_error or "Listening stopped unexpectedly (see the log)")
+                else:
+                    self._set_status("stopped")
 
     async def listen_pause(self) -> None:
         a = self._assistant
@@ -425,11 +755,16 @@ class AppHost:
         way (e.g. "apply now") then stays stopped."""
         self._stop_pressed = True
         await self._stop(force, timeout)
+        if not self._closing:
+            await self.refresh_config()  # edited by hand since? (and a fixed file clears its error)
 
     async def _stop(self, force: bool = False, timeout: float | None = None) -> None:
         task, a = self._run_task, self._assistant
         if task is None or task.done() or a is None:
-            if self.status == "error":  # Stop dismisses the error
+            if self._start_when_ready:  # waiting for a speech model to start: not any more
+                self._done_waiting()
+                self._set_status("stopped")
+            elif self.status == "error":  # Stop dismisses the error
                 self._set_status("stopped")
             return
         if not self._stop_requested:
@@ -442,8 +777,47 @@ class AppHost:
                 log.warning("forced stop: cancelling the assistant")
                 task.cancel()
                 await asyncio.wait({task}, timeout=FORCE_STOP_S)
-        else:
-            await asyncio.wait({task}, timeout=timeout)
+            return
+        # wait for the capture to close and the meeting in progress to be wrapped up — not for an ended
+        # meeting's agents, which may work on for many minutes with nothing being recorded meanwhile
+        wound_down = getattr(a, "wound_down", None)
+        waiter = asyncio.ensure_future(wound_down.wait()) if wound_down is not None else None
+        try:
+            await asyncio.wait({task, *([waiter] if waiter else [])}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            if waiter is not None:
+                waiter.cancel()
+        if not task.done() and wound_down is not None and wound_down.is_set() and self._assistant is a:
+            self._retire(a, task)
+
+    def _retire(self, a: Assistant, task: asyncio.Task[None]) -> None:
+        """``a`` has stopped listening; it finishes its ended meetings' agents in the background (its
+        task ends by itself, see :meth:`_run`) and listening can start again meanwhile."""
+        log.info("listening stopped; an earlier meeting's agents keep working in the background")
+        self._retiring[a] = task
+        self._assistant = None
+        self._run_task = None
+        self._stop_requested = False
+        self.restart_pending = False
+        self._set_status("stopped")
+
+    async def _finish_retiring(self, timeout: float) -> None:
+        """Quitting: give the agents still working after a stop ``timeout`` seconds, then cut them short."""
+        tasks = dict(self._retiring)
+        if not tasks:
+            return
+        if timeout > 0:
+            await asyncio.wait(set(tasks.values()), timeout=timeout)
+        for a, task in tasks.items():
+            if not task.done():
+                a.stop(force=True)  # agents are cancelled and marked so, the notes say so
+        pending = {t for t in tasks.values() if not t.done()}
+        if pending:
+            await asyncio.wait(pending, timeout=FORCE_STOP_S)
+            for t in pending:
+                if not t.done():
+                    t.cancel()
+            await asyncio.wait(pending, timeout=FORCE_STOP_S)
 
     async def listen_restart(self, force: bool = False) -> None:
         """Stop (ending the meeting in progress) and start again with the current settings."""
@@ -461,21 +835,40 @@ class AppHost:
         if not self.restart_pending or self._stop_requested or self.in_meeting() or self._assistant is None:
             return
         log.info("applying the new settings now that the meeting has ended")
-        await self.listen_restart()
+        await self.apply_settings()  # checked again: they may not be usable (yet)
 
-    async def apply_settings(self, wait: bool = True) -> dict[str, bool]:
+    def _unusable_settings(self) -> str | None:
+        """While listening: what would make the new settings fail at once (they are then not applied,
+        and listening goes on as it is), or ``None``. A speech model still downloading is switched to
+        when it is in; anything else stays a warning until another change fixes it."""
+        problem = self._checked_preflight()
+        self._drop_warnings(NOT_APPLIED)
+        if problem is None:
+            if self.awaiting_model is not None:
+                self._done_waiting()  # the settings changed again: that model isn't wanted any more
+            return None
+        self.restart_pending = False
+        if not self._wait_for_model(problem, "Voicestream keeps the current one until then and switches to it"):
+            self.add_warning(f"{NOT_APPLIED}: {problem}")
+        self._publish_state()
+        return problem
+
+    async def apply_settings(self, wait: bool = True) -> dict[str, Any]:
         """After a settings or key change: restart now when no meeting is in progress, else when it ends.
-        Returns ``{restarting, restart_pending}``; ``wait=False`` restarts in the background."""
-        self.reload_config()
+        Returns ``{restarting, restart_pending}``; ``wait=False`` restarts in the background. Settings
+        that can't run yet (a model still downloading, a missing key) never stop listening."""
+        await self.refresh_config(force=True)
         if self._assistant is None or self._stop_requested or self._closing:
             # not listening — or you pressed Stop and it is wrapping up: the next start reads the new
             # settings anyway, and restarting here would turn the microphone back on after your Stop
-            if self.status == "error" and not self.config_error and not self._closing:
-                # the fix for the failed start may be this very change: try again
+            if not self._closing and (self._start_when_ready or (self.status == "error" and not self.config_error)):
+                # the fix for the failed start may be this very change (or the model waited for changed): try again
                 coro = self.listen_start()
             else:
                 self._publish_state()
                 return {"restarting": False, "restart_pending": False}
+        elif self._unusable_settings() is not None:
+            return {"restarting": False, "restart_pending": False, "waiting_for_model": self.awaiting_model}
         elif self.in_meeting():
             self.restart_pending = True
             self._publish_state()
@@ -522,8 +915,16 @@ class AppHost:
                 "recommended": m.recommended, "installed": stt_models.is_installed(self.cfg, m.name),
                 "downloading": {"done": dl["done"], "total": dl["total"]} if dl else None,
             })  # fmt: skip
-        in_use = wc.model if self.cfg.transcription.backend == "whisper-cpp" else None
+        # while listening, the model the running assistant loaded — the settings may name the next one
+        running = self._running_cfg() or self.cfg
+        in_use = running.transcription.whisper_cpp.model if running.transcription.backend == "whisper-cpp" else None
         return {"models": rows, "in_use": in_use, "selected": wc.model, "models_dir": str(stt_models.models_dir(self.cfg))}
+
+    def _running_cfg(self) -> Config | None:
+        """The settings the running assistant was built with (``None`` when not listening)."""
+        if self._assistant is None:
+            return None
+        return getattr(self._assistant, "cfg", None) or self.cfg
 
     def model_download(self, name: str) -> bool:
         """Start downloading ``name`` in the background (no-op if it is already downloading or there).
@@ -559,21 +960,35 @@ class AppHost:
                 publish("running")
 
         publish("running")
+        failed: str | None = None
         try:
             await stt_models.download(self.cfg, name, on_progress=progress)
         except asyncio.CancelledError:
             publish("cancelled")  # the .part file stays: the next download resumes it
+            failed = human_error(f"model {name} not downloaded")
         except stt_models.DownloadError as exc:
             log.warning("download of %s failed: %s", name, exc)
             publish("error", error=str(exc))
+            failed = f"download of {name} failed: {exc}"
         except Exception as exc:  # noqa: BLE001 - disk full, permissions…
             log.warning("download of %s failed: %s", name, exc)
             publish("error", error=f"{type(exc).__name__}: {exc}")
+            failed = f"download of {name} failed: {type(exc).__name__}: {exc}"
         else:
             state["done"] = state["total"] = state["total"] or state["done"]
             publish("done")
         finally:
             self._downloads.pop(name, None)
+        if self.awaiting_model == name and not self._closing:
+            if failed is None:
+                self.track(asyncio.ensure_future(self._model_ready()))
+            else:  # listening goes on with the current model, or the start waiting for it fails now
+                start = self._start_when_ready
+                self._done_waiting()
+                if start and self._assistant is None:
+                    self._set_status("error", failed)
+                else:
+                    self._publish_state()
 
     def model_cancel(self, name: str) -> bool:
         if name not in stt_models.CATALOG:
@@ -587,8 +1002,9 @@ class AppHost:
     async def model_remove(self, name: str) -> bool:
         if name not in stt_models.CATALOG:
             raise KeyError(name)
-        tc = self.cfg.transcription
-        if self._assistant is not None and tc.backend == "whisper-cpp" and name in (tc.whisper_cpp.model, stt_models.VAD_MODEL):
+        running = self._running_cfg()  # not self.cfg: a new model may be chosen, the old one still loaded
+        tc = running.transcription if running is not None else None
+        if tc is not None and tc.backend == "whisper-cpp" and name in (tc.whisper_cpp.model, stt_models.VAD_MODEL):
             raise HostError("this model is in use: stop listening or pick another one first")
         dl = self._downloads.get(name)
         if dl is not None:
@@ -622,6 +1038,20 @@ class AppHost:
         log.info("voicestream %s app starting (config %s)", __version__, self.config_path)
         base, self._server_task = await serve(self, DashboardConfig(host="127.0.0.1", port=self.port or 0), token=self.token)
         self.url = base.replace("/?token=", "/app?token=", 1)
+        try:
+            # a crash, a force quit or a power cut during a meeting left it open: end it, so it can be
+            # finished from Meetings (notes, to-dos) — never one another voicestream is still recording
+            for folder in self.meetings.recover_interrupted():
+                log.info("ended %s, whose recording was cut off", folder)
+        except OSError as exc:
+            log.warning("could not look for interrupted meetings: %s", exc)
+        watch = getattr(self.native_hooks, "watch_audio_devices", None)
+        if watch is not None:
+            loop = self.loop
+            try:
+                watch(lambda: loop.call_soon_threadsafe(self.audio_devices_changed))
+            except Exception as exc:  # noqa: BLE001 - the periodic look still finds the microphone
+                log.debug("no audio device notifications: %s", exc)
         if self.prefs.setup_done and self.prefs.listen_on_launch and not self.config_error:
             await self.listen_start()
         else:
@@ -632,11 +1062,15 @@ class AppHost:
         """Stop listening (a graceful wrap-up of up to :data:`GRACEFUL_SHUTDOWN_S`, then forced; at once
         forced with ``force``), downloads and the server. Safe to call again to escalate."""
         self._closing = True  # a restart in flight (settings, pending after a meeting) must not start a new one
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + (0 if force else GRACEFUL_SHUTDOWN_S)
         if self._run_task is not None:
             if not force:
                 await self.listen_stop(timeout=GRACEFUL_SHUTDOWN_S)
             if self._run_task is not None:
                 await self.listen_stop(force=True)
+        # agents still working for a meeting that ended before a stop: the rest of the time, then cut short
+        await self._finish_retiring(max(0.0, deadline - loop.time()))
         for dl in list(self._downloads.values()):
             dl["task"].cancel()
         pending = [t for t in self._background if not t.done()]
@@ -698,6 +1132,25 @@ class AppHost:
 
 
 def _default_assistant(host: AppHost) -> Assistant:
+    """An assistant on the host's settings, bus and cost meter, whose microphone picked by name is a
+    :class:`ChosenMic` (it may not be connected); the other sources as ``voicestream run`` builds them."""
+    from ..audio import build_source
     from ..session import Assistant
 
-    return Assistant(host.cfg, bus=host.bus, costs=host.costs)
+    cfg = host.cfg
+    clock = Clock()  # the assistant's own: the sources stamp their frames on it
+    mic = cfg.capture.mic
+    others = [s for s in cfg.capture.sources if s != "mic"]
+    sources = []
+    for spec in cfg.capture.sources:
+        if spec == "mic" and _named_device(mic.device):
+            on_change = functools.partial(host._on_mic_change, str(mic.device), others=bool(others))
+            sources.append(ChosenMic(str(mic.device), clock, use_default=mic.use_default_when_missing, on_change=on_change))
+        else:
+            sources.append(build_source(spec, cfg, clock))
+    for src in sources:
+        if isinstance(src, ChosenMic):  # a PortAudio rescan would close another PortAudio device's stream
+            src.may_rescan = not any(isinstance(o, MicSource) and o is not src for o in sources)
+    assistant = Assistant(cfg, sources=sources, bus=host.bus, costs=host.costs)
+    assistant.clock = clock
+    return assistant

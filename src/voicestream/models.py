@@ -227,6 +227,11 @@ class Meeting(BaseModel):
     """Ready-to-send recap for the other participants (sinks may create it as a draft)."""
     summary_markdown: str | None = None
     notes_ref: dict[str, str] = Field(default_factory=dict)
+    short_clip: bool = False
+    """Too little speech to be a meeting (see ``always_on.short_clip_speech_s``): kept, not summarized or sent."""
+    interrupted: bool = False
+    """Its recording was cut off (a crash, a force quit, a power cut) before the wrap-up: ended afterwards
+    at the last words heard, with basic notes and nothing sent (see ``app.meetings.finish_interrupted``)."""
 
     def items_of(self, kind: ItemKind, include_dismissed: bool = False) -> list[Item]:
         return [

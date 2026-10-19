@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import re
 import typing
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
@@ -181,7 +182,7 @@ async def test_recording_to_notes_todos_and_costs(cfg: Config, tmp_path: Path) -
     assert live["model"] == cfg.brain.model and final["model"] == cfg.brain.summary_model
     transcript_block = live["content"][0]
     assert transcript_block["cache_control"] == {"type": "ephemeral"}
-    assert "[#0 00:00 Me] Sam, could you send the revised pricing deck to Acme by Friday?" in transcript_block["text"]
+    assert re.search(r"\[#0 00:0\d Me\] Sam, could you send the revised pricing deck to Acme by Friday\?", transcript_block["text"])
     assert "[#2 00:08 Me] Great, that's everything for today." in transcript_block["text"]
     assert "User (speaker 'Me'): Alex" in live["content"][-1]["text"]
     assert "Existing items:\nnone" in live["content"][-1]["text"]
@@ -339,6 +340,223 @@ async def test_back_to_back_meetings_keep_separate_todo_lines(cfg: Config, monke
         run.cancel()
     todo = h.todo()
     assert "Send the deck to Sam" in todo and "Book the venue for the offsite" in todo
+
+
+class _Wall:
+    """A stand-in for :func:`voicestream.session.sleep_inclusive_now` that a test moves forward, while the
+    meeting clock (time.monotonic, mach_absolute_time on a Mac) stands still as it does in sleep."""
+
+    def __init__(self) -> None:
+        self.t = 1_000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+async def test_time_asleep_counts_as_silence(cfg: Config) -> None:
+    """17:55 the call ends, 17:58 the lid closes, 08:55 the next morning a stand-up starts: it must not be
+    added to yesterday's meeting, which should have ended (and been sent) when it went quiet."""
+    cfg.always_on.idle_split_minutes = 10
+    h = Harness(cfg, [IdleSource("mic")])
+    h.a.wall = wall = _Wall()
+    run = asyncio.ensure_future(h.a.run())
+    try:
+        await h.wait_for("assistant.started")
+        await h.say("I'll send the deck to Sam by Friday.")
+        first = h.a.current
+        assert first is not None
+        wall.t += 3 * 60  # awake and quiet for 3 minutes: still the same meeting
+        await asyncio.sleep(0.2)
+        assert h.a.current is first and not first.finished
+        wall.t += 15 * 3600  # the night with the lid closed: the meeting clock didn't move
+        ended = await h.wait_for("meeting.ended", lambda e: e.data["meeting_id"] == first.meeting.id)
+        assert first.finished and h.a.current is None
+        await h.say("Stand-up: I'll book the venue for the offsite by Monday.")
+        second = h.a.current
+        assert second is not None and second is not first
+        h.a.stop()
+        await asyncio.wait_for(run, 30)
+    finally:
+        run.cancel()
+    assert [e.data["reason"] for e in h.events("meeting.ending")] == ["idle", "stopped"]
+    assert [s.text for s in first.meeting.segments] == ["I'll send the deck to Sam by Friday."]
+    assert ended.data["notes"] and "Send the deck to Sam" in h.todo()  # pushed the evening's to-dos
+    assert first.meeting.ended_at == first.last_heard_at  # it ended when the talking stopped, not in the morning
+
+
+async def test_speech_right_after_waking_up_starts_a_new_meeting(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Woken up, the first line can come in before the idle monitor looks again: it still opens a new meeting,
+    and the evening's one keeps the evening's date for "tomorrow"."""
+    import voicestream.session as session_mod
+
+    evening, morning = datetime(2026, 10, 19, 17, 55, tzinfo=UTC), datetime(2026, 10, 20, 8, 55, tzinfo=UTC)
+    now = [evening]
+    monkeypatch.setattr(session_mod, "utcnow", lambda: now[0])
+    cfg.timezone = "UTC"
+    cfg.always_on.idle_split_minutes = 10
+    h = Harness(cfg, [IdleSource("mic")])
+    h.a.wall = wall = _Wall()
+    h.a.idle_poll_s = 3600  # the monitor stays asleep: only routing can notice
+    run = asyncio.ensure_future(h.a.run())
+    try:
+        await h.wait_for("assistant.started")
+        await h.say("I'll send the deck to Sam tomorrow.")
+        first = h.a.current
+        assert first is not None
+        wall.t += 15 * 3600
+        now[0] = morning
+        await h.say("Stand-up: I'll book the venue for the offsite by Monday.")
+        second = h.a.current
+        assert second is not None and second is not first
+        await h.wait_for("meeting.ended", lambda e: e.data["meeting_id"] == first.meeting.id)
+        h.a.stop()
+        await asyncio.wait_for(run, 30)
+    finally:
+        run.cancel()
+    assert [s.text for s in first.meeting.segments] == ["I'll send the deck to Sam tomorrow."]
+    assert [s.text for s in second.meeting.segments] == ["Stand-up: I'll book the venue for the offsite by Monday."]
+    assert h.events("meeting.ending")[0].data == {"meeting_id": first.meeting.id, "reason": "idle"}
+    assert first.meeting.ended_at == evening
+    # what the wrap-up's extraction and summary take "today" to be: Monday, not Tuesday morning
+    assert first.speech_day() == first.extractor.today() == evening.date()
+    assert second.speech_day() == morning.date()
+
+
+async def test_a_pause_keeps_the_meeting_open(cfg: Config) -> None:
+    """A confidential aside longer than the idle split: Pause says the meeting stays open, and it does; once
+    resumed, the silence that ends it counts again."""
+    cfg.always_on.idle_split_minutes = 0.02  # 1.2 s
+    h = Harness(cfg, [IdleSource("mic")])
+    run = asyncio.ensure_future(h.a.run())
+    try:
+        await h.wait_for("assistant.started")
+        await h.say("I'll send the deck to Sam by Friday.")
+        first = h.a.current
+        assert first is not None and h.a.pause()
+        await asyncio.sleep(2.0)  # paused for longer than the idle split
+        assert h.a.current is first and not first.finished and h.events("meeting.ending") == []
+        assert h.a.resume()
+        await asyncio.sleep(0.3)
+        assert h.a.current is first and not first.finished
+        await h.wait_for("meeting.ended")  # resumed and quiet: it ends after all
+        h.a.stop()
+        await asyncio.wait_for(run, 30)
+    finally:
+        run.cancel()
+    assert [e.data["reason"] for e in h.events("meeting.ending")] == ["idle"]
+    assert len(_session_dirs(cfg)) == 1
+
+
+async def test_the_idle_timer_goes_on_after_a_pause_where_it_stopped(cfg: Config) -> None:
+    cfg.always_on.idle_split_minutes = 10
+    h = Harness(cfg, [IdleSource("mic")])
+    h.a.wall = wall = _Wall()
+    run = asyncio.ensure_future(h.a.run())
+    try:
+        await h.wait_for("assistant.started")
+        await h.say("I'll send the deck to Sam by Friday.")
+        first = h.a.current
+        assert first is not None
+        wall.t += 4 * 60  # 4 quiet minutes, then a 30-minute pause (asleep or not)
+        h.a.pause()
+        wall.t += 30 * 60
+        await asyncio.sleep(0.2)
+        h.a.resume()
+        wall.t += 5 * 60  # 9 minutes of silence in all
+        await asyncio.sleep(0.2)
+        assert h.a.current is first and not first.finished
+        wall.t += 2 * 60  # 11
+        await h.wait_for("meeting.ended")
+        h.a.stop()
+        await asyncio.wait_for(run, 30)
+    finally:
+        run.cancel()
+    assert [e.data["reason"] for e in h.events("meeting.ending")] == ["idle"]
+
+
+async def test_a_few_stray_lines_are_a_short_clip_not_a_meeting(cfg: Config) -> None:
+    """Listening all day, one line (a video, a word with a colleague) opened a "meeting": a summary-model call,
+    notes in every tool. A short clip keeps its transcript and to-dos, and a "Hey Claude" in it still runs."""
+    cfg.brain.provider = "anthropic"
+    cfg.agents.mode = "commands"
+    cfg.always_on.idle_split_minutes = 10
+    command = _new("action", "Draft the launch email for Acme", [0], owner="Assistant", delegate=True,
+                   agent_prompt="Draft the launch email for Acme.", explicit_request=True, confidence=0.9)
+    llm = ScriptedLLM([
+        _wire(WireExtraction, new_items=[command]),  # the clip's final extraction
+        _wire(WireExtraction),  # the real meeting's
+        _wire(WireSummary, title="Offsite planning", notes_markdown="## Summary\n\n- The offsite is in May."),
+    ])  # fmt: skip
+    engine = FakeEngine()
+    h = Harness(cfg, [IdleSource("mic")], llm=llm, agent_engine=engine)
+    run = asyncio.ensure_future(h.a.run())
+    try:
+        await h.wait_for("assistant.started")
+        await h.say("Hey Claude, draft the launch email for Acme.")
+        clip = h.a.current
+        assert clip is not None
+        await h.a.end_meeting("idle")
+        for line in ["The offsite is in May.", "Sam books the venue.", "We keep the budget.", "That's all."]:
+            await h.say(line)
+        meeting = h.a.current
+        assert meeting is not None and meeting is not clip
+        await h.a.end_meeting("idle")
+        h.a.stop()
+        await asyncio.wait_for(run, 30)
+    finally:
+        run.cancel()
+    assert [c["schema"] for c in llm.calls] == [WireExtraction, WireExtraction, WireSummary]  # no summary for the clip
+    assert clip.meeting.short_clip and not meeting.meeting.short_clip
+    saved, _ = load_meeting(clip.store.dir)
+    assert saved.short_clip and [s.text for s in saved.segments] == ["Hey Claude, draft the launch email for Acme."]
+    assert [e.data["short_clip"] for e in h.events("meeting.ended")] == [True, False]
+    agent = clip.meeting.items["A1"].agent
+    assert agent is not None and agent.status == AgentStatus.DONE and engine.prompts  # the command ran
+    assert "Draft the launch email for Acme" in h.todo()  # its to-do went out
+    assert clip.meeting.notes_ref == {} and set(meeting.meeting.notes_ref) == {"markdown"}  # its notes didn't
+    assert (clip.store.dir / "notes.md").is_file()  # but they're kept on this computer
+
+
+async def test_a_meeting_you_start_is_never_a_short_clip(cfg: Config) -> None:
+    cfg.brain.provider = "anthropic"
+    llm = ScriptedLLM([_wire(WireExtraction), _wire(WireSummary, title="Quick check")])
+    h = Harness(cfg, [IdleSource("mic")], llm=llm, always_on=False)  # opened up front, as `voicestream run` does
+    run = asyncio.ensure_future(h.a.run())
+    try:
+        await h.wait_for("meeting.started")
+        await h.say("Quick check: the deck is fine.")
+        h.a.stop()
+        await asyncio.wait_for(run, 30)
+    finally:
+        run.cancel()
+    assert [c["schema"] for c in llm.calls] == [WireExtraction, WireSummary]
+    assert not h.a.finished_meetings[0].meeting.short_clip
+
+
+class _SlowTranscriber(FakeTranscriber):
+    backend = "whisper-cpp"
+    backlog_after_s, backlog_max_queued, backlog_poll_s = 0.3, 3, 0.02
+
+    async def transcribe_utterance(self, utt: Any, prompt: str | None) -> Any:
+        await asyncio.sleep(0.15)
+        return await super().transcribe_utterance(utt, prompt)
+
+
+async def test_transcription_falling_behind_reaches_the_app(cfg: Config, tmp_path: Path,
+                                                            caplog: pytest.LogCaptureFixture) -> None:
+    clock = Clock()
+    (mic,) = _wav_sources(tmp_path, clock, mic=bursts(6))
+    mic.live = True  # a recording replayed at full speed queues up by design: only live audio is watched
+    bus = EventBus(history=5000)
+    a = Assistant(cfg, sources=[mic], transcriber_factory=lambda s: _SlowTranscriber(vad=cfg.vad), llm=None,
+                  sinks=[], bus=bus, always_on=False)
+    a.clock = clock
+    await asyncio.wait_for(a.run(), 30)
+    reports = [e.data for e in bus.history if e.type == "transcription.backlog"]
+    assert len(reports) == 2 and reports[1] == {"source": "mic", "behind_s": 0.0, "queued": 0, "backend": "whisper-cpp"}
+    assert reports[0]["source"] == "mic" and reports[0]["behind_s"] > 0 and reports[0]["backend"] == "whisper-cpp"
+    (warning,) = [r for r in caplog.records if r.levelname == "WARNING" and "falling behind" in r.getMessage()]
+    assert "choose a smaller one" in warning.getMessage() and "cloud service" in warning.getMessage()
 
 
 # ------------------------------------------------------------------ control API

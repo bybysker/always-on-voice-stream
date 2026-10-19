@@ -36,7 +36,7 @@ user_name = "{user}"
 data_dir = "{data}"
 
 [transcription]
-backend = "fake"
+backend = "{backend}"
 
 [brain]
 provider = "{provider}"
@@ -142,7 +142,12 @@ class UIApp:
     """A real app host on a free port with scripted inputs, and the browser page showing it."""
 
     def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch, *, setup_done: bool, listen_on_launch: bool = False,
-                 user: str = "Camille", meetings: bool = False, provider: str = "heuristic") -> None:
+                 user: str = "Camille", meetings: bool = False, provider: str = "heuristic", backend: str = "fake",
+                 config_extra: str = "", fresh: bool = False, models: tuple[str, ...] = (), broken_mic: int = 0,
+                 keys: dict[str, str] | None = None) -> None:
+        """``fresh``: no settings file at all (a new install); ``models``: speech models already
+        downloaded; ``broken_mic``: that many assistants get a microphone that gives up at once
+        (meeting audio keeps going); ``keys``: keys already saved."""
         from test_session import FakeEngine, IdleSource
 
         from voicestream.models import TranscriptSegment
@@ -156,12 +161,22 @@ class UIApp:
             # set first so the undo removes what the app writes into os.environ when a key is saved
             monkeypatch.setenv(name, "")
             monkeypatch.delenv(name)
+        for name, value in (keys or {}).items():
+            monkeypatch.setenv(name, value)
         self.config_path = root / "voicestream.toml"
-        self.config_path.write_text(CONFIG.format(user=user, data=(root / "data").as_posix(), provider=provider), encoding="utf-8")
+        if not fresh:
+            self.config_path.write_text(CONFIG.format(user=user, data=(root / "data").as_posix(), provider=provider,
+                                                      backend=backend) + config_extra, encoding="utf-8")
+        for name in models:
+            path = root / "data" / "models" / f"ggml-{name}.bin"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(stt_models.GGML_MAGIC + b"\0" * 64)
         self.prefs_path = root / "app.json"
         self.prefs_path.write_text(json.dumps({"setup_done": setup_done, "listen_on_launch": listen_on_launch}), encoding="utf-8")
         self.dl_gate = threading.Event()
         self.dl_gate.set()
+        self.reminders_checks: list[str] = []
+        self.reminders_denied = False
         self._fake_downloads(monkeypatch)
         self._fake_probes(monkeypatch)
         # the fake whisper-server passes the "on this Mac" check once a model is "downloaded"
@@ -170,10 +185,22 @@ class UIApp:
             self.import_meetings()
         self.built: list[Assistant] = []
 
+        def sources() -> list[Any]:
+            from voicestream.audio import CaptureSetupError
+            from voicestream.audio.base import AudioSource
+
+            class GoneMic(AudioSource):  # AirPods in their case: the named microphone isn't there
+                async def frames(self) -> Any:
+                    raise CaptureSetupError("no input device matching 'AirPods Pro'")
+                    yield  # pragma: no cover
+
+            broken = len(self.built) < broken_mic
+            return [GoneMic("mic") if broken else IdleSource("mic"), IdleSource("system")]
+
         def factory(host: AppHost) -> Assistant:
             a = Assistant(
                 host.cfg,
-                sources=[IdleSource("mic"), IdleSource("system")],
+                sources=sources(),
                 transcriber_factory=lambda s: FakeTranscriber([], vad=host.cfg.vad, on_usage=host.costs.add_stt),
                 llm=None,
                 sinks=[MarkdownSink(MarkdownConfig(), host.cfg)],
@@ -225,9 +252,22 @@ class UIApp:
         async def verify(name: str, cfg: Any, **kw: Any) -> dict[str, Any]:
             return {"ok": True, "detail": "Claude accepted the key"} if os.environ.get(name) else {"ok": False, "detail": f"{name} is not set"}
 
+        async def reminders_check(sink: Any) -> str:  # macOS would show its Automation question now
+            from voicestream.sinks.base import SinkError
+            from voicestream.sinks.reminders import PERMISSION_HELP
+
+            self.reminders_checks.append(sink.cfg.list_name)
+            await asyncio.sleep(0.3)
+            if self.reminders_denied:
+                raise SinkError(PERMISSION_HELP, retryable=False)
+            return f"Reminders reachable (3 lists) · new reminders go to “{sink.cfg.list_name}”"
+
+        from voicestream.sinks.reminders import RemindersSink
+
         monkeypatch.setattr(devices_mod, "probe", probe)
         monkeypatch.setattr(devices_mod, "list_devices", list_devices)
         monkeypatch.setattr(keys, "verify", verify)
+        monkeypatch.setattr(RemindersSink, "check", reminders_check)
 
     # --------------------------------------------------------------- meetings
 
@@ -373,6 +413,16 @@ def open_page(browser: Any) -> Iterator[Callable[..., Page]]:
         p.close()
 
 
+def _wait(pred: Callable[[], bool], timeout: float = 10.0) -> None:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not pred():
+        if time.monotonic() > deadline:
+            raise AssertionError("timed out")
+        time.sleep(0.05)
+
+
 def _wait_state(app: UIApp, *states: str, timeout: float = 10.0) -> None:
     import time
 
@@ -438,12 +488,15 @@ def test_setup_wizard_end_to_end(make_app: Callable[..., UIApp], open_page: Call
     p.shot("setup-5-permissions")
     pg.click("#setup-next")
 
-    # tools: Reminders (a Mac-only tool, so off by default here) and the list it uses
+    # tools: Reminders (a Mac-only tool, so off by default here) and the list it uses; Continue checks
+    # it at once, so macOS asks for the Automation permission now rather than at a meeting's wrap-up
     expect(pg.locator("#setup-h")).to_have_text("Your tools")
     pg.check("#setup-reminders")
     pg.fill("#setup-list", "Réunions")
     p.shot("setup-6-tools")
     pg.click("#setup-next")
+    expect(pg.locator("#setup-reminders-check")).to_contain_text("click OK")
+    p.shot("setup-6-tools-checking")
 
     # done: the download is still running, so listening starts once it has finished
     expect(pg.locator("#setup-h")).to_have_text("You’re all set, Camille Martin")
@@ -463,6 +516,7 @@ def test_setup_wizard_end_to_end(make_app: Callable[..., UIApp], open_page: Call
     assert cfg.transcription.backend == "whisper-cpp" and cfg.transcription.whisper_cpp.model == "large-v3-turbo-q5_0"
     assert cfg.transcription.whisper_cpp.allowed_languages == ["fr", "en"] and cfg.brain.provider == "anthropic"
     assert cfg.sinks["reminders"] == {"enabled": True, "list_name": "Réunions"}
+    assert app.reminders_checks == ["Réunions"]
     assert stt_models.is_installed(cfg, "large-v3-turbo-q5_0")
     assert "ANTHROPIC_API_KEY" not in app.config_path.read_text(encoding="utf-8")
 
@@ -687,7 +741,7 @@ def test_settings_save_validation_and_model_download(make_app: Callable[..., UIA
     expect(pg.locator("#savebar")).to_be_visible()
     expect(pg.locator("nav a[href='#/settings'] .badge-dot")).to_be_visible()
     pg.click("#save-settings")
-    expect(pg.locator(".toast", has_text="Your settings are saved")).to_be_visible()
+    expect(pg.locator(".toast", has_text="Your settings are saved").last).to_be_visible()
     expect(pg.locator("#savebar")).to_be_hidden()
     assert app.host.cfg.user_name == "Camille Martin" and app.host.cfg.transcription.language == "fr"
 
@@ -705,8 +759,12 @@ def test_settings_save_validation_and_model_download(make_app: Callable[..., UIA
     pg.fill("#f-sinks_reminders_list_name", "Work")
     expect(error).to_have_text("")
     pg.click("#save-settings")
-    expect(pg.locator(".toast", has_text="Your settings are saved")).to_be_visible()
-    assert app.host.cfg.sinks["reminders"] == {"enabled": True, "list_name": "Work"}
+    expect(pg.locator(".toast", has_text="Your settings are saved").last).to_be_visible()
+    # the first save's toast may still be up: wait for this save itself
+    _wait(lambda: app.host.cfg.sinks.get("reminders") == {"enabled": True, "list_name": "Work"})
+    # just turned on: checked at once (macOS asks for the Automation permission while you are here)
+    expect(pg.locator("#test-reminders")).to_contain_text("Works: Reminders reachable")
+    assert app.reminders_checks == ["Work"]
 
     # speech-to-text on this Mac: download a model and watch its progress
     pg.click(".subnav a[href='#/settings/stt']")
@@ -722,8 +780,9 @@ def test_settings_save_validation_and_model_download(make_app: Callable[..., UIA
     expect(pg.locator(".toast", has_text="“Lightest” is ready")).to_be_visible()
     pg.locator("[data-model=base] label.pick").click()
     pg.click("#save-settings")
-    expect(pg.locator(".toast", has_text="Your settings are saved")).to_be_visible()
-    assert app.host.cfg.transcription.backend == "whisper-cpp" and app.host.cfg.transcription.whisper_cpp.model == "base"
+    expect(pg.locator(".toast", has_text="Your settings are saved").last).to_be_visible()
+    # an earlier save's toast may still be up: wait for this save itself
+    _wait(lambda: (app.host.cfg.transcription.backend, app.host.cfg.transcription.whisper_cpp.model) == ("whisper-cpp", "base"))
 
     # the other sections render
     for sec, heading in (("claude", "Claude"), ("audio", "Audio"), ("agents", "Agents"), ("advanced", "Files")):
@@ -803,6 +862,200 @@ def test_markdown_renderer_never_creates_markup(make_app: Callable[..., UIApp], 
     assert not any("javascript" in a or "data:" in a for a in result["attrs"])
     assert all(a.split("=")[0] in ("href", "target", "rel", "class", "type", "disabled", "aria-label") for a in result["attrs"])
     assert "<img src=x onerror=alert(1)>" in result["text"] and "<script>alert(1)</script>" in result["text"]
+
+
+def test_a_microphone_that_gives_up_is_a_warning_while_meeting_audio_records(make_app: Callable[..., UIApp],
+                                                                             open_page: Callable[..., Page]) -> None:
+    """The microphone gives up for good (here: the named one isn't there) while meeting audio is still
+    recorded: listening goes on and the banner says what is missing — not an error state with half an
+    assistant running, where Start did nothing and Dismiss ended the meeting."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, listen_on_launch=True, broken_mic=1)
+    _wait(lambda: any("AirPods Pro" in w for w in app.host.state()["warnings"]))
+    assert app.host.status == "listening" and app.host.assistant is not None and len(app.built) == 1
+    p = open_page(app)
+    pg = p.page
+    expect(pg.locator("#state-pill")).to_have_class(re.compile(r"st-listening"))
+    expect(pg.locator("#live-notices .notice.warn")).to_contain_text("AirPods Pro")
+    p.shot("live-mic-gone")
+
+
+def test_setup_wizard_with_a_tool_left_half_set_up_in_the_settings_file(make_app: Callable[..., UIApp],
+                                                                        open_page: Callable[..., Page]) -> None:
+    """A settings file from the terminal days turns Shortcuts on without naming a shortcut. The app
+    runs anyway (that tool is skipped), so the wizard's name must save too, not fail forever with
+    "Enter the name of at least one shortcut" under the name field."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=False, user="Me", config_extra="\n[sinks.shortcuts]\nenabled = true\n")
+    p = open_page(app)
+    pg = p.page
+    pg.click("#setup-next")
+    pg.fill("#setup-name", "Camille")
+    pg.click("#setup-next")
+    expect(pg.locator("#setup-h")).to_have_text("Speech-to-text")
+    assert app.host.cfg.user_name == "Camille"
+    assert app.host.cfg.sinks["shortcuts"] == {"enabled": True}  # left as it is: Settings → Your tools says what's missing
+
+
+def test_setup_wizard_says_when_the_settings_file_itself_is_the_problem(make_app: Callable[..., UIApp],
+                                                                       open_page: Callable[..., Page]) -> None:
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=False, user="Me", backend="nonsense")  # a typo in the file
+    p = open_page(app)
+    p.allowed.add(400)
+    pg = p.page
+    pg.click("#setup-next")
+    pg.fill("#setup-name", "Camille")
+    pg.click("#setup-next")
+    expect(pg.locator("#setup-error")).to_contain_text("Your settings file has a problem with transcription.backend")
+    expect(pg.locator("#setup-show-config")).to_have_text("Show the settings file")
+    p.shot("setup-file-problem")
+
+
+@pytest.mark.parametrize(("case", "expected"), [("new install", "whisper-cpp"), ("OpenAI set up before", "openai"),
+                                                ("no on-device speech-to-text here", "openai")])
+def test_setup_wizard_suggests_speech_to_text_on_this_mac(make_app: Callable[..., UIApp], open_page: Callable[..., Page],
+                                                          case: str, expected: str) -> None:
+    """A new install's settings say OpenAI without anyone choosing it: the wizard starts on this Mac
+    (and its model download) unless OpenAI was really set up, or this computer can't run it."""
+    from playwright.sync_api import expect
+
+    if case == "OpenAI set up before":
+        app = make_app(setup_done=False, user="Me", backend="openai", keys={"OPENAI_API_KEY": "sk-test-0123"})
+    else:
+        app = make_app(setup_done=False, fresh=True)
+        assert app.host.cfg.transcription.backend == "openai"  # the built-in default
+        if case == "no on-device speech-to-text here":
+            app.host.capabilities["local_stt"] = False  # what the launcher says on an Intel Mac, or without whisper-server
+    p = open_page(app)
+    pg = p.page
+    # reopened on the speech-to-text step (as after a reload): the choice and its download are there too
+    pg.evaluate("sessionStorage.setItem('voicestream-setup-step', '2')")
+    pg.reload()
+    pg.locator('#boot').wait_for(state='hidden')
+    expect(pg.locator("#setup-h")).to_have_text("Speech-to-text")
+    expect(pg.locator(f"input[name='c-Speech-to-text'][value='{expected}']")).to_be_checked()
+    if expected == "whisper-cpp":
+        expect(pg.locator("#setup-stt [data-dl='large-v3-turbo-q5_0']")).to_be_visible()  # downloading already
+        p.shot("setup-3-stt-new-install")
+    else:
+        assert pg.evaluate("Object.keys(S.downloads).length") == 0
+
+
+def test_a_new_speech_model_is_used_once_it_has_downloaded(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """Picking a model that isn't downloaded: it downloads, listening goes on with the current one, and
+    the switch happens when the download is done — not a restart on a model that can't run yet."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, listen_on_launch=True, backend="whisper-cpp",
+                   models=("large-v3-turbo-q5_0", stt_models.VAD_MODEL))
+    _wait_state(app, "listening")
+    first = app.host.assistant
+    p = open_page(app)
+    pg = p.page
+    pg.click("nav a[href='#/settings']")
+    pg.click(".subnav a[href='#/settings/stt']")
+    app.dl_gate.clear()
+    pg.locator("[data-model=small] label.pick").click()  # not downloaded: picking it starts the download
+    expect(pg.locator("[data-model=small] .pct")).to_contain_text("90%")
+    pg.click("#save-settings")
+    expect(pg.locator(".toast", has_text="keeps using the current speech-to-text")).to_be_visible()
+    expect(pg.locator("#stt-held")).to_contain_text("“Faster” is used as soon as it has downloaded")
+    expect(pg.locator("[data-model=small] input[type=radio]")).to_be_checked()
+    p.shot("settings-stt-switch-after-download")
+    assert app.host.status == "listening" and app.host.assistant is first
+    assert app.host.cfg.transcription.whisper_cpp.model == "large-v3-turbo-q5_0"
+    app.dl_gate.set()
+    expect(pg.locator(".toast", has_text="Speech-to-text now uses “Faster”")).to_be_visible(timeout=15000)
+    assert app.host.cfg.transcription.whisper_cpp.model == "small"
+    _wait_state(app, "listening")
+    expect(pg.locator("#stt-held")).to_have_count(0)
+
+
+def test_a_key_saved_in_settings_shows_its_check(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """Saving a key publishes settings.changed, which redraws the section: the check started on save
+    must still show its result (a wrongly pasted key would otherwise look fine)."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True)
+    p = open_page(app)
+    pg = p.page
+    pg.click("nav a[href='#/settings']")
+    pg.click(".subnav a[href='#/settings/claude']")
+    pg.fill("#key-ANTHROPIC_API_KEY", "sk-ant-test-0123456789")
+    pg.get_by_role("button", name="Save key").click()
+    expect(pg.locator("#ks-ANTHROPIC_API_KEY")).to_have_text("Saved on this computer")
+    result = pg.locator("[data-secret=ANTHROPIC_API_KEY] .result.ok")
+    expect(result).to_contain_text("Claude accepted the key")
+    pg.wait_for_timeout(800)  # well after the settings.changed redraw
+    expect(result).to_contain_text("Claude accepted the key")
+    p.shot("settings-claude-key-checked")
+
+
+def test_a_meeting_page_follows_the_meeting_to_its_end(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """The meeting whose page is open ends (here after 10 minutes of quiet) and its folder is renamed
+    after its title: the page reloads under the new name instead of staying "in progress"."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, listen_on_launch=True)
+    _wait_state(app, "listening")
+    p = open_page(app)
+    pg = p.page
+    app.say("Bonjour, on fait le point sur le budget marketing.")
+    app.say("Je vais envoyer le budget à Sam d'ici vendredi.")
+    expect(pg.locator("#meeting-heading")).to_be_visible()
+    pg.click("nav a[href='#/meetings']")
+    pg.locator(".mrow").first.click()
+    expect(pg.locator(".readonly-note")).to_contain_text("This meeting is in progress")
+    before = pg.evaluate("location.hash")
+
+    async def end() -> None:
+        assistant = app.host.assistant
+        assert assistant is not None and assistant.current is not None
+        assistant.current.meeting.title = "Budget marketing"  # what Claude names it during the meeting
+        await assistant.end_meeting("idle")
+
+    app.host.call(end()).result(30)
+    expect(pg.locator(".readonly-note")).to_have_count(0)
+    expect(pg.locator("#rewrite-notes")).to_be_enabled()
+    after = pg.evaluate("location.hash")
+    assert after != before and after.endswith("-budget-marketing")
+    pg.click("#push-meeting")
+    expect(pg.locator(".toast", has_text=re.compile("Sent to|already sent"))).to_be_visible()
+    assert not pg.locator(".toast.error").count()
+    pg.reload()
+    pg.locator('#boot').wait_for(state='hidden')
+    expect(pg.locator(".detail-head h1")).to_have_text("Budget marketing")
+
+
+def test_reminders_permission_is_asked_during_setup(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """Continue on "Your tools" checks Reminders at once (macOS asks for the Automation permission
+    then); a refusal is shown in the app's words, with a way on."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=False)
+    app.reminders_denied = True
+    p = open_page(app)
+    pg = p.page
+    pg.evaluate("sessionStorage.setItem('voicestream-setup-step', '5')")
+    pg.reload()
+    pg.locator('#boot').wait_for(state='hidden')
+    expect(pg.locator("#setup-h")).to_have_text("Your tools")
+    pg.check("#setup-reminders")
+    pg.click("#setup-next")
+    check = pg.locator("#setup-reminders-check")
+    expect(check).to_contain_text("Voicestream isn’t allowed to add reminders")
+    expect(check).to_contain_text("Privacy & Security → Automation → Voicestream")
+    assert "tccutil" not in check.inner_text()  # the terminal's instructions
+    expect(pg.locator("#setup-h")).to_have_text("Your tools")  # stayed, to show it
+    p.shot("setup-6-tools-reminders-denied")
+    app.reminders_denied = False  # allowed in System Settings
+    pg.click("#setup-reminders-again")
+    expect(pg.locator("#setup-h")).to_have_text(re.compile("You’re all set"))
+    assert len(app.reminders_checks) == 2
 
 
 def test_google_bridge_script_route(tmp_path: Path) -> None:

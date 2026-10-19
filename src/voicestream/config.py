@@ -24,6 +24,10 @@ class _Section(BaseModel):
 class MicConfig(_Section):
     device: str | int | None = None
     """Device name substring or index. ``None`` = OS default input."""
+    use_default_when_missing: bool = True
+    """The Mac app, when the ``device`` you picked (a headset, AirPods) isn't connected: record with the
+    default input meanwhile (``false``: only meeting audio). Either way it switches back to your device
+    once it is connected again. ``voicestream run`` stops with an error instead."""
     label: str = "Me"
 
 
@@ -292,7 +296,16 @@ class DashboardConfig(_Section):
 class AlwaysOnConfig(_Section):
     idle_split_minutes: float = 10.0
     """End the current meeting (summarize + push) after this much silence; the next
-    speech starts a new meeting. ``0`` disables auto-splitting."""
+    speech starts a new meeting. ``0`` disables auto-splitting. Time the computer spends
+    asleep counts as silence; time on Pause doesn't."""
+    short_clip_speech_s: float = 60.0
+    """A meeting that started by itself with less speech than this **and** fewer than
+    ``short_clip_lines`` lines (a video playing, a word with a colleague, a phone call the mic
+    picked up) is kept as a short clip: its transcript and to-dos stay and a "Hey Claude" request
+    in it still runs, but Claude writes no summary and no notes are sent to your tools.
+    ``0`` = every one is a meeting."""
+    short_clip_lines: int = 4
+    """See ``short_clip_speech_s``: this many transcript lines make it a meeting, however short."""
 
 
 class ModelPrice(_Section):

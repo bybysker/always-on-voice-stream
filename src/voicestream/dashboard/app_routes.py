@@ -211,6 +211,8 @@ class AppApi:
     # ---------------------------------------------------------------- settings
 
     async def get_settings(self, request: Request) -> JSONResponse:
+        # the file as it is now: edited by hand (the app asks for that for some settings) since it was read?
+        await self.host.refresh_config()
         view = settings_view(self.host.cfg)
         view["config_path"] = str(self.host.config_path)
         view["config_exists"] = self.host.config_path.is_file()

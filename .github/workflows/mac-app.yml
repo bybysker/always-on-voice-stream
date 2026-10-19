@@ -2,8 +2,10 @@ name: mac app
 
 # Builds Voicestream.app on a real Apple Silicon Mac, tests the on-device speech-to-text with the
 # whisper-server it bundles (real model, speech made with `say`), launches the packaged app in
-# self-test mode (window, page, menu-bar icon, hide/reopen, quit) and uploads the DMG.
-# Everything it runs is in packaging/mac/build.sh, so a Mac can do the same by hand.
+# self-test mode (window, page, menu-bar icon, hide/reopen, quit) and uploads the DMG. For a v*
+# tag it also publishes the DMG as a GitHub release (the README's download link for people
+# without a GitHub account). Everything it runs is in packaging/mac/build.sh, so a Mac can do the
+# same by hand.
 
 on:
   push:
@@ -31,6 +33,8 @@ jobs:
     # pinned: macos-14 is end-of-life on 2026-11-02 and macos-latest moves
     runs-on: macos-15
     timeout-minutes: 75
+    outputs:
+      dmg: ${{ steps.dmg.outputs.name }}
     env:
       VOICESTREAM_WHISPER_SERVER: ${{ github.workspace }}/build/whisper/bin/whisper-server
       MODELS_DIR: ${{ github.workspace }}/build/models
@@ -149,7 +153,9 @@ jobs:
         id: dmg
         run: |
           packaging/mac/build.sh dmg
-          echo "path=$(ls dist/Voicestream-*-arm64.dmg)" >> "$GITHUB_OUTPUT"
+          dmg="$(ls dist/Voicestream-*-arm64.dmg)"
+          echo "path=$dmg" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$dmg")" >> "$GITHUB_OUTPUT"
 
       - name: Upload the DMG
         uses: actions/upload-artifact@v7
@@ -165,3 +171,32 @@ jobs:
           name: selftest
           path: build/selftest/
           if-no-files-found: warn
+
+  release:
+    name: publish the release (v* tags)
+    needs: app
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # the only job that may write to the repository, and only for a tag
+    permissions:
+      contents: write
+    steps:
+      - name: Download the DMG
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.app.outputs.dmg }}  # uploaded as is (archive: false): the artifact is the file
+          path: dist
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DMG: dist/${{ needs.app.outputs.dmg }}
+        run: |
+          ls -l dist
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$DMG" --clobber  # a re-run: replace the file
+          else
+            gh release create "$GITHUB_REF_NAME" "$DMG" --verify-tag --title "Voicestream $GITHUB_REF_NAME" --generate-notes
+          fi

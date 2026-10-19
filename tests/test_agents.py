@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from helpers import WEDNESDAY
+from voicestream.agents import runner as runner_mod
 from voicestream.agents.runner import (
     RESULT_FILE,
     SECRET_ENV_VARS,
@@ -414,6 +417,59 @@ async def test_api_engine_through_the_runner(cfg: Config, meeting: Meeting, tmp_
     assert run.result_files == [str(Path(run.workspace or "") / RESULT_FILE)]
     assert run.result_summary == "Summary paragraph."
     assert "Research Globex" in llm.calls[0]["content"][0]["text"]  # the brief, not just the title
+
+
+async def test_without_claude_code_agents_draft_with_one_claude_call(
+    cfg: Config, meeting: Meeting, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The Mac app is built without Claude Code (200 MB) and a fresh Mac has none: with the default engine,
+    every "Let an agent do it" failed at once with "npm install -g @anthropic-ai/claude-code"."""
+    caplog.set_level(logging.INFO, logger="voicestream.agents.runner")
+    monkeypatch.setattr(runner_mod, "find_claude_cli", lambda: None)
+    assert cfg.agents.engine == "agent-sdk"
+    meeting.items["A1"] = _task("A1")
+    llm = ScriptedLLM(["Globex is 20% cheaper.\n\n| plan | price |"])
+    runner = AgentRunner(cfg, meeting, tmp_path / "agents", llm=llm)
+    await runner.execute("A1")
+    run = meeting.items["A1"].agent
+    assert run is not None and run.status == AgentStatus.DONE and run.error is None
+    assert run.result_summary == "Globex is 20% cheaper." and isinstance(runner.engine(), ApiEngine)
+    assert "Claude Code isn't installed" in caplog.text
+
+
+def test_the_doctor_says_agents_draft_with_one_call_without_claude_code(
+        cfg: Config, sdk: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settings → Advanced → Check said "via Agent SDK" while every agent ran as one API call."""
+    from voicestream.app.checks import agent_checks
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr(runner_mod, "find_claude_cli", lambda: None)
+    (check,) = agent_checks(cfg)
+    assert check.status == "ok" and "single API calls" in check.title and "Claude Code isn't installed" in check.detail
+    monkeypatch.setattr(runner_mod, "find_claude_cli", lambda: "/usr/local/bin/claude")
+    (check,) = agent_checks(cfg)
+    assert "Agent SDK" in check.title
+
+
+def test_with_claude_code_agents_get_the_full_agent(cfg: Config, meeting: Meeting, tmp_path: Path, sdk: Any,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runner_mod, "find_claude_cli", lambda: "/usr/local/bin/claude")
+    runner = AgentRunner(cfg, meeting, tmp_path / "agents", llm=ScriptedLLM([]))
+    assert isinstance(runner.engine(), runner_mod.AgentSDKEngine)
+
+
+def test_claude_code_is_looked_for_where_the_agent_sdk_looks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bundled = tmp_path / "_bundled" / "claude"
+    monkeypatch.setattr(runner_mod, "_bundled_cli", lambda: bundled)
+    monkeypatch.setattr(runner_mod.shutil, "which", lambda name: None)  # an app opened from Finder: a bare PATH
+    # the private test home
+    own = Path.home() / (".local/bin/claude.exe" if os.name == "nt" else ".npm-global/bin/claude")
+    own.parent.mkdir(parents=True)
+    own.write_text("#!/bin/sh\n")
+    assert runner_mod.find_claude_cli() == str(own)
+    bundled.parent.mkdir()
+    bundled.write_text("#!/bin/sh\n")
+    assert runner_mod.find_claude_cli() == str(bundled)  # the copy in the wheel comes first, as in the SDK
 
 
 async def test_api_engine_spend_counts_against_the_agent_budget(cfg: Config, meeting: Meeting, tmp_path: Path) -> None:
