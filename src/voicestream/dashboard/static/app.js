@@ -1748,6 +1748,7 @@ function meetingChips(m) {
   if (m.live) chips.push(h('span', { class: 'pill ok' }, h('span', { class: 'dot-state', 'aria-hidden': 'true' }), t('meetings.live')));
   else if (m.in_progress) chips.push(h('span', { class: 'pill warn' }, t('meetings.in_progress')));
   if (m.interrupted) chips.push(h('span', { class: 'pill warn', title: t('meetings.interrupted_note') }, t('meetings.interrupted')));
+  if (m.short_clip) chips.push(h('span', { class: 'pill', title: t('meetings.short_clip_note') }, t('meetings.short_clip')));
   if (c.action) chips.push(h('span', { class: 'pill' }, tp('count.actions', c.action)));
   if (m.my_actions) chips.push(h('span', { class: 'pill info' }, tp('count.mine', m.my_actions)));
   if (c.decision) chips.push(h('span', { class: 'pill' }, tp('count.decisions', c.decision)));
@@ -1877,6 +1878,7 @@ function drawDetail() {
   const notes = [];
   if (readOnly) notes.push(notice('warn', 'info', t('meetings.readonly')));
   if (m.interrupted) notes.push(notice('info', 'info', t('meetings.interrupted_note')));
+  if (m.short_clip) notes.push(notice('info', 'info', t('meetings.short_clip_note')));
   if (liveHere) notes.push(notice('info', 'mic', t('meetings.live_here'), btn(t('meetings.go_live'), { cls: 'small', onclick: () => go('#/live') })));
 
   const tabs = h('div', { class: 'tabs', role: 'tablist', 'aria-label': t('meetings.sections') });
@@ -3794,6 +3796,8 @@ const STRINGS = {
     'meetings.readonly': 'This meeting is still being recorded by another copy of Voicestream. You can read it here, but not change it.',
     'meetings.live_here': 'This meeting is in progress.', 'meetings.go_live': 'Follow it live',
     'meetings.interrupted': 'Interrupted',
+    'meetings.short_clip': 'Short clip',
+    'meetings.short_clip_note': 'Only a few words were heard (a video, a word with a colleague…), so Voicestream kept the transcript and any to-dos but wrote no summary and sent no notes. Use “Rewrite notes” if it was a real meeting.',
     'meetings.interrupted_note': 'Voicestream was closed while it recorded this meeting (a crash, a forced quit or a power cut): it ends at the last words heard and has basic notes. Nothing was sent yet: rewrite the notes and send its to-dos when you are ready.',
     'meetings.sections': 'Meeting sections', 'meetings.tab.notes': 'Notes', 'meetings.tab.actions': 'To-dos & decisions',
     'meetings.tab.transcript': 'Transcript', 'meetings.tab.email': 'Follow-up email',
@@ -4182,6 +4186,8 @@ const STRINGS = {
     'meetings.readonly': 'Cette réunion est encore enregistrée par un autre Voicestream. Vous pouvez la lire ici, mais pas la modifier.',
     'meetings.live_here': 'Cette réunion est en cours.', 'meetings.go_live': 'La suivre en direct',
     'meetings.interrupted': 'Interrompue',
+    'meetings.short_clip': 'Extrait court',
+    'meetings.short_clip_note': 'Seuls quelques mots ont été entendus (une vidéo, un échange rapide…) : Voicestream a gardé la transcription et les éventuelles tâches, sans écrire de résumé ni envoyer de notes. Utilisez « Réécrire les notes » si c’était une vraie réunion.',
     'meetings.interrupted_note': 'Voicestream a été fermé pendant l’enregistrement de cette réunion (plantage, arrêt forcé ou coupure de courant) : elle s’arrête aux derniers mots entendus et ses notes sont sommaires. Rien n’a encore été envoyé : réécrivez les notes et envoyez ses tâches quand vous voulez.',
     'meetings.sections': 'Sections de la réunion', 'meetings.tab.notes': 'Notes', 'meetings.tab.actions': 'Tâches et décisions',
     'meetings.tab.transcript': 'Transcription', 'meetings.tab.email': 'E-mail de suivi',

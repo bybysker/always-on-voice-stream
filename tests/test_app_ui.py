@@ -1019,7 +1019,7 @@ def test_a_meeting_page_follows_the_meeting_to_its_end(make_app: Callable[..., U
         await assistant.end_meeting("idle")
 
     app.host.call(end()).result(30)
-    expect(pg.locator(".readonly-note")).to_have_count(0)
+    expect(pg.locator(".readonly-note", has_text="This meeting is in progress")).to_have_count(0)
     expect(pg.locator("#rewrite-notes")).to_be_enabled()
     after = pg.evaluate("location.hash")
     assert after != before and after.endswith("-budget-marketing")

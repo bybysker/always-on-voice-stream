@@ -11,6 +11,7 @@ store_audio = false           # also keep raw WAV per source in the session fold
 
 [capture.mic]
 # device = "MacBook Pro Microphone"   # name substring or index; see `voicestream devices`
+# use_default_when_missing = true     # chosen mic not connected (AirPods in their case): use the default one meanwhile
 label = "Me"
 
 [capture.system]
@@ -25,8 +26,13 @@ hangover_s = 0.7       # silence that ends an utterance
 max_utterance_s = 25.0
 
 [transcription]
-backend = "openai"     # openai (REST, cheapest) | openai-realtime (streaming) | deepgram | local (free, offline)
+backend = "openai"     # openai (REST, cheapest cloud) | openai-realtime (streaming) | deepgram
+                       # | whisper-cpp (free, on this Mac) | local (faster-whisper, CPU)
 # language = "fr"      # leave unset to auto-detect (mixed French/English days)
+
+[transcription.whisper_cpp]           # free and private: `voicestream models download large-v3-turbo-q5_0`
+model = "large-v3-turbo-q5_0"         # see `voicestream models` (small = faster, large-v3-turbo = best)
+# allowed_languages = ["fr", "en"]    # a clip "detected" as another language is redone in one of these
 
 [transcription.openai]
 model = "gpt-transcribe"   # $0.0045/min; gpt-4o-mini-transcribe is $0.003 but shuts down 2027-02-26
@@ -89,6 +95,9 @@ open_browser = false
 
 [always_on]
 idle_split_minutes = 10    # silence that ends a meeting (summary + push); 0 = one long session
+                           # (time the Mac sleeps counts as silence; a pause doesn't)
+short_clip_speech_s = 60   # less speech than this AND fewer lines than below = a short clip
+short_clip_lines = 4       # (a video, a word with a colleague): kept, but no summary and no notes sent
 
 # ----------------------------------------------------------------------------- sinks
 # Where action items (and notes) go. Each sink: enabled, kinds, owners ("all" | "mine"),
