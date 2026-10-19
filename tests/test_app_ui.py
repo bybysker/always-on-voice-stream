@@ -552,6 +552,10 @@ def test_listening_and_the_live_meeting(make_app: Callable[..., UIApp], open_pag
     app.say("Bonjour, on fait le point sur le budget.")
     expect(pg.locator("#meeting-heading")).to_be_visible()
     expect(pg.locator("#state-pill")).to_contain_text("Meeting in progress")
+    # the reply to Resume, made just before the meeting started, can arrive after the pushed state
+    # that says it did: it used to put "Listening" back for the whole meeting
+    pg.evaluate("setApp({ ...S.app, rev: S.app.rev - 1, in_meeting: false, meeting: null })")
+    expect(pg.locator("#state-pill")).to_contain_text("Meeting in progress")
     app.say("Je vais envoyer le budget à Sam d'ici vendredi.")
     app.say("We decided to keep the price at 29 euros.", source="system")
     app.say("Hey Claude, compare the pricing of Globex and Initech.")

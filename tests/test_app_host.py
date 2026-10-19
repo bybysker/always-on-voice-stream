@@ -157,6 +157,10 @@ async def test_start_pause_resume_stop(tmp_path: Path) -> None:
                 "restart_pending", "warnings", "prefs", "capabilities"):
         assert key in state
     assert state["capabilities"]["keychain"] is False  # tests never use a real Keychain
+    # numbered, so the page can tell an older snapshot (a slow reply) from the one it shows
+    later = host.state()
+    assert later["rev"] > state["rev"] > seen[-1]["rev"] > seen[0]["rev"] and later["boot"] == state["boot"]
+    assert _host(tmp_path).state()["boot"] != state["boot"]  # a new launch of the app counts afresh
 
 
 async def test_pause_turns_capture_into_digital_silence(cfg: Config) -> None:

@@ -48,6 +48,7 @@ import concurrent.futures
 import contextlib
 import functools
 import importlib
+import itertools
 import logging
 import os
 import secrets as stdlib_secrets
@@ -376,6 +377,10 @@ class AppHost:
         self._background: set[asyncio.Task[Any]] = set()
         self._downloads: dict[str, dict[str, Any]] = {}
         self._state_listeners: list[Callable[[dict[str, Any]], None]] = []
+        # every snapshot gets the next number: replies and pushed events reach the page on different
+        # connections, and it keeps only the newest (per launch of the app)
+        self._boot = stdlib_secrets.token_hex(4)
+        self._revs = itertools.count(1)
         self._server_task: asyncio.Task[None] | None = None
         self._log_handlers: list[tuple[logging.Logger, logging.Handler]] = []
         self._closed: asyncio.Event | None = None
@@ -471,6 +476,8 @@ class AppHost:
             m = cur.meeting
             meeting = {"id": m.id, "title": m.title, "started_at": m.started_at.isoformat(), "folder": cur.store.dir.name}
         return {
+            "boot": self._boot,
+            "rev": next(self._revs),
             "version": __version__,
             "platform": sys.platform,
             "config_path": str(self.config_path),

@@ -506,6 +506,9 @@ function handle(type, ev) {
 function setApp(st) {
   if (!st || !st.state) return;
   const before = S.app;
+  // a reply and a pushed event come on different connections: the reply to Resume, made before a
+  // meeting started a moment later, must not put "not in a meeting" back for the whole meeting
+  if (before && st.boot === before.boot && st.rev < before.rev) return;
   S.app = st;
   if (before && before.prefs.ui_language !== st.prefs.ui_language) {
     const lang = detectLang(st.prefs.ui_language);
