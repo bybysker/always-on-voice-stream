@@ -35,13 +35,17 @@
 <body>
 <a class="skip" href="#main" id="skip-link">Skip to content</a>
 <div id="shell" class="shell" hidden>
-  <aside class="sidebar">
+  <aside class="sidebar" id="sidebar">
     <div class="brand"><span class="brand-mark" id="brand-mark"></span><span class="brand-name">Voicestream</span></div>
-    <nav class="nav" id="nav"></nav>
-    <div class="sidebar-foot" id="sidebar-foot"></div>
+    <header class="topbar" id="topbar"></header>
+    <button type="button" class="menu-btn" id="menu-btn" aria-expanded="false" aria-controls="sidebar-sheet"></button>
+    <div class="sidebar-sheet" id="sidebar-sheet">
+      <nav class="nav" id="nav"></nav>
+      <div class="sidebar-spend" id="spend-slot"></div>
+      <div class="sidebar-foot" id="sidebar-foot"></div>
+    </div>
   </aside>
   <div class="frame">
-    <header class="topbar" id="topbar"></header>
     <div id="notices"></div>
     <main id="main" tabindex="-1">
       <section class="screen screen-live" id="screen-live" hidden></section>

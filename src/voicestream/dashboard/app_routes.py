@@ -40,7 +40,16 @@ log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).parent / "static"
 APP_HTML = STATIC / "app.html"
-ASSETS = {"/static/app.js": ("app.js", "text/javascript; charset=utf-8"), "/static/app.css": ("app.css", "text/css; charset=utf-8")}
+FONTS = (  # Geist, bundled (static/fonts/OFL.txt): the app is offline, so nothing loads from a font service
+    "geist-latin-wght-normal.woff2", "geist-latin-ext-wght-normal.woff2",
+    "geist-latin-wght-italic.woff2", "geist-latin-ext-wght-italic.woff2",
+    "geist-mono-latin-wght-normal.woff2", "geist-mono-latin-ext-wght-normal.woff2",
+)
+ASSETS = {
+    "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/static/app.css": ("app.css", "text/css; charset=utf-8"),
+    **{f"/static/fonts/{name}": (f"fonts/{name}", "font/woff2") for name in FONTS},
+}
 HISTORY_DAYS = 30
 
 
@@ -172,7 +181,7 @@ class AppApi:
         html = html.replace("<style>", f'<style nonce="{nonce}">').replace("<script>", f'<script nonce="{nonce}">')
         csp = (
             f"default-src 'none'; script-src 'nonce-{nonce}' 'self'; style-src 'nonce-{nonce}' 'self'; "
-            "connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+            "font-src 'self'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
         )
         return HTMLResponse(html, headers={"content-security-policy": csp})
 

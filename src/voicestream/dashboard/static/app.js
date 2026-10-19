@@ -54,7 +54,6 @@ function add(el, children) {
 
 // Stroke icons drawn here (no icon font or image: the CSP allows neither).
 const ICONS = {
-  logo: [['path', 'M4 12h1M8 8v8M12 5v14M16 8v8M20 11v2']],
   mic: [['rect', { x: 9, y: 3, width: 6, height: 11, rx: 3 }], ['path', 'M5 11a7 7 0 0 0 14 0M12 18v3M8.5 21h7']],
   micOff: [['path', 'M15 9.5V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 4.6 2.5M5 11a7 7 0 0 0 11.3 5.5M19 11a7 7 0 0 1-.6 2.8M12 18v3M8.5 21h7M3 3l18 18']],
   meetings: [['rect', { x: 3, y: 4.5, width: 18, height: 16, rx: 2.5 }], ['path', 'M3 9.5h18M8 2.5v4M16 2.5v4M7.5 13.5h4M7.5 17h7']],
@@ -90,7 +89,24 @@ const ICONS = {
   trash: [['path', 'M4 7h16M10 11v6M14 11v6M6 7l1 12.5a1.5 1.5 0 0 0 1.5 1.5h7a1.5 1.5 0 0 0 1.5-1.5L18 7M9 7V4.5h6V7']],
   plus: [['path', 'M12 5v14M5 12h14']],
   edit: [['path', 'M4 20h4L19 9a2.1 2.1 0 0 0-4-4L4 16z']],
+  menu: [['path', 'M4 7h16M4 12h16M4 17h16']],
 };
+
+/** The product's mark: a voice as five bars, the one in the hue is what Voicestream keeps from it. */
+function brandMark() {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('class', 'mark');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  [[3, 10, 14], [7.5, 6, 18], [12, 3, 21], [16.5, 7.5, 16.5], [21, 10.5, 13.5]].forEach(([x, y1, y2], i) => {
+    const bar = document.createElementNS(SVG_NS, 'path');
+    bar.setAttribute('d', `M${x} ${y1}V${y2}`);
+    if (i === 2) bar.setAttribute('class', 'kept');
+    svg.append(bar);
+  });
+  return svg;
+}
 
 function icon(name, cls = '') {
   const svg = document.createElementNS(SVG_NS, 'svg');
@@ -188,7 +204,7 @@ function fmtLongDate(iso) {
 
 /** "42 min", "1 h 05" — meeting lengths. */
 function fmtDuration(seconds) {
-  const m = Math.round((seconds || 0) / 60);
+  const m = Math.floor((seconds || 0) / 60);  // whole minutes, as the clock times beside them read
   if (m < 1) return t('dur.under_minute');
   if (m < 60) return t('dur.minutes', { n: m });
   return t('dur.hours', { h: Math.floor(m / 60), m: String(m % 60).padStart(2, '0') });
@@ -383,6 +399,9 @@ const S = {
     showDismissed: false,
   },
   lastMeeting: null,         // newest row of /api/meetings, for the idle Live screen
+  lastItems: [],             // its to-dos and decisions
+  lastSegments: [],          // and its transcript, for its voice strip
+  recent: [],                // the newest rows of /api/meetings: the week's figures, the meetings before
   downloads: {},             // model name -> {done, total}
   models: null,              // GET /api/models
   settings: null,            // GET /api/settings
@@ -393,6 +412,7 @@ const S = {
   saveError: null,
   saving: false,
   lastMeetingLoaded: false,
+  lastMeetingFailed: false,  // the last try failed: asked again on the next meeting event
   setupCompleted: false,
   heldStt: null,             // {name, changes}: a speech-to-text choice saved, sent once its model has downloaded
   meetings: { q: '', rows: [], total: 0, loaded: false, error: null },
@@ -612,14 +632,30 @@ const SCREENS = ['live', 'meetings', 'costs', 'settings'];
 const NAV_ICONS = { live: 'mic', meetings: 'meetings', costs: 'costs', settings: 'settings' };
 
 function buildShell() {
-  fill($('brand-mark'), icon('logo'));
+  fill($('brand-mark'), brandMark());
   $('skip-link').textContent = t('common.skip');
   $('viewer-close').textContent = t('common.close');
+  const menu = $('menu-btn');
+  fill(menu, icon('menu'), h('span', { class: 'sr-only' }, t('nav.menu')));
+  menu.onclick = () => setMenu(menu.getAttribute('aria-expanded') !== 'true');
   renderNav();
   renderConn();
   renderTopbar();
   renderNotices();
 }
+
+/** On a narrow window the sidebar is a bar at the top; its menu opens the rest of it as a sheet. */
+function setMenu(open) {
+  const menu = $('menu-btn');
+  if (!menu || (menu.getAttribute('aria-expanded') === 'true') === open) return;
+  menu.setAttribute('aria-expanded', open ? 'true' : 'false');
+  fill(menu, icon(open ? 'x' : 'menu'), h('span', { class: 'sr-only' }, open ? t('common.close') : t('nav.menu')));
+  document.body.classList.toggle('menu-open', open);
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.body.classList.contains('menu-open')) { setMenu(false); $('menu-btn').focus(); }
+});
 
 function renderNav() {
   const nav = $('nav');
@@ -640,9 +676,9 @@ function renderConn() {
   const foot = $('sidebar-foot');
   if (!foot) return;
   const labels = { connecting: t('conn.connecting'), live: t('conn.live'), retry: t('conn.retry'), dead: t('conn.dead') };
-  fill(foot, 
+  fill(foot,
     h('span', { class: 'conn ' + S.conn }, h('span', { class: 'dot' }), labels[S.conn]),
-    S.app && h('span', {}, 'Voicestream ' + S.app.version),
+    S.app && h('span', { class: 'version' }, 'Voicestream ' + S.app.version),
   );
 }
 
@@ -661,14 +697,16 @@ function renderTopbar() {
   const a = S.app;
   const elapsed = meetingElapsed();
   const extra = h('span', { class: 'extra', id: 'state-extra' },
-    a.in_meeting && elapsed != null ? '· ' + t('state.meeting_for', { time: fmtDuration(elapsed) }) : '');
+    a.in_meeting && elapsed != null ? t('state.meeting_for', { time: fmtDuration(elapsed) }) : '');
   const pill = h('div', { class: 'state st-' + st, role: 'status', 'aria-live': 'polite', id: 'state-pill' },
     h('span', { class: 'dot-state', 'aria-hidden': 'true' }),
     h('span', { class: 'text' }, stateText()), extra);
   if (st === 'error' && a.error) pill.title = humanize(a.error);
 
+  // today's spending sits at the foot of the sidebar, under the screens it leads to
   const spend = h('button', { type: 'button', class: 'spend', id: 'spend', onclick: () => go('#/costs') });
   fillSpend(spend);
+  keepFocus($('spend-slot'), () => fill($('spend-slot'), spend));
 
   const busy = st === 'starting' || st === 'stopping';
   let primary;
@@ -683,7 +721,7 @@ function renderTopbar() {
     : btn(st === 'error' ? t('action.dismiss') : t('action.stop'), { id: 'stop', onclick: (e) => stopListening(e.currentTarget) }, st === 'error' ? null : 'stop');
   stop.hidden = !canStop || (st === 'error' && !a.error);
 
-  keepFocus(bar, () => fill(bar, pill, h('span', { class: 'spacer' }), spend, stop, primary));
+  keepFocus(bar, () => fill(bar, pill, h('div', { class: 'recorder-actions' }, primary, stop)));
 }
 
 function fillSpend(el) {
@@ -781,8 +819,15 @@ function go(hash) {
 function navigate(focus) {
   const prev = S.route;
   S.route = parseRoute();
-  for (const name of SCREENS) $('screen-' + name).hidden = name !== S.route.name;
-  document.body.classList.remove('raise-toasts');  // the Settings save bar puts it back
+  for (const name of SCREENS) {
+    const screen = $('screen-' + name);
+    screen.hidden = name !== S.route.name;
+    // only the screen on show is in the page: each is drawn again when it is opened (Live keeps its
+    // parts, and follows the meeting meanwhile), and a hidden screen's title isn't the page's title
+    if (screen.hidden) screen.replaceChildren();
+  }
+  document.body.classList.remove('raise-toasts', 'live-meeting');  // the save bar and the live meeting put them back
+  setMenu(false);
   renderNav();
   const r = S.route;
   if (r.name === 'live') renderLive();
@@ -792,7 +837,7 @@ function navigate(focus) {
   document.title = t('nav.' + r.name) + ' · Voicestream';
   if (focus) {
     const main = $('main');
-    if (prev.name !== r.name || prev.parts.join('/') !== r.parts.join('/')) main.scrollTop = 0;
+    if (prev.name !== r.name || prev.parts.join('/') !== r.parts.join('/')) window.scrollTo(0, 0);
     const section = prev.name === 'settings' && r.name === 'settings' && $('screen-settings').querySelector('.subnav [aria-current=page]');
     if (section) {
       section.focus({ preventScroll: true });  // moving along the sections: stay in the section list
@@ -811,8 +856,9 @@ window.addEventListener('hashchange', () => navigate(true));
 function tick() {
   const elapsed = meetingElapsed();
   const extra = $('state-extra');
-  if (extra) extra.textContent = S.app && S.app.in_meeting && elapsed != null ? '· ' + t('state.meeting_for', { time: fmtDuration(elapsed) }) : '';
+  if (extra) extra.textContent = S.app && S.app.in_meeting && elapsed != null ? t('state.meeting_for', { time: fmtDuration(elapsed) }) : '';
   if (LV.elapsed && S.live.meeting) LV.elapsed.textContent = elapsed != null ? fmtTs(elapsed) : '';
+  if (LV.voices && inMeetingView()) LV.voices.setTotal(elapsed);
   const now = Date.now();
   for (const m of S.live.meters.values()) {
     if (now - m.at > 2500) { m.fill.style.width = '0%'; m.el.classList.remove('speech'); }
@@ -876,6 +922,7 @@ class ItemBoard {
     else (this.groups[item.kind] || this.groups.note).cards.append(card);
     this.cards.set(item.id, card);
     this.counts();
+    if (this.ctx.onRender) this.ctx.onRender(item);
   }
 
   renderAll() { for (const item of this.items.values()) this.render(item); }
@@ -925,7 +972,6 @@ function buildItemCard(item, board) {
   const cls = 'item' + (item.dismissed ? ' dismissed' : '') + (item.status === 'done' ? ' done' : '');
   return h('article', { class: cls, dataset: { id: item.id }, 'aria-label': item.title },
     h('div', { class: 'item-top' },
-      h('span', { class: 'id', 'aria-hidden': 'true' }, item.id),
       h('span', { class: 'title' }, item.title),
       (item.confidence ?? 1) < 0.6 && h('span', { class: 'pill warn', title: t('item.unsure_help') }, t('item.unsure'))),
     itemMeta(item),
@@ -939,7 +985,7 @@ function itemMeta(item) {
   const due = fmtDue(item);
   const mine = isMine(item.owner);
   const bits = [
-    item.owner && h('span', { class: 'who' + (mine ? ' you' : '') }, icon('user'), mine ? t('item.you') : item.owner),
+    item.owner && person(item.owner, mine),
     due && h('span', { title: [item.due_text, item.due_date].filter(Boolean).join(' · ') }, t('item.due', { when: due })),
     item.priority && h('span', { class: 'prio-' + item.priority }, t('prio.' + item.priority)),
     item.status === 'done' && h('span', {}, t('item.status_done')),
@@ -954,7 +1000,7 @@ function itemBadges(item) {
   if (!pushed.length) return null;
   return h('div', { class: 'badges' }, pushed.map(([sink, ref]) => {
     const url = safeUrl(ref);
-    const label = '✓ ' + sinkLabel(sink);
+    const label = [icon('check'), sinkLabel(sink)];
     return url
       ? h('a', { class: 'badge', title: ref, href: url, target: '_blank', rel: 'noopener noreferrer' }, label)
       : h('span', { class: 'badge', title: ref || sink }, label);
@@ -1136,6 +1182,10 @@ const liveCtx = {
   readOnly: () => S.live.phase !== 'live' && S.live.phase !== 'ending',
   path: (item, action) => '/api/items/' + enc(item.id) + (action ? '/' + action : '')
     + (S.live.meeting ? '?meeting_id=' + enc(S.live.meeting.id) : ''),
+  onRender: (item) => {
+    if (LV.lines) markSaid(LV.lines, item);
+    if (LV.voices) LV.voices.setItems(S.live.items.values());
+  },
 };
 
 function buildLive() {
@@ -1148,13 +1198,17 @@ function buildLive() {
   LV.heroText = h('p', { id: 'live-text' });
   LV.heroRow = h('div', { class: 'row' });
   LV.idleMeterSlot = h('div', { class: 'row' });
-  LV.lastCard = h('div', { class: 'card card-pad', id: 'last-meeting' });
+  // between meetings: the state and what to do about it, then what came out of the meetings so far
+  // (the last one with its to-dos, the week in figures, the ones before it)
+  LV.lastCard = h('section', { class: 'card last-meeting', id: 'last-meeting', 'aria-labelledby': 'last-h' });
+  LV.week = h('section', { class: 'card week', id: 'live-week', 'aria-labelledby': 'week-h' });
+  LV.recent = h('section', { class: 'card recent', id: 'live-recent', 'aria-labelledby': 'recent-h' });
   LV.idle = h('div', { class: 'idle' },
-    h('div', { class: 'card hero' }, LV.heroIcon, h('div', { class: 'grow' }, LV.heroTitle, LV.heroText, LV.idleMeterSlot, LV.heroRow)),
-    LV.lastCard);
+    h('div', { class: 'hero' }, LV.heroIcon, h('div', { class: 'grow' }, LV.heroTitle, LV.heroText, LV.idleMeterSlot, LV.heroRow)),
+    LV.week, LV.lastCard, LV.recent);
 
   LV.title = h('h1', { id: 'meeting-heading' });
-  LV.elapsed = h('span', { class: 'mono' });
+  LV.elapsed = h('span', { class: 'num' });
   LV.subText = h('span');
   LV.pausedPill = h('span', { class: 'pill warn' }, icon('pause'), t('state.paused_short'));
   LV.meterSlot = h('div');
@@ -1184,6 +1238,7 @@ function buildLive() {
   const transcriptPane = h('section', { class: 'card pane', 'aria-labelledby': 'tp-h' },
     h('div', { class: 'pane-head' }, h('h2', { id: 'tp-h' }, t('live.transcript'))), LV.transcript, LV.jump);
 
+  LV.voices = new VoiceStrip('live');
   LV.board = new ItemBoard(liveCtx);
   LV.addForm = addItemForm(LV.board, (body) => api('POST', '/api/items', body), { compact: true });
   const dismissed = h('input', { type: 'checkbox', id: 'live-show-dismissed', checked: liveCtx.showDismissed });
@@ -1193,11 +1248,26 @@ function buildLive() {
       h('label', { for: 'live-show-dismissed' }, dismissed, t('items.show_dismissed'))),
     h('div', { class: 'scroll' }, LV.addForm, LV.board.el));
 
-  LV.meeting = h('div', { class: 'live-meeting' }, head, LV.ending, h('div', { class: 'panes' }, transcriptPane, itemsPane));
-  fill(root, LV.notices, LV.idle, LV.meeting);
-  for (const [kind, data] of S.live.segs) LV.lines.append(kind === 'seg' ? segLine(data) : screenLine(data));
+  LV.meeting = h('div', { class: 'live-meeting' }, head, LV.ending, LV.voices.el, h('div', { class: 'panes' }, transcriptPane, itemsPane));
+  fill(root);  // renderLive puts in the view on show: between meetings, or the meeting
+  for (const [kind, data] of S.live.segs) {
+    LV.lines.append(kind === 'seg' ? segLine(data) : screenLine(data));
+    if (kind === 'seg') LV.voices.add(data);
+  }
+  for (const item of S.live.items.values()) markSaid(LV.lines, item);
+  LV.voices.setItems(S.live.items.values());
   LV.tEmpty.hidden = S.live.segs.length > 0;
   renderPartials();
+}
+
+/** Only Live's view on show is in the page (the other keeps following the meeting meanwhile), and only
+ *  while Live is the screen on show, not under the setup: a hidden title is not the page's title. */
+function attachLive(inMeeting) {
+  if (S.route.name !== 'live' || S.setup) return;
+  const view = inMeeting ? LV.meeting : LV.idle;
+  if (LV.notices.parentNode === LV.root && view.parentNode === LV.root && LV.root.children.length === 2) return;
+  fill(LV.root, LV.notices, view);
+  if (inMeeting) stick();
 }
 
 function inMeetingView() {
@@ -1207,7 +1277,9 @@ function inMeetingView() {
 function renderLive() {
   if (!LV.root) buildLive();
   const inMeeting = inMeetingView();
+  attachLive(inMeeting);
   LV.root.classList.toggle('in-meeting', inMeeting);
+  document.body.classList.toggle('live-meeting', inMeeting && S.route.name === 'live');
   LV.idle.hidden = inMeeting;
   LV.meeting.hidden = !inMeeting;
   (inMeeting ? LV.meterSlot : LV.idleMeterSlot).append(LV.meters);
@@ -1286,39 +1358,112 @@ function renderIdle() {
 }
 
 const refreshLast = debounce(async () => {
+  S.lastMeetingFailed = false;
   try {
-    const data = await api('GET', '/api/meetings?limit=1');
-    S.lastMeeting = data.meetings[0] || null;
+    const data = await api('GET', '/api/meetings?limit=30');
+    S.recent = data.meetings;
+    const m = S.lastMeeting = data.meetings[0] || null;
     S.lastMeetingLoaded = true;
+    // the last meeting itself: its to-dos and decisions, not only how many, and who spoke when
+    const detail = m ? (await api('GET', '/api/meetings/' + enc(m.folder))).meeting : null;
+    S.lastItems = detail ? Object.values(detail.items || {}) : [];
+    S.lastSegments = detail ? detail.segments || [] : [];
     if (LV.root && !inMeetingView()) renderLastMeeting();
-  } catch (_) { /* shown as "no meetings yet" */ }
+  } catch (_) {  // shown as "no meetings yet", and asked again on the next meeting event
+    S.lastMeetingFailed = true;
+    if (LV.root && !inMeetingView()) renderLastMeeting();
+  }
 }, 300);
 
+/** A person as themselves: their initial on a pale tint of their own hue (the same name, the same hue). */
+function person(name, mine = false) {
+  const label = mine ? t('item.you') : String(name || '');
+  let hash = 0;
+  for (const ch of String(mine ? S.userName : name).toLowerCase()) hash = (hash * 31 + ch.codePointAt(0)) % 360;
+  const disc = h('span', { class: 'initial', 'aria-hidden': 'true' }, (String(mine ? S.userName : name).trim()[0] || '?').toUpperCase());
+  disc.style.setProperty('--h', String(hash));
+  return h('span', { class: 'who' + (mine ? ' you' : '') }, disc, label);
+}
+
 function renderLastMeeting() {
-  if (!S.lastMeetingLoaded) { refreshLast(); }
+  if (!S.lastMeetingLoaded && !S.lastMeetingFailed) { refreshLast(); }
+  renderWeek();
   const m = S.lastMeeting;
   const just = S.live.lastEnded && m && S.live.lastEnded.id === m.id;
-  if (!m) {
-    fill(LV.lastCard, h('div', { class: 'last-meeting' }, icon('meetings', 'lg'),
-      h('div', { class: 'grow' }, h('h3', {}, t('live.no_meetings')), h('p', { class: 'muted small' }, t('live.no_meetings_text')))));
+  if (!m && !S.lastMeetingLoaded && !S.lastMeetingFailed) {  // the panels keep their place while the meetings load
+    fill(LV.lastCard, h('h2', { id: 'last-h' }, t('live.last_meeting')), h('p', { class: 'muted' }, t('common.loading')));
+    fill(LV.recent, h('h2', { id: 'recent-h' }, t('live.earlier')), h('p', { class: 'muted' }, t('common.loading')));
     return;
   }
-  fill(LV.lastCard, h('div', { class: 'last-meeting' },
-    icon('meetings', 'lg'),
-    h('div', { class: 'grow' },
-      h('div', { class: 'kicker' }, just ? t('live.just_ended') : t('live.last_meeting')),
-      h('h3', {}, m.title || t('meetings.untitled')),
-      h('p', { class: 'muted small' }, [fmtDay(m.started_at), fmtClock(m.started_at), fmtDuration(m.duration_s)].join(' · ')),
-      m.tldr && h('p', { class: 'small' }, m.tldr),
-      h('div', { class: 'row' }, meetingChips(m))),
-    h('a', { class: 'btn', href: '#/meetings/' + enc(m.folder) }, m.has_notes ? t('live.open_notes') : t('common.open'))));
+  if (!m) {
+    fill(LV.lastCard, h('h2', { id: 'last-h' }, t('live.no_meetings')), h('p', { class: 'muted' }, t('live.no_meetings_text')));
+    fill(LV.recent, h('h2', { id: 'recent-h' }, t('live.earlier')), h('p', { class: 'empty-slot' }, t('live.none_earlier')));
+    return;
+  }
+  const items = (S.lastItems || []).filter((i) => !i.dismissed && (i.kind === 'action' || i.kind === 'decision'))
+    .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'action' ? -1 : 1));
+  const shown = items.slice(0, 6);
+  const rows = shown.map((i) => h('li', { class: 'kept-row ' + i.kind + (i.status === 'done' ? ' done' : '') },
+    h('i', { class: 'key mark ' + i.kind, title: t('kind.' + i.kind + '.one') }),
+    h('span', { class: 'title' }, i.title),
+    h('span', { class: 'kept-meta' }, i.owner && person(i.owner, isMine(i.owner)), fmtDue(i) && h('span', { class: 'due' }, fmtDue(i)))));
+  fill(LV.lastCard,
+    h('div', { class: 'panel-head' },
+      h('div', { class: 'grow' }, h('h2', { id: 'last-h' }, m.title || t('meetings.untitled')),
+        h('p', { class: 'meta-line' }, [just ? t('live.just_ended') : t('live.last_meeting'), fmtDay(m.started_at), fmtClock(m.started_at),
+          m.duration_s ? fmtDuration(m.duration_s) : ''].filter(Boolean).join(' · '))),
+      h('a', { class: 'btn', href: '#/meetings/' + enc(m.folder) }, m.has_notes ? t('live.open_notes') : t('common.open'))),
+    m.tldr && h('p', { class: 'tldr' }, m.tldr),
+    lastVoices(m),
+    items.length ? h('ul', { class: 'kept-list', 'aria-label': t('live.items') }, rows) : h('p', { class: 'empty-slot' }, t('live.last_items_none')),
+    items.length > shown.length && h('p', { class: 'small muted' }, t('live.more_items', { n: fmtNum(items.length - shown.length) })),
+    h('div', { class: 'row panel-foot' }, meetingChips(m), meetingSent(m)));
+  const earlier = (S.recent || []).slice(1, 7);
+  fill(LV.recent,
+    h('div', { class: 'panel-head' }, h('h2', { id: 'recent-h', class: 'grow' }, t('live.earlier')),
+      h('a', { href: '#/meetings', class: 'view-all' }, t('meetings.all'))),
+    earlier.length ? h('ul', { class: 'recent-list' }, earlier.map((r) => h('li', {},
+      h('a', { href: '#/meetings/' + enc(r.folder) },
+        h('span', { class: 'title' }, r.title || t('meetings.untitled')),
+        h('span', { class: 'when' }, [['today', 'yesterday'].includes(dayBucket(r.started_at)) ? t('meetings.group.' + dayBucket(r.started_at))
+          : fmtDay(r.started_at), fmtClock(r.started_at)].join(' · ')),
+        h('span', { class: 'count num' }, r.counts && r.counts.action ? tp('count.actions', r.counts.action) : '—')))))
+      : h('p', { class: 'empty-slot' }, t('live.none_earlier')));
+}
+
+/** The last meeting's voice strip, without its own frame: it sits inside the meeting's panel. */
+function lastVoices(m) {
+  const segs = S.lastSegments || [];
+  if (!segs.length) return null;
+  const strip = new VoiceStrip('last');
+  for (const seg of segs) strip.add(seg);
+  strip.setItems(S.lastItems || []);
+  strip.setTotal(m.duration_s || 0);
+  strip.el.classList.add('inline');
+  return strip.el;
+}
+
+/** The last 7 days in four figures, counted from the meetings themselves. */
+function renderWeek() {
+  const since = Date.now() - 7 * 86400000;
+  const rows = (S.recent || []).filter((r) => (toDate(r.started_at) || 0) >= since);
+  const sum = (f) => rows.reduce((n, r) => n + f(r), 0);
+  const figures = [
+    ['meetings', rows.length],
+    ['actions', sum((r) => (r.counts && r.counts.action) || 0)],
+    ['mine', sum((r) => r.my_actions || 0)],
+    ['decisions', sum((r) => (r.counts && r.counts.decision) || 0)],
+  ];
+  fill(LV.week, h('h2', { id: 'week-h' }, t('live.week')),
+    h('dl', { class: 'figures' }, figures.map(([key, n]) => h('div', { class: key },
+      h('dt', {}, t('live.week.' + key)), h('dd', { class: 'num' }, S.lastMeetingLoaded ? fmtNum(n) : '—')))));
 }
 
 // -------------------------------------------------------------- live meeting events
 
 function applyLiveState(st) {
   const L = S.live;
-  if (st.user_name) S.userName = st.user_name;
+  if (st.user_name) setUserName(st.user_name);
   L.sinks = st.sinks || [];
   L.extraction = st.extraction;
   setMeters(st.sources || []);
@@ -1369,6 +1514,7 @@ function startMeeting(m) {
   L.segs = [];
   for (const set of [L.seen, L.partials, L.editing, L.expanded]) set.clear();
   liveBoard().clear();
+  LV.voices.clear();
   fill(LV.lines);
   fill(LV.partials);
   LV.tEmpty.hidden = false;
@@ -1443,10 +1589,27 @@ function liveEvent(type, d, ev) {
 
 // ---------------------------------------------------------------------- transcript
 
-function line(cls, ts, title, speaker, text) {
-  return h('div', { class: 'seg ' + cls },
+function line(cls, ts, title, speaker, text, segId) {
+  return h('div', { class: 'seg ' + cls, dataset: segId ? { seg: segId } : null },
     h('span', { class: 'ts', title }, ts),
     h('div', { class: 'body' }, h('span', { class: 'spk' }, speaker), h('span', { class: 'txt' }, text)));
+}
+
+/** The words a to-do or a decision came from, marked in the transcript ``box`` with what they became. */
+function markSaid(box, item) {
+  for (const old of box.querySelectorAll(`.said-tag[data-item="${CSS.escape(item.id)}"]`)) {
+    const lineEl = old.closest('[data-seg]');
+    old.remove();
+    if (lineEl && !lineEl.querySelector('.said-tag')) lineEl.classList.remove('said');
+  }
+  if (item.dismissed || !['action', 'decision'].includes(item.kind)) return;
+  for (const id of item.segment_ids || []) {
+    const lineEl = box.querySelector(`[data-seg="${CSS.escape(id)}"]`);
+    if (!lineEl) continue;
+    lineEl.classList.add('said');
+    lineEl.querySelector('.body').append(h('span', { class: 'said-tag ' + item.kind, dataset: { item: item.id }, title: item.title },
+      t('kind.' + item.kind + '.one')));
+  }
 }
 
 function speakerOf(seg) {
@@ -1457,7 +1620,7 @@ function speakerOf(seg) {
 }
 
 function segLine(seg) {
-  return line(seg.source === 'mic' ? 'me' : 'others', fmtTs(seg.t_start), fmtClock(seg.wall_time), speakerOf(seg), seg.text);
+  return line(seg.source === 'mic' ? 'me' : 'others', fmtTs(seg.t_start), fmtClock(seg.wall_time), speakerOf(seg), seg.text, seg.id);
 }
 
 function screenLine(note) {
@@ -1471,6 +1634,7 @@ function addSegment(seg) {
   S.live.segs.push(['seg', seg]);
   if (S.live.partials.delete(seg.source)) renderPartials();
   appendLine(segLine(seg));
+  LV.voices.add(seg);
 }
 
 function addScreen(note) {
@@ -1498,6 +1662,128 @@ function renderPartials() {
   fill(LV.partials, ...[...S.live.partials].map(([src, p]) =>
     line('partial ' + (src === 'mic' ? 'me' : 'others'), '', '', speakerOf({ source: src, speaker: p.speaker }), p.text + '…')));
   stick();
+}
+
+// ------------------------------------------------------------------- who spoke when
+
+const AXIS_STEPS = [60, 120, 300, 600, 900, 1200, 1800, 3600, 7200];
+
+/** The axis under the strip: 0, then one step all the way (3 to 7 labels). */
+function axisStep(total) { return AXIS_STEPS.find((s) => total / s <= 6) || AXIS_STEPS[AXIS_STEPS.length - 1]; }
+
+/**
+ * A meeting as the two voices it is made of: what you said (your microphone) and what the others
+ * said (the meeting audio), each line drawn at its time and for its length, with the to-dos and
+ * decisions on a lane above, at the moment they were said. The legend is the share of the talk.
+ * Positions are fractions of ``--total`` (CSS), so a live meeting's strip only updates that.
+ */
+class VoiceStrip {
+  constructor(id) {
+    this.id = id;
+    this.at = new Map();  // segment id -> its start, for the items' marks
+    this.talk = { me: 0, others: 0 };
+    this.end = 0;
+    this.total = 0;
+    this.step = 0;
+    this.counts = { action: 0, decision: 0 };
+    this.tracks = {};
+    const lane = (name, label) => {
+      const track = h('div', { class: 'track' });
+      this.tracks[name] = track;
+      return h('div', { class: 'lane ' + name }, h('span', { class: 'lane-name' }, label), track);
+    };
+    this.legend = h('div', { class: 'legend', id: id + '-voices-legend' });
+    this.axis = h('div', { class: 'track axis' });
+    this.plot = h('div', { class: 'voices-plot', role: 'img' },
+      lane('kept', t('voices.kept')), lane('me', t('live.me')), lane('others', t('live.others')),
+      h('div', { class: 'lane axis-lane', 'aria-hidden': 'true' }, h('span', { class: 'lane-name' }), this.axis));
+    this.el = h('section', { class: 'voices', 'aria-labelledby': id + '-voices-h' },
+      h('div', { class: 'voices-head' }, h('h2', { id: id + '-voices-h' }, t('voices.title')), this.legend), this.plot);
+    this.setTotal(0);
+  }
+
+  clear() {
+    this.at.clear();
+    this.talk = { me: 0, others: 0 };
+    this.end = 0;
+    for (const track of Object.values(this.tracks)) fill(track);
+    this.setTotal(0);
+    this.setItems([]);
+  }
+
+  add(seg) {
+    if (!seg || this.at.has(seg.id)) return;
+    const lane = seg.source === 'mic' ? 'me' : 'others';
+    const dur = Math.max(0, (seg.t_end || 0) - (seg.t_start || 0));
+    this.at.set(seg.id, seg.t_start || 0);
+    this.talk[lane] += dur;
+    this.end = Math.max(this.end, seg.t_end || 0);
+    const bar = h('i', { title: fmtTs(seg.t_start) + ' · ' + speakerOf(seg) });
+    bar.style.setProperty('--s', String(seg.t_start || 0));
+    bar.style.setProperty('--d', String(dur));
+    this.tracks[lane].append(bar);
+    if (this.end > this.total) this.setTotal(this.end);
+    this.renderLegend();
+  }
+
+  /** Where each to-do and decision was said: its first line's time. */
+  setItems(items) {
+    const marks = [];
+    this.counts = { action: 0, decision: 0 };
+    for (const item of items) {
+      if (item.dismissed || !(item.kind in this.counts)) continue;
+      const times = (item.segment_ids || []).map((id) => this.at.get(id)).filter((x) => x != null);
+      if (!times.length) continue;
+      const at = Math.min(...times);
+      this.counts[item.kind]++;
+      const mark = h('i', { class: 'mark ' + item.kind, title: t('kind.' + item.kind + '.one') + ' · ' + fmtTs(at) + ' · ' + item.title });
+      mark.style.setProperty('--s', String(at));
+      marks.push(mark);
+    }
+    fill(this.tracks.kept, ...marks);
+    this.renderLegend();
+  }
+
+  /** The strip's length in seconds: the meeting so far (live), or up to its last words. */
+  setTotal(seconds) {
+    const total = Math.max(60, this.end, seconds || 0);
+    if (Math.abs(total - this.total) < 0.5) return;
+    this.total = total;
+    this.plot.style.setProperty('--total', String(total));
+    const step = axisStep(total), count = Math.floor(total / step);
+    if (step !== this.step || count !== this.count) {
+      this.step = step;
+      this.count = count;
+      const labels = [];
+      for (let s = 0; s <= total; s += step) {
+        const label = h('span', {}, s === 0 ? '0' : fmtDuration(s));
+        label.style.setProperty('--s', String(s));
+        labels.push(label);
+      }
+      fill(this.axis, ...labels);
+    }
+    // the label at the right end ends on its tick, inside the strip
+    const last = this.axis.lastElementChild;
+    if (last && last !== this.axis.firstElementChild) last.classList.toggle('end', (total - this.count * step) / total < 0.06);
+  }
+
+  renderLegend() {
+    const talked = this.talk.me + this.talk.others;
+    const me = talked ? Math.round((this.talk.me / talked) * 100) : 0;
+    const parts = [];
+    if (talked) {  // the two shares add up to 100: the second is what the first leaves
+      parts.push(h('span', {}, h('i', { class: 'key me' }), t('voices.share', { who: t('live.me'), pct: fmtNum(me) })));
+      parts.push(h('span', {}, h('i', { class: 'key others' }), t('voices.share', { who: t('live.others'), pct: fmtNum(100 - me) })));
+    }
+    if (this.counts.action) parts.push(h('span', {}, h('i', { class: 'key mark action' }), tp('count.actions', this.counts.action)));
+    if (this.counts.decision) parts.push(h('span', {}, h('i', { class: 'key mark decision' }), tp('count.decisions', this.counts.decision)));
+    fill(this.legend, ...parts);
+    this.plot.setAttribute('aria-label', talked
+      ? [t('voices.share', { who: t('live.me'), pct: fmtNum(me) }), t('voices.share', { who: t('live.others'), pct: fmtNum(100 - me) }),
+        this.counts.action ? tp('count.actions', this.counts.action) : '', this.counts.decision ? tp('count.decisions', this.counts.decision) : '']
+        .filter(Boolean).join(', ')
+      : t('live.nothing_yet'));
+  }
 }
 
 // --------------------------------------------------------------------- meters, cost
@@ -1713,9 +1999,10 @@ function renderMeetings(prev) {
   const search = h('input', { type: 'search', id: 'meeting-search', placeholder: t('meetings.search_ph'), 'aria-label': t('meetings.search'), value: S.meetings.q });
   search.addEventListener('input', debounce(() => { S.meetings.q = search.value.trim(); loadMeetings(); }, 250));
   MV.list = h('div', { id: 'meeting-list', 'aria-live': 'polite' });
-  fill(root, 
+  MV.sub = h('p', { class: 'sub' }, t('meetings.sub'));
+  fill(root,
     h('div', { class: 'screen-head' },
-      h('div', {}, h('h1', {}, t('meetings.title')), h('p', { class: 'sub' }, t('meetings.sub'))),
+      h('div', {}, h('h1', {}, t('meetings.title')), MV.sub),
       btn(t('meetings.show_folder'), { onclick: () => reveal('data_dir') }, 'folder')),
     h('div', { class: 'toolbar' }, h('div', { class: 'search' }, icon('search'), search)),
     MV.list);
@@ -1745,20 +2032,22 @@ const refreshMeetingsSoon = debounce(() => {
   if (S.route.name === 'meetings' && !S.route.parts[0]) loadMeetings();  // the list reloads whenever it is opened anyway
 }, 500);
 
+/** A meeting's state, when it needs saying: live, still recording elsewhere, interrupted, a short clip. */
 function meetingChips(m) {
-  const c = m.counts || {};
   const chips = [];
   if (m.live) chips.push(h('span', { class: 'pill ok' }, h('span', { class: 'dot-state', 'aria-hidden': 'true' }), t('meetings.live')));
   else if (m.in_progress) chips.push(h('span', { class: 'pill warn' }, t('meetings.in_progress')));
   if (m.interrupted) chips.push(h('span', { class: 'pill warn', title: t('meetings.interrupted_note') }, t('meetings.interrupted')));
   if (m.short_clip) chips.push(h('span', { class: 'pill', title: t('meetings.short_clip_note') }, t('meetings.short_clip')));
-  if (c.action) chips.push(h('span', { class: 'pill' }, tp('count.actions', c.action)));
-  if (m.my_actions) chips.push(h('span', { class: 'pill info' }, tp('count.mine', m.my_actions)));
-  if (c.decision) chips.push(h('span', { class: 'pill' }, tp('count.decisions', c.decision)));
-  if (c.question) chips.push(h('span', { class: 'pill' }, tp('count.questions', c.question)));
-  const pushed = Object.keys(m.pushed || {});
-  if (pushed.length) chips.push(h('span', { class: 'pill ok' }, icon('check'), t('meetings.sent_to', { tools: pushed.map(sinkLabel).join(', ') })));
   return chips;
+}
+
+/** Where a meeting's to-dos went, in words ("Sent to Apple Reminders"), or nothing yet. */
+function meetingSent(m) {
+  const pushed = Object.keys(m.pushed || {});
+  return pushed.length
+    ? h('span', { class: 'sent-to' }, icon('check'), t('meetings.sent_to', { tools: pushed.map(sinkLabel).join(', ') }))
+    : h('span', { class: 'sent-to none' }, t('meetings.fact.not_sent'));
 }
 
 function renderMeetingList() {
@@ -1775,6 +2064,9 @@ function renderMeetingList() {
       q ? '' : t('meetings.empty_text')));
     return;
   }
+  // the finding: what is still waiting for you in the meetings on show (they follow the search)
+  const mine = rows.reduce((n, m) => n + (m.my_actions || 0), 0);
+  if (MV.sub) MV.sub.textContent = mine ? tp('meetings.finding', mine) : t('meetings.sub');
   const groups = { today: [], yesterday: [], week: [], earlier: [] };
   for (const m of rows) groups[dayBucket(m.started_at)].push(m);
   const out = [];
@@ -1794,13 +2086,20 @@ function meetingRow(m, bucket) {
   const when = bucket === 'today' || bucket === 'yesterday'
     ? h('div', { class: 'when' }, h('strong', {}, fmtClock(m.started_at)))
     : h('div', { class: 'when' }, h('strong', {}, fmtDay(m.started_at, { day: 'numeric', month: 'short' })), fmtClock(m.started_at));
+  const c = m.counts || {};
+  const dash = h('span', { class: 'none' }, '—');
+  // one meeting per row, its figures in columns: what came out of it, where it went, how long it was
   return h('a', { class: 'mrow', href: '#/meetings/' + enc(m.folder), dataset: { folder: m.folder } },
     when,
     h('div', { class: 'what' },
-      h('h3', {}, m.title || t('meetings.untitled')),
-      m.tldr && h('p', { class: 'tldr' }, m.tldr),
-      h('div', { class: 'chips' }, meetingChips(m))),
-    h('div', { class: 'dur' }, m.duration_s ? fmtDuration(m.duration_s) : ''));
+      h('div', { class: 'what-top' }, h('h3', {}, m.title || t('meetings.untitled')), meetingChips(m)),
+      m.tldr && h('p', { class: 'tldr' }, m.tldr)),
+    h('div', { class: 'col-todos num' }, c.action ? h('span', {}, tp('count.actions', c.action)) : dash,
+      m.my_actions ? h('span', { class: 'mine' }, tp('count.mine', m.my_actions)) : null),
+    h('div', { class: 'col-decided num' }, c.decision ? h('span', {}, tp('count.decisions', c.decision)) : dash.cloneNode(true),
+      c.question ? h('span', { class: 'muted' }, tp('count.questions', c.question)) : null),
+    h('div', { class: 'col-sent' }, meetingSent(m)),
+    h('div', { class: 'dur num' }, m.duration_s ? fmtDuration(m.duration_s) : '—'));
 }
 
 // ------------------------------------------------------------------ meeting detail
@@ -1860,14 +2159,12 @@ function drawDetail() {
   const { m, readOnly, liveHere, inProgress } = detailState(D);
   const title = m.title || t('meetings.untitled');
   document.title = title + ' · Voicestream';
-  const duration = m.segments && m.segments.length ? Math.max(...m.segments.map((s) => s.t_end)) : m.ended_at ? (toDate(m.ended_at) - toDate(m.started_at)) / 1000 : 0;
+  let duration = m.segments && m.segments.length ? Math.max(...m.segments.map((s) => s.t_end)) : m.ended_at ? (toDate(m.ended_at) - toDate(m.started_at)) / 1000 : 0;
+  if (inProgress) duration = Math.max(duration, (Date.now() - toDate(m.started_at)) / 1000);  // so far, as the sidebar counts it
   const meta = [
     h('span', {}, fmtLongDate(m.started_at)),
     h('span', {}, fmtClock(m.started_at) + (m.ended_at ? '–' + fmtClock(m.ended_at) : '')),
-    duration > 0 && h('span', {}, fmtDuration(duration)),
-    m.language && h('span', {}, has('lang.name.' + m.language.slice(0, 2)) ? t('lang.name.' + m.language.slice(0, 2)) : m.language),
-    m.participants && m.participants.length && h('span', {}, t('meetings.with', { names: m.participants.join(', ') })),
-  ].filter(Boolean);
+  ];
   const mac = S.app && S.app.platform === 'darwin';
   const actions = h('div', { class: 'row' },
     btn(t('meetings.push'), { cls: 'primary', id: 'push-meeting', disabled: readOnly, onclick: (e) => pushMeeting(e.currentTarget) }, 'send'),
@@ -1905,12 +2202,41 @@ function drawDetail() {
   panel.setAttribute('aria-labelledby', 'tab-' + D.tab);
   panel.append(detailPanel(D));
 
-  fill(root, 
+  // the meeting as it went: who spoke when, and where each to-do and decision was said
+  const voices = new VoiceStrip('detail');
+  for (const seg of m.segments || []) voices.add(seg);
+  voices.setItems(Object.values(m.items || {}));
+  voices.setTotal(duration);
+
+  fill(root,
     h('div', { class: 'detail-head' }, back, h('h1', {}, title),
-      h('div', { class: 'meta-line' }, meta.flatMap((el, i) => (i ? [h('span', { 'aria-hidden': 'true', class: 'faint' }, '·'), el] : [el]))),
+      h('div', { class: 'meta-line' }, meta.flatMap((el, i) => (i ? [h('span', { 'aria-hidden': 'true', class: 'sep' }, '·'), el] : [el]))),
       m.tldr && h('p', { class: 'tldr' }, m.tldr), actions),
     ...notes.map((n) => h('div', { class: 'readonly-note' }, n)),
-    h('div', { class: 'tabwrap' }, tabs, panel));
+    (m.segments || []).length ? voices.el : null,
+    h('div', { class: 'detail-grid' }, h('div', { class: 'tabwrap' }, tabs, panel), detailFacts(m, duration)));
+}
+
+/** The meeting's facts beside its tabs: how long, in what language, with whom, what came out, where it went. */
+function detailFacts(m, duration) {
+  const items = Object.values(m.items || {}).filter((i) => !i.dismissed);
+  const todos = items.filter((i) => i.kind === 'action');
+  const mine = todos.filter((i) => i.status === 'open' && isMine(i.owner)).length;
+  const decisions = items.filter((i) => i.kind === 'decision').length;
+  const pushed = {};
+  for (const i of items) for (const sink of Object.keys(i.pushed || {})) pushed[sink] = true;
+  const lang = m.language && (has('lang.name.' + m.language.slice(0, 2)) ? t('lang.name.' + m.language.slice(0, 2)) : m.language);
+  const dash = h('span', { class: 'none' }, '—');
+  const rows = [
+    ['length', duration > 0 ? fmtDuration(duration) : dash],
+    ['language', lang || dash.cloneNode(true)],
+    ['with', m.participants && m.participants.length ? h('span', { class: 'people' }, m.participants.map((n) => person(n, isMine(n)))) : dash.cloneNode(true)],
+    ['items', todos.length ? [tp('count.actions', todos.length), mine ? h('span', { class: 'mine' }, ' · ' + tp('count.mine', mine)) : null] : '0'],
+    ['decisions', fmtNum(decisions)],
+    ['sent', Object.keys(pushed).length ? Object.keys(pushed).map(sinkLabel).join(', ') : h('span', { class: 'none' }, t('meetings.fact.not_sent'))],
+  ];
+  return h('aside', { class: 'facts', 'aria-labelledby': 'facts-h' }, h('h2', { id: 'facts-h' }, t('meetings.facts')),
+    h('dl', { class: 'kv' }, rows.flatMap(([key, value]) => [h('dt', {}, t('meetings.fact.' + key)), h('dd', {}, value)])));
 }
 
 function selectTab(name, focus) {
@@ -1981,9 +2307,10 @@ function transcriptPanel(D) {
   const draw = () => {
     const needle = D.filter.toLowerCase();
     const rows = segs.filter((s) => !needle || s.text.toLowerCase().includes(needle) || (s.speaker || '').toLowerCase().includes(needle));
-    fill(list, ...rows.map((s) => h('div', { class: 'tline ' + (s.source === 'mic' ? 'me' : 'others') },
+    fill(list, ...rows.map((s) => h('div', { class: 'tline ' + (s.source === 'mic' ? 'me' : 'others'), dataset: { seg: s.id } },
       h('span', { class: 'ts', title: fmtClock(s.wall_time) }, fmtTs(s.t_start)),
-      h('div', {}, h('span', { class: 'spk' }, speakerOf(s)), h('span', {}, s.text)))));
+      h('div', { class: 'body' }, h('span', { class: 'spk' }, speakerOf(s)), h('span', {}, s.text)))));
+    for (const item of Object.values(D.data.meeting.items || {})) markSaid(list, item);
     if (!rows.length) list.append(h('p', { class: 'muted' }, t('meetings.find_none')));
   };
   filter.addEventListener('input', debounce(() => { D.filter = filter.value.trim(); draw(); }, 150));
@@ -2086,7 +2413,7 @@ function onMeetingSaved(d) {
 
 // =========================================================================== Costs
 
-const SERIES = [['stt_usd', 's1', 'cost.stt'], ['llm_usd', 's2', 'cost.claude'], ['agents_usd', 's3', 'cost.agents']];
+const SERIES = [['stt_usd', 'cost.stt'], ['llm_usd', 'cost.claude'], ['agents_usd', 'cost.agents']];
 
 async function renderCosts() {
   const root = $('screen-costs');
@@ -2114,62 +2441,86 @@ function drawCosts() {
   const track = h('div', { class: 'track' }, h('span'));
   track.firstChild.style.width = Math.min(100, frac * 100).toFixed(1) + '%';
 
-  const stats = h('div', { class: 'stats' },
-    h('div', { class: 'card stat hero-stat' },
-      h('div', { class: 'label' }, t('costs.today')),
-      h('div', { class: 'value', id: 'cost-today' }, money(total)),
+  // the 30 days lead (the screen's answer), by service; today, against the daily budget, under them
+  const history = d.history || [];
+  const month = history.reduce((a, r) => a + dayTotal(r), 0);
+  const parts = SERIES.map(([key, label]) => ({ key, label: t(label), usd: history.reduce((a, r) => a + (r[key] || 0), 0) }))
+    .sort((a, b) => b.usd - a.usd);
+  const most = parts[0].usd || 1;
+  const monthCard = h('section', { class: 'card stats', 'aria-labelledby': 'month-h' },
+    h('div', { class: 'stat hero-stat' },
+      h('h2', { class: 'label', id: 'month-h' }, t('costs.month')),
+      h('div', { class: 'value num', id: 'cost-month' }, money(month)),
+      h('div', { class: 'small muted' }, t('costs.per_day_avg', { amount: money(month / Math.max(1, history.length)) }))),
+    // most costly first, a thin bar under each: the top one in ink, the others grey
+    h('ul', { class: 'bar-list', 'aria-label': t('costs.by_service') }, parts.map((part, i) => {
+      const bar = h('span', { class: 'bar' + (i === 0 && part.usd ? ' top' : '') });
+      bar.style.width = ((part.usd / most) * 100).toFixed(1) + '%';
+      return h('li', {}, h('span', { class: 'name' }, part.label), h('span', { class: 'value num' + (part.usd ? '' : ' zero') }, money(part.usd)),
+        h('span', { class: 'bar-track', 'aria-hidden': 'true' }, bar));
+    })));
+  const todayCard = h('section', { class: 'card stats', 'aria-labelledby': 'today-h' },
+    h('div', { class: 'stat' },
+      h('h2', { class: 'label', id: 'today-h' }, t('costs.today')),
+      h('div', { class: 'value num', id: 'cost-today' }, money(total)),
       budget.daily_usd ? h('div', { class: 'budget' + (frac >= 1 ? ' over' : frac >= 0.8 ? ' warn' : '') },
-        h('div', { class: 'small muted' }, t('costs.of_budget', { spent: money(capped), budget: money(budget.daily_usd) })), track,
-        today.agents_usd > 0 ? h('div', { class: 'small faint' }, t('costs.budget_excludes')) : null) : null),
-    ...SERIES.map(([key, cls, label]) => h('div', { class: 'card stat' },
-      h('div', { class: 'label' }, h('span', { class: 'swatch ' + cls, 'aria-hidden': 'true' }), t(label)),
-      h('div', { class: 'value' }, money(today[key])),
+        track, h('div', { class: 'small muted' }, t('costs.of_budget', { spent: money(capped), budget: money(budget.daily_usd) })),
+        today.agents_usd > 0 ? h('div', { class: 'small muted' }, t('costs.budget_excludes')) : null) : null),
+    h('div', { class: 'stat-split' }, SERIES.map(([key, label]) => h('div', { class: 'stat' },
+      h('div', { class: 'label' }, t(label)),
+      h('div', { class: 'value num' + (today[key] ? '' : ' zero') }, money(today[key])),
       key === 'stt_usd' && today.stt_minutes ? h('div', { class: 'small muted' }, t('costs.minutes', { n: fmtNum(Math.round(today.stt_minutes)) })) : null,
-      key === 'agents_usd' && budget.agents_daily_usd ? h('div', { class: 'small muted' }, t('costs.agents_cap', { amount: money(budget.agents_daily_usd) })) : null)));
+      key === 'agents_usd' && budget.agents_daily_usd ? h('div', { class: 'small muted' }, t('costs.agents_cap', { amount: money(budget.agents_daily_usd) })) : null))));
 
-  fill(root, 
+  // the finding: where most of the 30 days went
+  fill(root,
     h('div', { class: 'screen-head' },
-      h('div', {}, h('h1', {}, t('costs.title')), h('p', { class: 'sub' }, t('costs.sub'))),
+      h('div', {}, h('h1', {}, t('costs.title')),
+        h('p', { class: 'sub' }, month > 0 ? t('costs.finding', { service: parts[0].label, amount: money(parts[0].usd), total: money(month) }) : t('costs.sub'))),
       h('a', { class: 'btn', href: '#/settings/claude' }, t('costs.budget_link'))),
-    stats,
-    historyCard(d.history || []),
+    h('div', { class: 'costs-grid' }, historyCard(history), h('div', { class: 'costs-side' }, monthCard, todayCard)),
     estimateCard(d.estimate));
 }
 
+/** A rounded top for the money axis, with four equal steps that read as round amounts. */
 function niceCeil(x) {
   if (x <= 0) return 0.1;
   const p = Math.pow(10, Math.floor(Math.log10(x)));
-  for (const m of [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]) if (m * p >= x) return m * p;
+  for (const m of [1, 1.2, 1.6, 2, 3, 4, 6, 8, 10]) if (m * p >= x) return m * p;
   return 10 * p;
 }
 
+const dayTotal = (r) => (r.stt_usd || 0) + (r.llm_usd || 0) + (r.agents_usd || 0);
+
 function historyCard(rows) {
-  const totals = rows.map((r) => (r.stt_usd || 0) + (r.llm_usd || 0) + (r.agents_usd || 0));
+  const totals = rows.map(dayTotal);
   const top = niceCeil(Math.max(0, ...totals));
-  const plotH = 180;
   const plot = h('div', { class: 'plot' });
-  for (const frac of [0, 0.5, 1]) {
+  const digits = top / 4 < 1 ? 2 : 0;
+  for (const frac of [0, 0.25, 0.5, 0.75, 1]) {
     const y = (1 - frac) * 100;
-    const g = h('div', { class: 'gridline' });
+    const g = h('div', { class: 'gridline' + (frac === 0 ? ' base' : '') });
     g.style.top = y + '%';
-    const lab = h('span', { class: 'ytick', 'aria-hidden': 'true' }, money(top * frac, top * frac < 1 && frac ? 2 : 0));
+    const lab = h('span', { class: 'ytick', 'aria-hidden': 'true' }, money(top * frac, frac ? digits : 0));
     lab.style.top = y + '%';
     plot.append(g, lab);
   }
   const cols = h('div', { class: 'cols' });
+  const peak = totals.indexOf(Math.max(...totals));
   rows.forEach((r, i) => {
     const day = fmtDay(r.day + 'T12:00:00', { weekday: 'short', day: 'numeric', month: 'short' });
+    // one column per day: its total; today's, the day still running, in a paler tone
     const stack = h('div', { class: 'stack' });
-    const parts = SERIES.filter(([key]) => (r[key] || 0) > 0);
-    const totalPx = totals[i] / top * plotH;
-    const usable = Math.max(0, totalPx - 2 * Math.max(0, parts.length - 1));  // the 2px gaps between segments
-    for (const [key, cls] of parts) {
-      const seg = h('div', { class: 'seg-bar ' + cls });
-      seg.style.height = Math.max(2, (r[key] / totals[i]) * usable) + 'px';
-      stack.append(seg);
+    const pct = ((totals[i] / top) * 100).toFixed(2) + '%';
+    if (totals[i] > 0) {
+      const bar = h('div', { class: 'seg-bar' });
+      bar.style.height = 'max(2px, ' + pct + ')';
+      stack.append(bar);
     }
     const label = t('costs.bar_aria', { day, total: money(totals[i]), stt: money(r.stt_usd), claude: money(r.llm_usd), agents: money(r.agents_usd) });
-    const col = h('button', { type: 'button', class: 'col', 'aria-label': label }, stack);
+    const col = h('button', { type: 'button', class: 'col' + (i === rows.length - 1 ? ' today' : ''), 'aria-label': label },
+      i === peak && totals[i] > 0 ? h('span', { class: 'peak num', 'aria-hidden': 'true' }, money(totals[i])) : null, stack);
+    if (i === peak) col.style.setProperty('--hpct', pct);
     const show = () => showTip(col, day, r, totals[i]);
     col.addEventListener('pointerenter', show);
     col.addEventListener('focus', show);
@@ -2184,13 +2535,15 @@ function historyCard(rows) {
   const empty = totals.every((v) => v === 0);
   const table = h('details', { class: 'small' }, h('summary', { class: 'muted' }, t('costs.as_table')),
     h('table', { class: 'data' },
-      h('thead', {}, h('tr', {}, h('th', {}, t('costs.day')), SERIES.map(([, , label]) => h('th', {}, t(label))), h('th', {}, t('costs.total')))),
+      h('thead', {}, h('tr', {}, h('th', {}, t('costs.day')), SERIES.map(([, label]) => h('th', { class: 'num' }, t(label))), h('th', { class: 'num' }, t('costs.total')))),
       h('tbody', {}, rows.filter((r, i) => totals[i] > 0).reverse().map((r) => h('tr', {},
-        h('td', {}, fmtDay(r.day + 'T12:00:00')), SERIES.map(([key]) => h('td', {}, money(r[key]))),
-        h('td', {}, money((r.stt_usd || 0) + (r.llm_usd || 0) + (r.agents_usd || 0))))))));
-  return h('section', { class: 'card card-pad', 'aria-labelledby': 'hist-h' },
-    h('div', { class: 'row' }, h('h2', { id: 'hist-h', class: 'grow' }, t('costs.history')),
-      h('div', { class: 'legend' }, SERIES.map(([, cls, label]) => h('span', {}, h('i', { class: 'swatch ' + cls, 'aria-hidden': 'true' }), t(label))))),
+        h('td', {}, fmtDay(r.day + 'T12:00:00')), SERIES.map(([key]) => h('td', { class: 'num' }, money(r[key]))),
+        h('td', { class: 'num' }, money(dayTotal(r))))))));
+  return h('section', { class: 'card card-pad history', 'aria-labelledby': 'hist-h' },
+    h('div', { class: 'panel-head' }, h('div', { class: 'grow' }, h('h2', { id: 'hist-h' }, t('costs.history')),
+      h('p', { class: 'muted small' }, t('costs.per_day_usd'))),
+      h('div', { class: 'legend' }, h('span', {}, h('i', { class: 'key day' }), t('costs.key_day')),
+        h('span', {}, h('i', { class: 'key today' }), t('costs.key_today')))),
     empty && h('p', { class: 'muted small' }, t('costs.history_empty')),
     h('div', { class: 'chart', role: 'group', 'aria-label': t('costs.history') }, plot, xl),
     table);
@@ -2200,7 +2553,7 @@ function showTip(anchor, day, r, total) {
   const tip = $('tooltip');
   fill(tip, h('div', { class: 'tt-head' }, day),
     h('div', { class: 'tt-row' }, h('strong', {}, money(total)), t('costs.total')),
-    ...SERIES.map(([key, cls, label]) => h('div', { class: 'tt-row' }, h('span', { class: 'key ' + cls }), h('strong', {}, money(r[key])), t(label))));
+    ...SERIES.map(([key, label]) => h('div', { class: 'tt-row' }, h('strong', {}, money(r[key])), t(label))));
   tip.hidden = false;
   const box = anchor.getBoundingClientRect(), tb = tip.getBoundingClientRect();
   const left = Math.min(window.innerWidth - tb.width - 8, Math.max(8, box.left + box.width / 2 - tb.width / 2));
@@ -2227,9 +2580,9 @@ function estimateCard(e) {
       [t('costs.est_summaries'), est.summaries_usd],
     ];
     fill(linesBox, 
-      ...rows.map(([label, v]) => h('div', {}, h('span', {}, label), h('span', {}, v ? money(v, 2) : t('costs.free')))),
-      h('div', { class: 'total' }, h('span', {}, t('costs.per_day')), h('span', { id: 'estimate-day' }, money(est.total_usd, 2))),
-      h('div', {}, h('span', { class: 'muted' }, t('costs.per_month')), h('span', { id: 'estimate-month' }, money(est.per_month_usd, est.per_month_usd >= 10 ? 0 : 2))));
+      ...rows.map(([label, v]) => h('div', {}, h('span', {}, label), h('span', { class: 'num' + (v ? '' : ' zero') }, v ? money(v, 2) : t('costs.free')))),
+      h('div', { class: 'total' }, h('span', {}, t('costs.per_day')), h('span', { id: 'estimate-day', class: 'num' }, money(est.total_usd, 2))),
+      h('div', {}, h('span', { class: 'muted' }, t('costs.per_month')), h('span', { id: 'estimate-month', class: 'num' }, money(est.per_month_usd, est.per_month_usd >= 10 ? 0 : 2))));
   };
   showEstimate(e);
   const refetch = debounce(async () => {
@@ -2246,7 +2599,7 @@ function estimateCard(e) {
   });
   const free = !e.stt_usd;
   const offline = !e.extraction_usd && !e.summaries_usd;
-  return h('section', { class: 'card card-pad', 'aria-labelledby': 'est-h' },
+  return h('section', { class: 'card estimate', 'aria-labelledby': 'est-h' },
     h('h2', { id: 'est-h' }, t('costs.estimate')),
     h('div', { class: 'estimate-grid' },
       h('div', {},
@@ -2288,7 +2641,16 @@ function sectionFor(path) {
 
 async function loadSettings() {
   S.settings = await api('GET', '/api/settings');
-  if (S.settings.values.user_name) S.userName = S.settings.values.user_name;
+  if (S.settings.values.user_name) setUserName(S.settings.values.user_name);
+}
+
+/** Your name, which says which to-dos and people are you: a meeting's page drawn before it was known says it again. */
+function setUserName(name) {
+  if (name === S.userName) return;
+  S.userName = name;
+  const D = S.detail;
+  if (S.route.name === 'meetings' && D && D.data && !D.editing.size) drawDetail();
+  if (S.route.name === 'live' && LV.root && !inMeetingView()) renderLastMeeting();
 }
 
 async function loadModels() {
@@ -2785,13 +3147,13 @@ function drawSettings(sec) {
   const nav = h('nav', { class: 'subnav', 'aria-label': t('set.sections') }, SECTIONS.map((s) =>
     h('a', { href: '#/settings/' + s, 'aria-current': s === sec ? 'page' : null }, t('set.sec.' + s))));
   const builders = { general: generalSection, stt: sttSection, claude: claudeSection, audio: audioSection, tools: toolsSection, agents: agentsSection, advanced: advancedSection };
-  const scroll = $('main').scrollTop;
+  const scroll = window.scrollY;
   fill(root, 
     h('div', { class: 'screen-head' }, h('div', {}, h('h1', {}, t('set.title')), h('p', { class: 'sub' }, t('set.sub')))),
     nav,
     h('div', { class: 'settings-body', id: 'settings-body' }, builders[sec]()),
     h('div', { class: 'savebar', id: 'savebar', role: 'region', 'aria-label': t('set.savebar') }));
-  $('main').scrollTop = scroll;
+  window.scrollTo(0, scroll);
   renderSaveBar();
 }
 
@@ -2929,8 +3291,11 @@ function showSaveError(field, message) {
   renderSaveBar();
 }
 
+/** One settings section as a row: what it is about on the left, its controls in a panel on the right. */
 function card(title, lead, ...body) {
-  return h('section', { class: 'card' }, h('h2', {}, title), lead && h('p', { class: 'lead' }, lead), ...body);
+  return h('section', { class: 'set-row' },
+    h('div', { class: 'set-label' }, h('h2', {}, title), lead && h('p', { class: 'lead' }, lead)),
+    h('div', { class: 'card set-panel' }, ...body));
 }
 
 // ---------------------------------------------------------------------- sections
@@ -3049,9 +3414,19 @@ function toolsSection() {
     h('summary', { class: 'card-pad' }, h('strong', {}, t('tools.more')), ' ', h('span', { class: 'muted small' }, t('tools.more_help'))),
     h('div', { class: 'card-pad' }, others.map((n) => toolCard(n, true))));
   return h('div', {},
-    h('p', { class: 'muted' }, t('tools.lead')),
-    ...MAIN_TOOLS.filter((n) => catalog.some((c) => c.name === n)).map((n) => toolCard(n)),
-    others.length ? more : null);
+    h('section', { class: 'set-row' },
+      h('div', { class: 'set-label' }, h('h2', {}, t('set.sec.tools')), h('p', { class: 'lead' }, t('tools.lead')),
+        toolsSummary(catalog)),
+      h('div', { class: 'tool-list' },
+        ...MAIN_TOOLS.filter((n) => catalog.some((c) => c.name === n)).map((n) => toolCard(n)),
+        others.length ? more : null)));
+}
+
+/** Beside the tools, the ones that are on (as saved), so the list says what it adds up to. */
+function toolsSummary(catalog) {
+  const on = catalog.map((c) => c.name).filter((n) => S.settings.sinks[n] && S.settings.sinks[n].enabled);
+  return h('div', { class: 'summary' }, on.length ? t('tools.summary') : t('tools.summary_none'),
+    on.map((n) => h('span', {}, icon('check'), has('tool.' + n + '.name') ? t('tool.' + n + '.name') : n)));
 }
 
 function toolCard(name, compact = false) {
@@ -3262,6 +3637,7 @@ function openSetup(forced = false) {
     } catch (_) { /* no storage: start at the beginning */ }
   }
   $('shell').hidden = true;
+  for (const name of SCREENS) $('screen-' + name).replaceChildren();  // drawn again when the setup closes
   $('setup').hidden = false;
   document.body.classList.add('in-setup');
   document.title = t('setup.title') + ' · Voicestream';
@@ -3348,9 +3724,12 @@ function renderSetup() {
   const stepper = h('div', { class: 'stepper', role: 'img', 'aria-label': t('setup.step', { n: W.step + 1, total: STEPS.length }) },
     h('span', { class: 'label', 'aria-hidden': 'true' }, t('setup.step', { n: W.step + 1, total: STEPS.length })),
     STEPS.map((s, i) => h('span', { class: i < W.step ? 'done' : i === W.step ? 'current' : '' })));
+  // the whole way through, named: where you are, what is done, what is left
+  const steps = h('ol', { class: 'setup-steps', 'aria-hidden': 'true' }, STEPS.map((s, i) =>
+    h('li', { class: i < W.step ? 'done' : i === W.step ? 'current' : '' }, i < W.step ? icon('check') : h('span', { class: 'dot' }), t('setup.nav.' + s))));
   const top = h('div', { class: 'setup-top' },
-    h('div', { class: 'brand' }, h('span', { class: 'brand-mark' }, icon('logo')), h('span', {}, 'Voicestream')),
-    stepper,
+    h('div', { class: 'brand' }, h('span', { class: 'brand-mark' }, brandMark()), h('span', {}, 'Voicestream')),
+    stepper, steps,
     W.forced && btn(t('setup.close'), { cls: 'ghost small', onclick: closeSetup }, 'x'));
   let body;
   if (!S.settings || !S.models || !W.choice) {
@@ -3447,7 +3826,7 @@ const SETUP_STEPS = {
     view: () => [
       ...setupHead(t('setup.welcome.title'), t('setup.welcome.lead')),
       h('div', { class: 'promises' }, [['shield', 'p1'], ['mic', 'p2'], ['sparkle', 'p3'], ['clock', 'p4']].map(([ic, k]) =>
-        h('div', { class: 'promise' }, h('span', { class: 'bubble' }, icon(ic)),
+        h('div', { class: 'promise' }, icon(ic),
           h('div', {}, h('strong', {}, t('setup.welcome.' + k)), h('span', {}, t('setup.welcome.' + k + '_text')))))),
     ],
     nextLabel: () => t('setup.welcome.start'),
@@ -3561,7 +3940,7 @@ const SETUP_STEPS = {
             (on) => { W.choice.reminders = on; W.remindersCheck = null; renderSetup(); }),
           W.choice.reminders && h('div', { class: 'field' }, h('label', { for: 'setup-list' }, t('tools.reminders.list')), h('div', { class: 'control' }, list)),
           checkLine),
-        h('div', { class: 'sub-card' }, h('div', { class: 'promise' }, h('span', { class: 'bubble' }, icon('folder')),
+        h('div', { class: 'sub-card' }, h('div', { class: 'promise' }, icon('folder'),
           h('div', {}, h('strong', {}, t('tool.markdown.name')), h('span', {}, t('setup.tools.files'))))),
         h('p', { class: 'help muted' }, t('setup.tools.later')),
       ];
@@ -3674,6 +4053,7 @@ const STRINGS = {
 
     'nav.label': 'Main', 'nav.live': 'Live', 'nav.meetings': 'Meetings', 'nav.costs': 'Costs', 'nav.settings': 'Settings',
     'nav.live_now': 'Now',
+    'nav.menu': 'Menu',
 
     'state.stopped': 'Not listening', 'state.starting': 'Starting…', 'state.listening': 'Listening',
     'state.paused': 'Paused — nothing is being recorded', 'state.paused_short': 'Paused', 'state.stopping': 'Stopping…',
@@ -3781,18 +4161,27 @@ const STRINGS = {
     'live.idle.stopped': 'Not listening', 'live.idle.stopped_text': 'Press Start listening when you want Voicestream to take notes of your meetings.',
     'live.no_meetings': 'No meetings yet', 'live.no_meetings_text': 'Your meetings and their notes will appear here.',
     'live.just_ended': 'Just ended', 'live.last_meeting': 'Last meeting', 'live.open_notes': 'Open the notes',
+    'live.week': 'Last 7 days', 'live.week.meetings': 'Meetings', 'live.week.actions': 'To-dos', 'live.week.mine': 'For you',
+    'live.week.decisions': 'Decisions', 'live.earlier': 'Before that', 'live.none_earlier': 'No other meeting yet.',
+    'live.last_items_none': 'No to-dos or decisions came out of this meeting.', 'live.more_items': 'and {n} more in the notes',
     'live.me': 'Me', 'live.others': 'Others', 'live.screen': 'Screen',
+    'voices.title': 'Who spoke when', 'voices.kept': 'Noted', 'voices.share': '{who} {pct}%',
     'src.mic': 'Your microphone', 'src.system': 'Meeting audio',
     'md.done': 'done', 'md.todo': 'to do',
 
     'meetings.title': 'Meetings', 'meetings.sub': 'Every meeting Voicestream heard, with its notes and to-dos.',
     'meetings.search': 'Search meetings', 'meetings.search_ph': 'Search titles, people, to-dos…',
     'meetings.show_folder': 'Show the folder', 'meetings.live': 'Live now', 'meetings.in_progress': 'In progress',
-    'meetings.sent_to': 'sent to {tools}', 'meetings.error': "Couldn't load the meetings", 'meetings.no_match': 'No meeting matches “{q}”.',
+    'meetings.sent_to': 'Sent to {tools}', 'meetings.error': "Couldn't load the meetings", 'meetings.no_match': 'No meeting matches “{q}”.',
     'meetings.empty': 'No meetings yet', 'meetings.empty_text': 'They appear here as soon as one starts.',
     'meetings.group.today': 'Today', 'meetings.group.yesterday': 'Yesterday', 'meetings.group.week': 'This week',
     'meetings.group.earlier': 'Earlier', 'meetings.more': 'Show more ({n} left)', 'meetings.untitled': 'Untitled meeting',
     'meetings.all': 'All meetings', 'meetings.gone': 'This meeting is no longer there.', 'meetings.with': 'with {names}',
+    'meetings.finding.one': '{n} to-do for you is still open in these meetings.',
+    'meetings.finding.other': '{n} to-dos for you are still open in these meetings.',
+    'meetings.facts': 'This meeting', 'meetings.fact.length': 'Length', 'meetings.fact.language': 'Language',
+    'meetings.fact.with': 'With', 'meetings.fact.items': 'To-dos', 'meetings.fact.decisions': 'Decisions',
+    'meetings.fact.sent': 'Sent to', 'meetings.fact.not_sent': 'Not sent yet',
     'meetings.push': 'Send to my tools', 'meetings.rewrite': 'Rewrite notes', 'meetings.rewriting': 'Rewriting…',
     'meetings.rewrite_help': 'Write the notes again from the transcript and the current to-dos (takes about a minute).',
     'meetings.finder': 'Show in Finder', 'meetings.folder': 'Show the folder',
@@ -3828,6 +4217,10 @@ const STRINGS = {
     'costs.bar_aria': '{day}: {total} (speech-to-text {stt}, Claude {claude}, agents {agents})',
     'costs.as_table': 'Show as a table', 'costs.day': 'Day', 'costs.total': 'Total', 'costs.history': 'Last 30 days',
     'costs.history_empty': 'Nothing spent in the last 30 days.',
+    'costs.finding': 'Most of it went to {service}: {amount} of the {total} spent in the last 30 days.', 'costs.per_day_usd': 'Per day, in US dollars',
+    'costs.key_day': 'Spent that day', 'costs.key_today': 'Today, so far',
+    'costs.by_service': 'By service, most costly first', 'costs.month': 'In the last 30 days',
+    'costs.per_day_avg': 'About {amount} a day on average',
     'costs.backend.whisper-cpp': 'on this Mac', 'costs.backend.local': 'on this computer', 'costs.backend.openai': 'OpenAI',
     'costs.backend.openai-realtime': 'OpenAI', 'costs.backend.deepgram': 'Deepgram', 'costs.backend.fake': 'test mode',
     'costs.estimate': 'A typical day with your settings', 'costs.hours': '{n} h', 'costs.hours_label': 'Hours of meetings per day',
@@ -3934,6 +4327,7 @@ const STRINGS = {
 
     'tools.lead': 'Where your to-dos and notes go. Turn on the ones you use, then press Test.',
     'tools.more': 'More tools', 'tools.more_help': 'Notion, Linear, Slack…', 'tools.enable': 'Turn on {name}',
+    'tools.summary': 'Turned on:', 'tools.summary_none': 'None is turned on yet: the notes stay in your Voicestream folder.',
     'tools.test': 'Test', 'tools.testing': 'Testing…', 'tools.mac_only': 'Mac only',
     'tools.save_first': 'Save your changes first, then test.', 'tools.test_off': 'Turn it on and save first.',
     'tools.test_ok': 'Works: {detail}',
@@ -3998,6 +4392,8 @@ const STRINGS = {
     'adv.setup': 'Setup', 'adv.setup_lead': 'Go through the first-run setup again.', 'adv.setup_again': 'Run the setup again',
 
     'setup.title': 'Setup', 'setup.step': 'Step {n} of {total}', 'setup.close': 'Close setup',
+    'setup.nav.welcome': 'Welcome', 'setup.nav.you': 'About you', 'setup.nav.stt': 'Speech-to-text', 'setup.nav.claude': 'Claude',
+    'setup.nav.perms': 'Permissions', 'setup.nav.tools': 'Your tools', 'setup.nav.done': 'All set',
     'setup.downloading': 'Downloading the speech model', 'setup.back': 'Back', 'setup.next': 'Continue',
     'setup.welcome.title': 'Welcome to Voicestream',
     'setup.welcome.lead': 'Voicestream listens to your meetings and turns them into clear notes and to-do lists — by itself, in French and in English.',
@@ -4064,6 +4460,7 @@ const STRINGS = {
 
     'nav.label': 'Navigation', 'nav.live': 'En direct', 'nav.meetings': 'Réunions', 'nav.costs': 'Coûts', 'nav.settings': 'Réglages',
     'nav.live_now': 'En cours',
+    'nav.menu': 'Menu',
 
     'state.stopped': 'À l’arrêt', 'state.starting': 'Démarrage…', 'state.listening': 'À l’écoute',
     'state.paused': 'En pause — rien n’est enregistré', 'state.paused_short': 'En pause', 'state.stopping': 'Arrêt…',
@@ -4171,18 +4568,27 @@ const STRINGS = {
     'live.idle.stopped': 'À l’arrêt', 'live.idle.stopped_text': 'Appuyez sur Commencer l’écoute quand vous voulez que Voicestream prenne des notes de vos réunions.',
     'live.no_meetings': 'Aucune réunion pour l’instant', 'live.no_meetings_text': 'Vos réunions et leurs notes apparaîtront ici.',
     'live.just_ended': 'Vient de se terminer', 'live.last_meeting': 'Dernière réunion', 'live.open_notes': 'Ouvrir les notes',
+    'live.week': '7 derniers jours', 'live.week.meetings': 'Réunions', 'live.week.actions': 'Tâches', 'live.week.mine': 'Pour vous',
+    'live.week.decisions': 'Décisions', 'live.earlier': 'Avant', 'live.none_earlier': 'Pas d’autre réunion pour l’instant.',
+    'live.last_items_none': 'Aucune tâche ni décision n’est sortie de cette réunion.', 'live.more_items': 'et {n} autres dans les notes',
     'live.me': 'Moi', 'live.others': 'Les autres', 'live.screen': 'Écran',
+    'voices.title': 'Qui a parlé, et quand', 'voices.kept': 'Noté', 'voices.share': '{who} {pct} %',
     'src.mic': 'Votre micro', 'src.system': 'Son de la réunion',
     'md.done': 'fait', 'md.todo': 'à faire',
 
     'meetings.title': 'Réunions', 'meetings.sub': 'Toutes les réunions entendues par Voicestream, avec leurs notes et leurs tâches.',
     'meetings.search': 'Rechercher des réunions', 'meetings.search_ph': 'Titres, personnes, tâches…',
     'meetings.show_folder': 'Afficher le dossier', 'meetings.live': 'En direct', 'meetings.in_progress': 'En cours',
-    'meetings.sent_to': 'envoyé vers {tools}', 'meetings.error': 'Impossible de charger les réunions', 'meetings.no_match': 'Aucune réunion ne correspond à « {q} ».',
+    'meetings.sent_to': 'Envoyé vers {tools}', 'meetings.error': 'Impossible de charger les réunions', 'meetings.no_match': 'Aucune réunion ne correspond à « {q} ».',
     'meetings.empty': 'Aucune réunion pour l’instant', 'meetings.empty_text': 'Elles apparaissent ici dès que l’une commence.',
     'meetings.group.today': 'Aujourd’hui', 'meetings.group.yesterday': 'Hier', 'meetings.group.week': 'Cette semaine',
     'meetings.group.earlier': 'Plus tôt', 'meetings.more': 'Voir plus ({n} restantes)', 'meetings.untitled': 'Réunion sans titre',
     'meetings.all': 'Toutes les réunions', 'meetings.gone': 'Cette réunion n’existe plus.', 'meetings.with': 'avec {names}',
+    'meetings.finding.one': '{n} tâche pour vous est encore ouverte dans ces réunions.',
+    'meetings.finding.other': '{n} tâches pour vous sont encore ouvertes dans ces réunions.',
+    'meetings.facts': 'Cette réunion', 'meetings.fact.length': 'Durée', 'meetings.fact.language': 'Langue',
+    'meetings.fact.with': 'Avec', 'meetings.fact.items': 'Tâches', 'meetings.fact.decisions': 'Décisions',
+    'meetings.fact.sent': 'Envoyé vers', 'meetings.fact.not_sent': 'Pas encore envoyé',
     'meetings.push': 'Envoyer vers mes outils', 'meetings.rewrite': 'Réécrire les notes', 'meetings.rewriting': 'Réécriture…',
     'meetings.rewrite_help': 'Rédiger à nouveau les notes à partir de la transcription et des tâches actuelles (environ une minute).',
     'meetings.finder': 'Afficher dans le Finder', 'meetings.folder': 'Afficher le dossier',
@@ -4218,6 +4624,10 @@ const STRINGS = {
     'costs.bar_aria': '{day} : {total} (transcription {stt}, Claude {claude}, agents {agents})',
     'costs.as_table': 'Afficher en tableau', 'costs.day': 'Jour', 'costs.total': 'Total', 'costs.history': '30 derniers jours',
     'costs.history_empty': 'Aucune dépense ces 30 derniers jours.',
+    'costs.finding': 'La plus grande part pour {service} : {amount} des {total} dépensés ces 30 derniers jours.', 'costs.per_day_usd': 'Par jour, en dollars US',
+    'costs.key_day': 'Dépensé ce jour-là', 'costs.key_today': 'Aujourd’hui, pour l’instant',
+    'costs.by_service': 'Par service, le plus coûteux d’abord', 'costs.month': 'Ces 30 derniers jours',
+    'costs.per_day_avg': 'Environ {amount} par jour en moyenne',
     'costs.backend.whisper-cpp': 'sur ce Mac', 'costs.backend.local': 'sur cet ordinateur', 'costs.backend.openai': 'OpenAI',
     'costs.backend.openai-realtime': 'OpenAI', 'costs.backend.deepgram': 'Deepgram', 'costs.backend.fake': 'mode test',
     'costs.estimate': 'Une journée type avec vos réglages', 'costs.hours': '{n} h', 'costs.hours_label': 'Heures de réunion par jour',
@@ -4324,6 +4734,7 @@ const STRINGS = {
 
     'tools.lead': 'Où vont vos tâches et vos notes. Activez ceux que vous utilisez, puis appuyez sur Tester.',
     'tools.more': 'Autres outils', 'tools.more_help': 'Notion, Linear, Slack…', 'tools.enable': 'Activer {name}',
+    'tools.summary': 'Activés :', 'tools.summary_none': 'Aucun n’est activé pour l’instant : les notes restent dans votre dossier Voicestream.',
     'tools.test': 'Tester', 'tools.testing': 'Test en cours…', 'tools.mac_only': 'Mac uniquement',
     'tools.save_first': 'Enregistrez d’abord vos modifications, puis testez.', 'tools.test_off': 'Activez-le et enregistrez d’abord.',
     'tools.test_ok': 'Fonctionne : {detail}',
@@ -4385,6 +4796,8 @@ const STRINGS = {
     'adv.setup': 'Configuration', 'adv.setup_lead': 'Refaire la configuration du premier lancement.', 'adv.setup_again': 'Refaire la configuration',
 
     'setup.title': 'Configuration', 'setup.step': 'Étape {n} sur {total}', 'setup.close': 'Fermer la configuration',
+    'setup.nav.welcome': 'Bienvenue', 'setup.nav.you': 'À propos de vous', 'setup.nav.stt': 'Transcription', 'setup.nav.claude': 'Claude',
+    'setup.nav.perms': 'Autorisations', 'setup.nav.tools': 'Vos outils', 'setup.nav.done': 'Terminé',
     'setup.downloading': 'Téléchargement du modèle de transcription', 'setup.back': 'Retour', 'setup.next': 'Continuer',
     'setup.welcome.title': 'Bienvenue dans Voicestream',
     'setup.welcome.lead': 'Voicestream écoute vos réunions et en fait des notes claires et des listes de tâches — tout seul, en français et en anglais.',
