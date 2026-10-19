@@ -20,3 +20,6 @@ sessions/
 .voicestream/
 *.wav
 !tests/fixtures/*.wav
+
+# taste-skill working files (screenshots, direction sheets)
+.taste-skill/
