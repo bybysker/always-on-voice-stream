@@ -64,6 +64,7 @@
   --voice-others: #8a8a8a;
   --positive: #2e7d32;
   --negative: #c4242a;
+  --on-negative: #ffffff;  /* a confirmation that cannot be undone: its label on the negative fill */
   --warning: #92400e;
   --pill-bg: #eeeeee; --pill-ink: #3d3d3d;
   --pill-positive-bg: #dcfae5; --pill-positive-ink: #04250e;
@@ -112,6 +113,7 @@
     --voice-others: #7d7d7d;
     --positive: #3fc07a;
     --negative: #f0666f;
+    --on-negative: #0a0a0a;  /* white on this coral is 3:1; ink is 6.4:1, as the inverted primary */
     --warning: #e0a24a;
     --pill-bg: #262626; --pill-ink: #cfcfcf;
     --pill-positive-bg: #172a1d; --pill-positive-ink: #3fc07a;
@@ -188,7 +190,7 @@ kbd {
 .btn.primary { background: var(--primary); color: var(--on-primary); }
 .btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--primary) 84%, var(--ground)); }
 .btn.danger { color: var(--negative); }
-.btn.danger.solid { background: var(--negative); color: #fff; }
+.btn.danger.solid { background: var(--negative); color: var(--on-negative); }
 .btn.ghost { background: transparent; }
 .btn.ghost:hover:not(:disabled) { background: var(--raised); }
 .btn.small { min-height: 28px; padding: 0 10px; font-size: var(--fs-small); gap: 5px; }
@@ -490,8 +492,8 @@ body.live-meeting main { min-height: 0; display: flex; flex-direction: column; }
 .seg.screen { color: var(--muted); }
 .seg.partial { background: none; }
 .seg.partial .txt { font-style: italic; color: var(--muted); }
-/* the words a to-do or a decision came from */
-.said { box-shadow: inset 2px 0 0 var(--hue); }  /* taste-skill-ignore: a mark at the line's edge, not a shadow */
+/* the words a to-do or a decision came from: a straight edge (round corners would bend it into a "(") */
+.said { box-shadow: inset 2px 0 0 var(--hue); border-top-left-radius: 0; border-bottom-left-radius: 0; }  /* taste-skill-ignore: a mark at the line's edge, not a shadow */
 .said-tag {
   display: inline-flex; align-items: center; gap: 5px; margin-left: 8px; white-space: nowrap;
   color: var(--hue-text); font-size: var(--fs-small); font-weight: 500;
@@ -633,6 +635,9 @@ form.edit .row input { flex: 1 1 120px; }
 .back .icon { width: 16px; height: 16px; }
 .detail-head h1 { overflow-wrap: anywhere; }
 .detail-head .sep { color: var(--muted); }
+.meta-line .with-sep { display: inline-flex; gap: 8px; }
+/* how long, in what language, with whom: the facts say it beside the tabs; the title's line, when they go under them */
+.meta-line .facts-here { display: none; }
 .detail-head .tldr { margin-top: 8px; font-size: var(--fs-section); line-height: 24px; max-width: 72ch; }
 .detail-head .row { margin-top: 14px; }
 .readonly-note { margin-bottom: 12px; }
@@ -861,6 +866,7 @@ table.data th { color: var(--muted); font-weight: 400; }
 .perm:first-child { border-top: 0; padding-top: 0; }
 .perm > .icon { color: var(--muted); }
 .perm .grow { display: flex; flex-direction: column; gap: 2px; }
+.perm > .grow { flex: 1 1 160px; }  /* from 160 px, not the description's full length: its words wrap before the row does */
 .perm .grow strong { font-weight: 500; }
 .perm .grow > span { color: var(--muted); font-size: var(--fs-small); line-height: 18px; }
 .perm .result { display: flex; align-items: center; gap: 6px; flex-basis: 100%; }
@@ -954,7 +960,8 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
   .mrow { grid-template-columns: 72px minmax(0, 1fr) 112px 112px 56px; }
   .mrow .col-sent { grid-column: 2; grid-row: 2; }
   .detail-grid { grid-template-columns: minmax(0, 1fr); }
-  .facts { position: static; }
+  .facts { position: static; padding-left: 0; }  /* under the tabs, on the cards' and the title's edge */
+  .meta-line .facts-here { display: inline-flex; }
   .facts .kv { grid-template-columns: max-content minmax(0, 1fr); }
 }
 @media (max-width: 1100px) {
@@ -963,8 +970,15 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
   .costs-grid > .history, .costs-side { grid-column: 1 / -1; }
   .costs-side { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-/* the tablet and the phone: the sidebar becomes a bar at the top, its menu opens the rest as a sheet */
-@media (max-width: 900px) {
+/* a settings panel beside its label would be under about 480 px: the label goes above it */
+@media (max-width: 1040px) {
+  .set-row { grid-template-columns: minmax(0, 1fr); padding: 24px 0; gap: 12px; }
+  .set-label { position: static; }
+}
+/* the tablet and the phone: the sidebar becomes a bar at the top, its menu opens the rest as a sheet.
+   Under 900 px only: the Mac window stops at 900 (native.py's MIN_SIZE), and at its smallest it keeps
+   the sidebar and the meeting's two panes side by side. */
+@media (max-width: 899px) {
   .shell { display: block; }
   .sidebar {
     position: sticky; top: 0; z-index: 20; height: auto; overflow: visible;
@@ -993,11 +1007,9 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
   .screen { padding: 24px 24px 48px; }
   #notices:not(:empty) { padding: 16px 24px 0; }
   .savebar { margin: 0 -24px -48px; padding: 12px 24px; }
-  .set-row { grid-template-columns: minmax(0, 1fr); padding: 24px 0; gap: 12px; }
-  .set-label { position: static; }
-  .panes { grid-template-columns: minmax(0, 1fr); }
-  body.live-meeting .frame { height: auto; }
-  .pane { max-height: 70vh; min-height: 320px; }
+  /* a meeting still fills the window under the bar, its two panes side by side, each scrolling */
+  body.live-meeting .shell { display: flex; flex-direction: column; height: 100vh; }
+  body.live-meeting .frame { flex: 1; min-height: 0; height: auto; }
   .estimate-grid { grid-template-columns: minmax(0, 1fr); gap: 16px; }
   form.add.compact:not(.open) .btn-label { display: none; }  /* "+" alone until you start adding one */
   .setup { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto 1fr; }
@@ -1032,11 +1044,17 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
   .mrow .col-sent { grid-column: 1 / -1; grid-row: 3; }
   .mrow .dur { grid-column: 4; grid-row: 2; font-size: var(--fs-small); }
   .costs-side { grid-template-columns: minmax(0, 1fr); }
+  /* a meeting on a phone: one pane under the other, the page scrolls */
+  body.live-meeting .shell { display: block; height: auto; }
+  body.live-meeting .frame { height: auto; }
+  .panes { grid-template-columns: minmax(0, 1fr); }
+  .pane { max-height: 70vh; min-height: 320px; }
   .chart .plot { margin-left: 40px; }
   .chart .ytick { left: -40px; width: 34px; }
   .chart .xlabels { margin-left: 40px; }
   .voices { padding: 12px 16px 8px; }
   .lane { grid-template-columns: 52px minmax(0, 1fr); gap: 8px; }
+  .axis > span.minor { display: none; }  /* 3 or 4 labels, or the last two touch ("8 min10 min") */
   .tabs { gap: 16px; padding: 0 16px; }
   .choices.two, .promises { grid-template-columns: minmax(0, 1fr); }
   .email-grid { grid-template-columns: minmax(0, 1fr); gap: 4px; }
