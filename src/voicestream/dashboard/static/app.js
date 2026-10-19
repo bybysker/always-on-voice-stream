@@ -4053,7 +4053,9 @@ const SHORTCUT_RESERVED = Object.fromEntries([
     'cmd+Space', 'alt+cmd+Space', 'ctrl+Space', 'ctrl+alt+Space', 'ctrl+cmd+Space', 'alt+cmd+Escape',
     'ctrl+cmd+KeyQ', 'shift+cmd+KeyQ', 'alt+shift+cmd+KeyQ', 'shift+cmd+Digit3', 'shift+cmd+Digit4', 'shift+cmd+Digit5',
     'shift+cmd+Digit6', 'ctrl+shift+cmd+Digit3', 'ctrl+shift+cmd+Digit4', 'ctrl+cmd+KeyF', 'alt+cmd+KeyD',
-    'ctrl+ArrowLeft', 'ctrl+ArrowRight', 'ctrl+ArrowUp', 'ctrl+ArrowDown', 'cmd+F5', 'alt+cmd+F5', 'ctrl+F2', 'ctrl+F3',
+    'ctrl+ArrowLeft', 'ctrl+ArrowRight', 'ctrl+ArrowUp', 'ctrl+ArrowDown', 'cmd+F5', 'alt+cmd+F5',
+    // keyboard navigation: keyboard access, focus on the menu bar, the Dock, a window, the toolbar…
+    'ctrl+F1', 'ctrl+F2', 'ctrl+F3', 'ctrl+F4', 'ctrl+F5', 'ctrl+F6', 'ctrl+F7', 'ctrl+F8',
   ].map((c) => [c, 'mac']),
 ]);
 
@@ -4066,7 +4068,10 @@ function shortcutMods(mods) { return SHORTCUT_MODS.filter((m) => (mods || []).in
 /** What is printed on the key: its label here when that is a plain character, else a US keyboard's. */
 function shortcutLabel(code, key) {
   const k = String(key || '').trim();
-  if ((/^Key/.test(code) || Object.hasOwn(SHORTCUT_PUNCT, code)) && [...k].length === 1 && /^[^\p{C}\p{Z}]$/u.test(k)) return k.toUpperCase();
+  if ((/^Key/.test(code) || Object.hasOwn(SHORTCUT_PUNCT, code)) && [...k].length === 1 && /^[^\p{C}\p{Z}]$/u.test(k)) {
+    const upper = k.toUpperCase();
+    return [...upper].length === 1 ? upper : k;  // the German ß is ß on the key, not SS
+  }
   if (/^Key|^Digit/.test(code)) return code.replace(/^Key|^Digit/, '');
   if (Object.hasOwn(SHORTCUT_PUNCT, code)) return SHORTCUT_PUNCT[code];
   if (code === 'Space') return t('shortcut.key.space');
@@ -4098,12 +4103,17 @@ function shortcutText(hk) {
   return shortcutMods(hk.mods).map((m) => SHORTCUT_GLYPHS[m]).join('') + shortcutLabel(hk.code, hk.key);
 }
 
-/** A keydown as a shortcut. With ⌥ held a Mac gives the character ⌥ types (⌥R is ®), and with ⇧ the
- *  shifted one: the label then comes from the physical key. */
+/** A keydown as a shortcut. With ⌥ held a Mac gives the character ⌥ types (⌥R is ®, ⌥A is æ on a French
+ *  keyboard) — unless ⌃ is held too: WebKit then gives what the key types without them — and with ⇧ the
+ *  shifted one. The label then comes from what the Mac app read from macOS: what each key types with
+ *  nothing held on the keyboard layout in use (S.app.keyboard_layout, as the server checks it too);
+ *  without it (the browser), from the physical key. */
 function shortcutFromEvent(e) {
   const mods = SHORTCUT_MODS.filter((m) => e[SHORTCUT_EVENT_MODS[m]]);
-  const plain = !e.altKey && !(e.shiftKey && Object.hasOwn(SHORTCUT_PUNCT, e.code));
-  return { code: e.code, mods, key: plain && [...e.key].length === 1 ? e.key : '' };
+  const plain = (!e.altKey || e.ctrlKey) && !(e.shiftKey && Object.hasOwn(SHORTCUT_PUNCT, e.code));
+  if (plain && [...e.key].length === 1) return { code: e.code, mods, key: e.key };
+  const layout = (S.app && S.app.keyboard_layout) || {};
+  return { code: e.code, mods, key: Object.hasOwn(layout, e.code) ? String(layout[e.code]) : '' };
 }
 
 /** The Live screen's line for when it isn't listening: the shortcut, once macOS took it. */
@@ -4457,7 +4467,7 @@ const STRINGS = {
     'shortcut.why.reserved_app': '{keys} is a command every Mac app has (Quit, Close, Hide, Minimize, Settings): choose another.',
     'shortcut.why.reserved_mac': 'macOS uses {keys} itself (switching apps or windows, Spotlight, input sources, screenshots, Force Quit…): choose another.',
     'shortcut.why.option_only': 'macOS 15 can refuse a shortcut held with ⌥ alone, or ⌥⇧ ({keys}): hold ⌘ or ⌃ too.',
-    'shortcut.sound': 'Play a sound when the shortcut starts or stops listening', 'shortcut.sound_help': 'So you know it worked without looking.',
+    'shortcut.sound': 'Play a sound when the shortcut starts or stops listening', 'shortcut.sound_help': 'So you know it worked without looking — and another one when listening couldn’t start.',
     'shortcut.hint': 'You can also press {keys} in any app.',
 
     'lang.fr+en': 'French and English', 'lang.fr+en.desc': 'Either language, even both in one meeting.',
@@ -4880,7 +4890,7 @@ const STRINGS = {
     'shortcut.why.reserved_app': '{keys} est une commande de toutes les apps Mac (Quitter, Fermer, Masquer, Placer dans le Dock, Réglages) : choisissez-en un autre.',
     'shortcut.why.reserved_mac': 'macOS utilise lui-même {keys} (changer d’app ou de fenêtre, Spotlight, sources de saisie, captures d’écran, Forcer à quitter…) : choisissez-en un autre.',
     'shortcut.why.option_only': 'macOS 15 peut refuser un raccourci avec ⌥ seule, ou ⌥⇧ ({keys}) : maintenez aussi ⌘ ou ⌃.',
-    'shortcut.sound': 'Jouer un son quand le raccourci démarre ou arrête l’écoute', 'shortcut.sound_help': 'Pour savoir que c’est fait sans regarder.',
+    'shortcut.sound': 'Jouer un son quand le raccourci démarre ou arrête l’écoute', 'shortcut.sound_help': 'Pour savoir que c’est fait sans regarder — et un autre son si l’écoute n’a pas pu démarrer.',
     'shortcut.hint': 'Vous pouvez aussi appuyer sur {keys} dans n’importe quelle app.',
 
     'lang.fr+en': 'Français et anglais', 'lang.fr+en.desc': 'L’une ou l’autre, même les deux dans une réunion.',

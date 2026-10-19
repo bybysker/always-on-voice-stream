@@ -1,15 +1,19 @@
-"""The keyboard shortcut (voicestream/app/hotkey.py): its rules, its labels and the Carbon calls.
+"""The keyboard shortcut (voicestream/app/hotkey.py): its rules, its labels, the Carbon calls and the
+keyboard layout's.
 
 The Carbon part can only really run on a Mac (the packaged app's self-test does: it registers the
-shortcut and presses it). Here it runs against a stand-in HIToolbox compiled from the prototypes in
-Apple's headers, so what ctypes passes — the EventHotKeyID struct by value, the four-char codes,
-the double, the out-pointers, the callback — is checked byte for byte.
+shortcut, presses it and reads the keyboard layout). Here it runs against a stand-in HIToolbox
+(with UCKeyTranslate and the CoreFoundation calls) compiled from the prototypes in Apple's headers,
+so what ctypes passes — the EventHotKeyID struct by value, the four-char codes, the double, the
+out-pointers, the callback, the property keys read from their variables, the UTF-16 buffer — is
+checked byte for byte.
 """
 
 from __future__ import annotations
 
 import ctypes
 import shutil
+import string
 import subprocess
 import sys
 from pathlib import Path
@@ -29,7 +33,8 @@ from voicestream.app import hotkey
         ("KeyR", ["cmd", "alt", "cmd"], "", None),          # any order, repeats
         ("KeyK", ["ctrl", "alt"], "", None),
         ("KeyR", ["ctrl", "alt", "shift", "cmd"], "", None),
-        ("F5", ["ctrl"], "", None),                         # a function key: one modifier is enough
+        ("F13", ["ctrl"], "", None),                        # a function key: one modifier is enough
+        ("F5", ["ctrl", "alt"], "", None),
         ("F19", ["cmd", "shift"], "", None),
         ("F19", ["alt"], "", "option_only"),                # … but not ⌥ alone: macOS 15 can refuse it
         ("F19", ["alt", "shift"], "", "option_only"),
@@ -58,6 +63,9 @@ from voicestream.app import hotkey
         ("Digit4", ["shift", "cmd"], "", "reserved_mac"),   # screenshots
         ("ArrowLeft", ["ctrl"], "", "reserved_mac"),        # Spaces
         ("F5", ["cmd"], "", "reserved_mac"),                # VoiceOver
+        # keyboard navigation, all of it: keyboard access, the menu bar, the Dock, the next window, the
+        # toolbar, the floating window, how Tab moves, the status menus (macOS keeps the press)
+        *((f"F{n}", ["ctrl"], "", "reserved_mac") for n in range(1, 9)),
         ("Fn", ["alt", "cmd"], "", "unknown_key"),
         ("Numpad1", ["alt", "cmd"], "", "unknown_key"),
         ("MetaLeft", ["alt", "cmd"], "", "unknown_key"),
@@ -88,6 +96,7 @@ def test_labels_and_the_macos_glyphs() -> None:
         ("KeyR", "", "R"), ("KeyR", "r", "R"),          # a letter in capitals, as on the key
         ("KeyY", "z", "Z"),                             # QWERTZ: the key printed Z
         ("KeyM", ",", ","),                             # AZERTY: the key printed ,
+        ("Minus", "ß", "ß"), ("KeyY", "ÿ", "Ÿ"),        # German: ß has no one-letter capital
         ("Digit1", "&", "1"), ("Digit1", "", "1"),      # AZERTY types & there: the digit is what is printed
         ("Comma", "", ","), ("Comma", ";", ";"), ("IntlBackslash", "", "§"),
         ("Enter", "Enter", "↩"), ("Backspace", "", "⌫"), ("Escape", "", "⎋"), ("Tab", "", "⇥"), ("ArrowUp", "", "↑"),
@@ -275,6 +284,73 @@ OSStatus fake_press(int foreign) {
     ReleaseEvent(e);
     return r;
 }
+
+/* The keyboard layout: TextInputSources.h and Events.h (HIToolbox), UnicodeUtilities.h (CarbonCore),
+   CFData.h, CFString.h and CFBase.h (CoreFoundation). The layout's 'uchr' data here is a table of what
+   each virtual key code types with nothing held, in UTF-16. */
+typedef uint8_t UInt8;
+typedef uint16_t UInt16, UniChar;
+typedef unsigned long UniCharCount;
+typedef long CFIndex;
+typedef unsigned char Boolean;
+
+static int source, id_string, layout_data, id_key, uchr_key;
+const void *const kTISPropertyInputSourceID = &id_key;  /* what the variables hold is the key */
+const void *const kTISPropertyUnicodeKeyLayoutData = &uchr_key;
+static UniChar layout_keys[128][2];
+static int sources_alive, no_uchr, bad_calls, translations;
+enum { KBD_TYPE = 43 };
+
+void *TISCopyCurrentKeyboardLayoutInputSource(void) { sources_alive++; return &source; }
+
+void *TISGetInputSourceProperty(void *inputSource, const void *propertyKey) {
+    if (inputSource != &source || sources_alive < 1) { bad_calls++; return 0; }
+    if (propertyKey == &id_key) return &id_string;
+    if (propertyKey == &uchr_key) return no_uchr ? 0 : &layout_data;
+    bad_calls++;
+    return 0;
+}
+
+UInt8 LMGetKbdType(void) { return KBD_TYPE; }
+
+const UInt8 *CFDataGetBytePtr(const void *theData) {
+    if (theData != &layout_data) { bad_calls++; return 0; }
+    return (const UInt8 *)layout_keys;
+}
+
+Boolean CFStringGetCString(const void *theString, char *buffer, CFIndex bufferSize, uint32_t encoding) {
+    static const char id[] = "com.apple.keylayout.French";
+    if (theString != &id_string || encoding != 0x08000100 || bufferSize < (CFIndex)sizeof id) return 0;
+    memcpy(buffer, id, sizeof id);
+    return 1;
+}
+
+void CFRelease(const void *cf) { if (cf == &source) sources_alive--; else bad_calls++; }
+
+OSStatus UCKeyTranslate(const void *keyLayoutPtr, UInt16 virtualKeyCode, UInt16 keyAction, UInt32 modifierKeyState,
+                        UInt32 keyboardType, OptionBits keyTranslateOptions, UInt32 *deadKeyState,
+                        UniCharCount maxStringLength, UniCharCount *actualStringLength, UniChar unicodeString[]) {
+    const UniChar *typed;
+    translations++;
+    if (keyLayoutPtr != (const void *)layout_keys || keyAction != 0 /* kUCKeyActionDown */ || modifierKeyState != 0
+        || keyboardType != KBD_TYPE || !deadKeyState || *deadKeyState != 0 || maxStringLength < 2
+        || !actualStringLength || !unicodeString || virtualKeyCode >= 128) {
+        bad_calls++;
+        return -50;  /* paramErr */
+    }
+    typed = layout_keys[virtualKeyCode];
+    *actualStringLength = 0;
+    if (typed[0] == '^' && !(keyTranslateOptions & 1)) { *deadKeyState = 1; return 0; }  /* a dead key: waits */
+    for (int i = 0; i < 2 && typed[i]; i++) unicodeString[(*actualStringLength)++] = typed[i];
+    return 0;
+}
+
+/* the test's side */
+void fake_set_key(UInt16 code, UniChar first, UniChar second) { layout_keys[code][0] = first; layout_keys[code][1] = second; }
+void fake_no_uchr(int on) { no_uchr = on; }
+int fake_sources_alive(void) { return sources_alive; }
+int fake_bad_calls(void) { return bad_calls; }
+int fake_translations(void) { return translations; }
 """
 
 
@@ -289,10 +365,14 @@ def fake_carbon(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     subprocess.run([cc, "-shared", "-fPIC", "-Wno-multichar", "-o", str(lib), str(src)], check=True, capture_output=True)
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(hotkey, "CARBON_PATHS", ("/nonexistent/HIToolbox", str(lib)))  # the first one is missing
+    monkeypatch.setattr(hotkey, "CORE_SERVICES_PATHS", ("/nonexistent/CoreServices", str(lib)))
+    monkeypatch.setattr(hotkey, "CORE_FOUNDATION_PATHS", (str(lib),))
     monkeypatch.setattr(hotkey, "_LIB", None)
+    monkeypatch.setattr(hotkey, "_LAYOUT_LIBS", None)
     fake = ctypes.CDLL(str(lib))
     fake.fake_last_when.restype = ctypes.c_double
     fake.fake_handled.restype = ctypes.c_uint32
+    fake.fake_set_key.argtypes = [ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint16]
     return fake
 
 
@@ -338,6 +418,82 @@ def test_the_carbon_calls(fake_carbon: Any) -> None:
     assert _registered(fake_carbon)[0] == 0
     assert hk.send_test_press() == hotkey.NOT_HANDLED  # no handler any more
     hk.close()  # twice is fine
+
+
+AZERTY = {  # what the keys of a French Mac keyboard type with nothing held, by physical key
+    **{f"Key{c}": c.lower() for c in string.ascii_uppercase},
+    "KeyQ": "a", "KeyA": "q", "KeyW": "z", "KeyZ": "w", "KeyM": ",", "Semicolon": "m", "Comma": ";", "Period": ":",
+    "Slash": "=", "Minus": ")", "Equal": "-", "BracketLeft": "^", "BracketRight": "$", "Quote": "ù", "Backslash": "`",
+    "Backquote": "<", "IntlBackslash": "@",
+}  # fmt: skip
+
+
+def test_the_keyboard_layout_calls(fake_carbon: Any) -> None:
+    """What the keys type on the current layout, through TIS, UCKeyTranslate and CoreFoundation as their
+    headers declare them: the property keys read from their variables, the layout's bytes, LMGetKbdType's
+    keyboard type, no modifiers, no dead keys, UTF-16 out, the input source released."""
+    for code, char in AZERTY.items():
+        fake_carbon.fake_set_key(hotkey.KEY_CODES[code], ord(char), 0)
+    ident, keys = hotkey.current_layout()
+    assert ident == "com.apple.keylayout.French"
+    assert keys == AZERTY  # ^ is a dead key there: without kUCKeyTranslateNoDeadKeysMask it would type nothing
+    assert set(keys) == set(hotkey.LAYOUT_CODES) and fake_carbon.fake_translations() == len(hotkey.LAYOUT_CODES)
+    assert fake_carbon.fake_bad_calls() == 0 and fake_carbon.fake_sources_alive() == 0
+    assert hotkey.layout_problem(ident, keys) is None
+
+    fake_carbon.fake_set_key(hotkey.KEY_CODES["Backquote"], 0xD834, 0xDD1E)  # one character beyond the BMP: two UniChars
+    fake_carbon.fake_set_key(hotkey.KEY_CODES["Period"], 0x10, 0)  # a control character: not a label
+    fake_carbon.fake_set_key(hotkey.KEY_CODES["IntlBackslash"], 0, 0)  # types nothing
+    keys = hotkey.current_layout()[1]
+    assert keys["Backquote"] == "\U0001d11e" and "Period" not in keys and "IntlBackslash" not in keys
+    assert fake_carbon.fake_bad_calls() == 0 and fake_carbon.fake_sources_alive() == 0
+
+    fake_carbon.fake_no_uchr(1)  # a layout with only 'KCHR' data
+    with pytest.raises(OSError, match="com.apple.keylayout.French has no 'uchr' data"):
+        hotkey.current_layout()
+    assert fake_carbon.fake_sources_alive() == 0  # released all the same
+
+
+def test_the_layout_check() -> None:
+    """The self-test's: a character of its own for each letter key, and on a US layout the US one."""
+    us = {code: hotkey.label(code).lower() for code in hotkey.LAYOUT_CODES}
+    assert us["KeyQ"] == "q" and us["Semicolon"] == ";"
+    assert hotkey.layout_problem("com.apple.keylayout.US", us) is None
+    assert hotkey.layout_problem("com.apple.keylayout.ABC", us | {"Backquote": "§", "IntlBackslash": "`"}) is None  # ISO
+    assert hotkey.layout_problem("com.apple.keylayout.French", AZERTY) is None
+    assert hotkey.layout_problem("com.apple.keylayout.US", AZERTY) == (
+        "com.apple.keylayout.US is a US layout, but: KeyA 'q', KeyM ',', KeyQ 'a', KeyW 'z', KeyZ 'w', Minus ')', "
+        "Equal '-', BracketLeft '^', BracketRight '$', Backslash '`', Semicolon 'm', Quote 'ù', Comma ';', "
+        "Period ':', Slash '='")
+    assert hotkey.layout_problem("com.apple.keylayout.US", {k: v for k, v in us.items() if k != "KeyQ"}) == (
+        "no character for KeyQ")
+    assert hotkey.layout_problem("x", us | {"KeyW": "q"}) == "two letter keys type the same character"
+    assert hotkey.layout_problem("x", us | {"KeyQ": "Q"}) == "a letter key types a capital with nothing held"
+    assert hotkey.layout_problem("x", {}) is not None
+
+
+def test_the_layout_off_macos(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(hotkey, "_LAYOUT_LIBS", None)
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(OSError, match="macOS"):
+        hotkey.current_layout()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the real keyboard layout")
+def test_the_real_keyboard_layout_on_a_mac() -> None:
+    """On a Mac (the macOS CI jobs, whose layout is a US one: KeyQ types q there), in its own process so a
+    wrong signature can only fail this test."""
+    code = (
+        "from voicestream.app import hotkey\n"
+        "ident, keys = hotkey.current_layout()\n"
+        "print(ident, keys)\n"
+        "problem = hotkey.layout_problem(ident, keys)\n"
+        "assert problem is None, problem\n"
+        "assert ident not in hotkey.US_LAYOUTS or keys['KeyQ'] == 'q'\n"
+        "print('ok')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, check=False)
+    assert out.returncode == 0 and out.stdout.strip().endswith("ok"), (out.stdout, out.stderr)
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="the real HIToolbox")

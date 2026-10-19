@@ -11,7 +11,11 @@ The app's own report says ``ok`` when every check it ran passed, which is not en
   ``$VOICESTREAM_WHISPER_SERVER``, which ``find_binary`` reads first, and that says nothing about
   what users get;
 * the keyboard shortcut checks only run on a Mac: macOS must have taken it (RegisterEventHotKey
-  answered noErr), a press delivered to the app must reach the host, and the menu must show it.
+  answered noErr) and the app's state must say so, a press delivered to the app must reach the host
+  and change nothing, and the menu must show it;
+* the keyboard layout must be read from macOS (what each key types, by which Settings shows a
+  shortcut recorded with ⌥ held): a character of its own for each letter key — on the CI runners'
+  US layout the US one, KeyQ typing q — and told to the host.
 
 Prints the report and every problem; exits 1 when there is one. Standard library only.
 """
@@ -26,7 +30,7 @@ from typing import Any
 NATIVE_CHECKS = (
     "window_loaded", "page_rendered", "page_has_content", "app_page", "api_app", "status_item",
     "app_delegate_patched", "hide_on_close_and_reopen", "whisper_server_bundled",
-    "hotkey_registered", "hotkey_reaches_host", "hotkey_in_menu",
+    "hotkey_registered", "hotkey_reaches_host", "hotkey_in_menu", "keyboard_layout",
 )  # fmt: skip
 """What native mode checks in the packaged app (voicestream/app/native.py MacShell._selftest)."""
 
@@ -56,8 +60,14 @@ def problems(report: dict[str, Any], app: Path) -> list[str]:
     ws = report.get("whisper_server")
     if not ws or not _inside(str(ws), app):
         out.append(f"the app did not find its own whisper-server inside {app.name} (found: {ws})")
-    if (report.get("hotkey") or {}).get("state_after") in ("starting", "listening", "paused"):
-        out.append("the keyboard shortcut's test left the app listening")
+    hk = report.get("hotkey") or {}
+    before, after = hk.get("state_before"), hk.get("state_after")
+    if before != after:  # the test only asks the host what a press would do (set up, your Mac may be listening)
+        out.append("the keyboard shortcut's test left the app listening" if after in ("starting", "listening", "paused")
+                   else f"the keyboard shortcut's test changed the app's state ({before} → {after})")
+    if hk.get("wanted") and hk.get("register_result") == 0 and hk.get("host_status") != "ok":
+        out.append(f"macOS took the keyboard shortcut, but the app's state says {hk.get('host_status')!r}: "
+                   "the menu and Settings don't show it")
     for error in report.get("errors") or []:
         out.append(f"error: {error}")
     if "quit" not in report:

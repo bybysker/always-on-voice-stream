@@ -423,12 +423,46 @@ def test_the_keyboard_shortcut_round_trip(client: TestClient, host: AppHost, tmp
         assert r.status_code == 400 and why in r.json()["error"], (bad, r.text)
     assert host.prefs.hotkey is not None and host.prefs.hotkey.code == "KeyQ"  # nothing refused was kept
 
-    assert client.patch("/api/prefs", json={"hotkey": {"code": "F5", "mods": ["ctrl"]}}).status_code == 200  # an F-key: one is enough
+    assert client.patch("/api/prefs", json={"hotkey": {"code": "F13", "mods": ["ctrl"]}}).status_code == 200  # an F-key: one is enough
+    r = client.patch("/api/prefs", json={"hotkey": {"code": "F5", "mods": ["ctrl"]}})  # macOS's: focus on the toolbar
+    assert r.status_code == 400 and "macOS uses ⌃F5 itself" in r.json()["error"]
     assert client.patch("/api/prefs", json={"hotkey": None, "hotkey_sound": False}).json()["hotkey"] is None  # turned off
     state = client.get("/api/app").json()
     assert state["prefs"]["hotkey"] is None and state["prefs"]["hotkey_sound"] is False
     assert client.patch("/api/prefs", json={"ui_language": "en"}).json()["hotkey"] is None  # stays off
     assert client.patch("/api/prefs", json={"hotkey": {}}).json()["hotkey"] == {"code": "KeyR", "mods": ["alt", "cmd"], "key": "R"}
+
+
+AZERTY_KEYS = {"KeyQ": "a", "KeyA": "q", "KeyW": "z", "KeyZ": "w", "KeyM": ",", "Semicolon": "m", "Comma": ";"}
+
+
+def test_a_shortcut_recorded_with_option_is_checked_by_the_keyboard_layout(client: TestClient, host: AppHost,
+                                                                           tmp_path: Path) -> None:
+    """With ⌥ held a Mac gives the page the character ⌥ types, so it may send no label: the server then
+    goes by what the native shell read from macOS for that key (a French AZERTY keyboard here), as the
+    page does — not by the US letter at that place."""
+    assert client.get("/api/app").json()["keyboard_layout"] == {}  # the browser, Linux: not known
+    # not known: the US letter of the physical key, as before
+    assert client.patch("/api/prefs", json={"hotkey": {"code": "KeyQ", "mods": ["alt", "cmd"]}}).json()["hotkey"]["key"] == "Q"
+
+    host.set_keyboard_layout(AZERTY_KEYS)  # the native shell, at launch
+    assert client.get("/api/app").json()["keyboard_layout"] == AZERTY_KEYS
+    # ⌥⌘ and the key printed W there (KeyZ) is Close All: refused, and said with the key's own letter
+    r = client.patch("/api/prefs", json={"hotkey": {"code": "KeyZ", "mods": ["alt", "cmd"], "key": ""}})
+    assert r.status_code == 400 and "⌥⌘W is a command every Mac app has" in r.json()["error"], r.text
+    # ⌥⌘ and the key printed Z (KeyW) is fine there
+    body = client.patch("/api/prefs", json={"hotkey": {"code": "KeyW", "mods": ["alt", "cmd"]}}).json()
+    assert body["hotkey"] == {"code": "KeyW", "mods": ["alt", "cmd"], "key": "Z"}
+    body = client.patch("/api/prefs", json={"hotkey": {"code": "KeyQ", "mods": ["alt", "cmd"]}}).json()
+    assert body["hotkey"]["key"] == "A"  # the key printed A, not Q
+    assert json.loads((tmp_path / "app.json").read_text())["hotkey"]["key"] == "A"
+    r = client.patch("/api/prefs", json={"hotkey": {"code": "Semicolon", "mods": ["alt", "cmd"]}})  # AZERTY's M
+    assert r.status_code == 400 and "⌥⌘M is a command every Mac app has" in r.json()["error"]
+    # what the page saw is what counts when it sent it (⌃⌥: WebKit gives what the key types)
+    assert client.patch("/api/prefs", json={"hotkey": {"code": "KeyQ", "mods": ["ctrl", "alt"], "key": "a"}}).json()[
+        "hotkey"]["key"] == "A"
+    # the host checks it the same way when it is called directly
+    assert host.update_prefs({"hotkey": {"code": "KeyZ", "mods": ["ctrl", "alt"]}}).hotkey.key == "W"
 
 
 def test_recording_a_shortcut_turns_the_current_one_off_for_a_while(client: TestClient, host: AppHost,

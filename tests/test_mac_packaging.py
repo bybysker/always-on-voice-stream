@@ -332,6 +332,23 @@ def test_selftest_verdict(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     assert check_selftest.problems(taken, app) == ["failed checks: hotkey_registered"]
     listening = _native_report(app, hotkey={"state_before": "stopped", "state_after": "listening"})
     assert check_selftest.problems(listening, app) == ["the keyboard shortcut's test left the app listening"]
+    # by hand on a Mac that is set up, the app starts listening at launch: still listening is no change
+    mine = _native_report(app, hotkey={"state_before": "listening", "state_after": "listening"})
+    assert check_selftest.problems(mine, app) == []
+    stopped = _native_report(app, hotkey={"state_before": "listening", "state_after": "stopped"})
+    assert check_selftest.problems(stopped, app) == ["the keyboard shortcut's test changed the app's state (listening → stopped)"]
+    # macOS took it, but what Settings and the menu show never heard of it
+    untold = _native_report(app, hotkey={"wanted": True, "register_result": 0, "host_status": "pending",
+                                         "state_before": "stopped", "state_after": "stopped"})
+    assert check_selftest.problems(untold, app) == [
+        "macOS took the keyboard shortcut, but the app's state says 'pending': the menu and Settings don't show it"]
+    told = _native_report(app, hotkey={"wanted": True, "register_result": 0, "host_status": "ok"})
+    off = _native_report(app, hotkey={"wanted": False, "register_result": 0, "host_status": "off"})  # registered for the test
+    assert check_selftest.problems(told, app) == check_selftest.problems(off, app) == []
+    # the keyboard layout, read from macOS (Settings labels a shortcut recorded with ⌥ by it)
+    assert "keyboard_layout" in check_selftest.NATIVE_CHECKS
+    no_layout = _native_report(app, checks={k: True for k in check_selftest.NATIVE_CHECKS if k != "keyboard_layout"})
+    assert check_selftest.problems(no_layout, app) == ["checks that did not run: keyboard_layout"]
 
     report = tmp_path / "selftest.json"
     report.write_text(json.dumps(browser), encoding="utf-8")
