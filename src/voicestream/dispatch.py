@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 
 from .config import Config
 from .events import EventBus
@@ -120,8 +120,11 @@ class Dispatcher:
         if self.bus:
             self.bus.publish("sink.error", meeting_id=self.meeting.id, item_id=item.id, sink=sink.name, error=str(exc))
 
-    async def sync(self, *, require_stable: bool = True, only: set[str] | None = None) -> int:
-        """Push/update everything that is due. Returns the number of successful operations."""
+    async def sync(
+        self, *, require_stable: bool = True, only: set[str] | None = None, sink_names: Collection[str] | None = None
+    ) -> int:
+        """Push/update everything that is due (to ``sink_names`` only, if given). Returns the number of
+        successful operations."""
         async with self._lock:
             done = 0
             for item in list(self.meeting.items.values()):
@@ -130,6 +133,8 @@ class Dispatcher:
                 if require_stable and not self._stable(item):
                     continue
                 for sink in self.sinks:
+                    if sink_names is not None and sink.name not in sink_names:
+                        continue
                     action = self._todo(item, sink)
                     if action and await self._push(item, sink, action):
                         done += 1
@@ -224,10 +229,10 @@ class Dispatcher:
         """Shutting down: make :meth:`retry_failed` try once more now and stop."""
         self._hurry.set()
 
-    async def push_notes(self, notes_markdown: str) -> dict[str, str]:
+    async def push_notes(self, notes_markdown: str, sink_names: Collection[str] | None = None) -> dict[str, str]:
         out: dict[str, str] = {}
         for sink in sorted(self.sinks, key=lambda s: s.name in LINKS_OTHER_NOTES):
-            if not (sink.supports_notes and sink.cfg.notes):
+            if not (sink.supports_notes and sink.cfg.notes) or (sink_names is not None and sink.name not in sink_names):
                 continue
             for attempt in range(2):  # notes are pushed once per meeting: give a transient failure one more go
                 try:

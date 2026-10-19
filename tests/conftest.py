@@ -17,6 +17,8 @@ def _private_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.
     home = str(tmp_path_factory.mktemp("home"))
     monkeypatch.setenv("HOME", home)
     monkeypatch.setenv("USERPROFILE", home)  # what Path.home() reads on Windows
+    # nor a real Keychain (macOS CI has one): keys saved by the app go to the private home's .env
+    monkeypatch.setenv("VOICESTREAM_SECRET_STORE", "file")
 
 
 @pytest.fixture

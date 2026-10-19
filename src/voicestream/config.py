@@ -313,7 +313,7 @@ class PricingConfig(_Section):
             "gpt-4o-mini-transcribe": 0.003,
             "gpt-4o-transcribe": 0.006,
             "whisper-1": 0.006,
-            "nova-3": 0.0077,
+            "nova-3": 0.0092,  # multilingual (language=multi, what auto-detect uses); 0.0077 for one language
             "local": 0.0,
             "fake": 0.0,
         }
@@ -412,13 +412,25 @@ def load_config(path: str | os.PathLike[str] | None = None, *, load_env: bool = 
         problems = "; ".join(f"{'.'.join(map(str, e['loc'])) or 'config'}: {e['msg']}" for e in exc.errors()[:5])
         raise ConfigError(f"{found or 'config'}: {problems}") from None
     if load_env:
-        # never overrides what is already set, so the first file to define a key wins
+        # never overrides what is already set, so the first source to define a key wins: keys saved
+        # from the app (macOS Keychain) come first, then the .env files
+        load_keychain()
         load_dotenv(Path.cwd() / ".env")
         if found is not None:
             load_dotenv(found.parent / ".env")  # where `voicestream init` puts it, next to the config
         load_dotenv(cfg.data_path / ".env")
         load_dotenv(Path("~/.voicestream/.env").expanduser())  # also when data_dir points elsewhere
     return cfg
+
+
+def load_keychain() -> None:
+    """Keys the app saved in the Keychain (see :mod:`voicestream.app.secrets`), for the CLI too.
+    Never overrides real env vars; a no-op without a usable ``keyring`` backend."""
+    try:
+        from .app.secrets import load_into_env
+    except ImportError:  # pragma: no cover - a stripped-down install
+        return
+    load_into_env()
 
 
 def load_dotenv(path: Path) -> None:

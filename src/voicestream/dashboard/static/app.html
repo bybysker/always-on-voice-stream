@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voicestream</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f7f7f8; --fg: #1d1d1f; --muted: #6e6e73; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1c1c1e; --fg: #f2f2f7; --muted: #98989d; } }
+  body { margin: 0; padding: 32px; background: var(--bg); color: var(--fg);
+         font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  h1 { font-size: 22px; margin: 0 0 8px; }
+  p { color: var(--muted); margin: 0; }
+</style>
+</head>
+<body>
+<!-- Placeholder: the real app UI replaces this page. -->
+<h1>Voicestream</h1>
+<p id="state">Connecting…</p>
+<script>
+  (function () {
+    var params = new URLSearchParams(location.search);
+    var token = params.get("token");
+    try {
+      if (token) { sessionStorage.setItem("voicestream-token", token); }
+      else { token = sessionStorage.getItem("voicestream-token"); }
+    } catch (e) { /* private mode */ }
+    if (params.has("token")) { history.replaceState(null, "", location.pathname); }
+    var out = document.getElementById("state");
+    fetch("/api/app", { headers: { "X-Voicestream-Token": token || "" } })
+      .then(function (r) { return r.json(); })
+      .then(function (s) { out.textContent = s.error ? s.error : "Voicestream " + s.version + " · " + s.state; })
+      .catch(function () { out.textContent = "Can't reach Voicestream."; });
+  })();
+</script>
+</body>
+</html>

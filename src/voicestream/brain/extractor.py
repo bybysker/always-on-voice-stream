@@ -33,6 +33,8 @@ from .tracker import ExtractionResult, ItemTracker
 log = logging.getLogger(__name__)
 
 MAX_CONTEXT_CHARS = 240_000  # ~60k tokens; keeps Haiku in its cheaper <=100k-token tier
+TRIM_TO_FRACTION = 0.7
+"""Over the cap, old transcript is dropped down to this share of it, so the cache prefix changes rarely."""
 
 
 class Extractor:
@@ -216,9 +218,14 @@ class Extractor:
         ever appended, so every call hits the prompt cache for all earlier blocks."""
         new_block = f"<transcript part='{self.rounds + 1}'>\n{self._build_block(pending, screens)}\n</transcript>"
         blocks = self._blocks + [new_block]
-        # cap context: drop the oldest blocks (one-off cache miss) when the meeting gets long
-        while len(blocks) > 1 and sum(len(b) for b in blocks) > MAX_CONTEXT_CHARS:
-            blocks.pop(0)
+        total = sum(len(b) for b in blocks)
+        if total > MAX_CONTEXT_CHARS:
+            # cap context: drop the oldest blocks when the meeting gets long, down to TRIM_TO_FRACTION of the
+            # cap in one go. Dropping a block changes the cached prefix (the whole context is written to the
+            # cache again, ~$0.01 at the cap); one block per round would pay that on every single round.
+            target = MAX_CONTEXT_CHARS * TRIM_TO_FRACTION
+            while len(blocks) > 1 and total > target:
+                total -= len(blocks.pop(0))
         return blocks
 
     def _build_block(self, pending: list[tuple[int, TranscriptSegment]], screens: list[ScreenNote]) -> str:

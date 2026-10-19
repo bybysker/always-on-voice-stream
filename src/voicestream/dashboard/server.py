@@ -5,6 +5,12 @@ The server runs inside the assistant's own event loop, so route handlers call th
 streams every bus event to the page as Server-Sent Events (one-way, reconnects by
 itself, no websocket dependency).
 
+It serves either one assistant (``voicestream run --dashboard``) or the Mac app's
+:class:`~voicestream.app.host.AppHost`, whose assistant comes and goes as you start, stop
+and restart listening: every request looks the assistant up again (none → 409 "not
+listening" on the live-meeting routes), and the event stream follows the host's bus, so
+it outlives any one assistant. The app's own routes are in :mod:`.app_routes`.
+
 It binds 127.0.0.1 by default, but any web page open in your browser can still send requests to
 localhost, so:
 
@@ -25,7 +31,7 @@ import socket
 from collections.abc import AsyncIterator, Collection, Iterator, Mapping
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import uvicorn
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -130,10 +136,14 @@ class _Guard:
     Pure ASGI rather than ``BaseHTTPMiddleware`` so the event stream isn't buffered.
     """
 
-    def __init__(self, app: ASGIApp, token: str, allowed_hosts: Collection[str] | None) -> None:
+    def __init__(
+        self, app: ASGIApp, token: str, allowed_hosts: Collection[str] | None, public_paths: Collection[str] = ("/",)
+    ) -> None:
         self.app = app
         self.token = token.encode()
         self.allowed_hosts = allowed_hosts
+        self.public_paths = frozenset(public_paths)
+        """Pages and their static files (no data in them): they read the token from their own URL."""
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -156,7 +166,7 @@ class _Guard:
     def _refusal(self, request: Request) -> Response | None:
         if self.allowed_hosts is not None and _hostname(request.headers.get("host", "")) not in self.allowed_hosts:
             return _error(403, "unexpected Host header (open the dashboard via 127.0.0.1 or localhost)")
-        if request.scope["path"] == "/":
+        if request.scope["path"] in self.public_paths:
             return None  # the page itself; it reads the token from its own URL
         given = request.headers.get(TOKEN_HEADER) or request.query_params.get("token") or ""
         # bytes, not str: compare_digest raises on non-ASCII strings
@@ -193,6 +203,14 @@ async def _invalid(request: Request, exc: ValidationError) -> JSONResponse:
     return _error(400, "; ".join(problems))
 
 
+class NotListening(Exception):
+    """A live-meeting route while the app isn't listening (no assistant)."""
+
+
+async def _not_listening(request: Request, exc: NotListening) -> JSONResponse:
+    return _error(409, "not listening")
+
+
 def _outcome(ok: bool, refusal: str) -> JSONResponse:
     return JSONResponse({"ok": True}) if ok else _error(409, refusal)
 
@@ -222,13 +240,52 @@ _SHUTDOWN = Event(type="shutdown")
 """Queued into open event streams to end them (identity-checked, never sent)."""
 
 
-class _Api:
-    def __init__(self, assistant: Assistant, page: str) -> None:
+class _SingleAssistant:
+    """``serve(assistant, …)``: a host whose assistant never changes (``voicestream run --dashboard``)."""
+
+    is_app_host = False
+
+    def __init__(self, assistant: Assistant) -> None:
         self.assistant = assistant
+        self.bus = assistant.bus
+
+    @property
+    def cfg(self) -> Any:
+        return self.assistant.cfg
+
+
+class _Api:
+    def __init__(self, host: Any, page: str) -> None:
+        self.host = host
+        """An :class:`~voicestream.app.host.AppHost`, or :class:`_SingleAssistant` around one assistant."""
         self.page = page
-        self.data_root = assistant.cfg.data_path
         self.closed = False
         self._streams: set[asyncio.Queue[Event]] = set()
+
+    @property
+    def assistant(self) -> Assistant:
+        """Looked up on every request: the app replaces its assistant on restart."""
+        a = self.host.assistant
+        if a is None:
+            raise NotListening()
+        return a
+
+    @property
+    def data_root(self) -> Path:
+        return self.host.cfg.data_path  # follows a data_dir changed in the app's settings
+
+    def snapshot(self) -> dict[str, Any]:
+        """The first frame of the event stream: the assistant's state, or an idle one between assistants."""
+        a = self.host.assistant
+        if a is not None:
+            return a.state()
+        cfg = self.host.cfg
+        return {
+            "user_name": cfg.user_name, "sources": [], "backend": cfg.transcription.backend, "extraction": None,
+            "agents_mode": cfg.agents.mode, "dispatch_mode": cfg.dispatch.mode, "sinks": [], "meeting": None,
+            "meeting_dir": None, "last_meeting": None, "previous": None, "cost": self.host.costs.snapshot(),
+            "listening": "stopped", "stopping": False,
+        }  # fmt: skip
 
     def close_streams(self) -> None:
         """End open event streams: a graceful shutdown would otherwise wait for (and then
@@ -280,12 +337,16 @@ class _Api:
             return
         loop = asyncio.get_running_loop()
         last_level: dict[str, float] = {}
-        # Starlette cancels this generator when the client goes away, which unsubscribes
-        async with self.assistant.bus.subscribe() as queue:
+        # Starlette cancels this generator when the client goes away, which unsubscribes. The host's bus,
+        # not an assistant's: the stream lives on across restarts
+        async with self.host.bus.subscribe() as queue:
             self._streams.add(queue)
             try:
                 # subscribed before the snapshot, with no await in between: nothing falls through
-                yield "retry: 3000\n" + _sse(Event(type="state", data=self.assistant.state()))
+                first = "retry: 3000\n" + _sse(Event(type="state", data=self.snapshot()))
+                if self.host.is_app_host:
+                    first += _sse(Event(type="app.state", data=self.host.state()))
+                yield first
                 while True:
                     try:
                         event = await asyncio.wait_for(queue.get(), KEEPALIVE_S)
@@ -369,9 +430,10 @@ class _Api:
     async def end_meeting(self, request: Request) -> JSONResponse:
         # finishing (final extraction, summary, push, waiting for agents) can take minutes;
         # the page follows it through meeting.ending / meeting.ended events
-        task = asyncio.ensure_future(self.assistant.end_meeting("dashboard"))
+        assistant = self.assistant
+        task = asyncio.ensure_future(assistant.end_meeting("dashboard"))
         task.add_done_callback(_log_failure)
-        self.assistant.track(task)  # so a shutdown waits for it
+        assistant.track(task)  # so a shutdown waits for it
         return JSONResponse({"ok": True}, status_code=202)
 
     async def extract(self, request: Request) -> JSONResponse:
@@ -380,17 +442,30 @@ class _Api:
 
 
 def create_app(
-    assistant: Assistant, token: str, *, allowed_hosts: Collection[str] | None = LOOPBACK_HOSTS
+    assistant: Any, token: str, *, allowed_hosts: Collection[str] | None = LOOPBACK_HOSTS
 ) -> Starlette:
-    """The dashboard ASGI app. ``allowed_hosts=None`` turns the Host check off (see
+    """The dashboard ASGI app for an :class:`Assistant`, or the Mac app's whole API for an
+    :class:`~voicestream.app.host.AppHost`. ``allowed_hosts=None`` turns the Host check off (see
     :func:`allowed_hosts_for`)."""
     if not token:
         raise ValueError("the dashboard token must not be empty")
-    api = _Api(assistant, INDEX_HTML.read_text(encoding="utf-8"))
+    host = assistant if getattr(assistant, "is_app_host", False) else _SingleAssistant(assistant)
+    api = _Api(host, INDEX_HTML.read_text(encoding="utf-8"))
+    routes, public = api.routes(), {"/"}
+    handlers: dict[Any, Any] = {
+        HTTPException: _http_error, LookupError: _not_found, ValidationError: _invalid, NotListening: _not_listening,
+    }  # fmt: skip
+    if host.is_app_host:
+        from .app_routes import AppApi
+
+        app_api = AppApi(host, api)
+        routes += app_api.routes()
+        public |= app_api.PUBLIC
+        handlers |= app_api.exception_handlers()
     app = Starlette(
-        routes=api.routes(),
-        middleware=[Middleware(_Guard, token=token, allowed_hosts=allowed_hosts)],
-        exception_handlers={HTTPException: _http_error, LookupError: _not_found, ValidationError: _invalid},
+        routes=routes,
+        middleware=[Middleware(_Guard, token=token, allowed_hosts=allowed_hosts, public_paths=public)],
+        exception_handlers=handlers,
     )
     app.state.close_streams = api.close_streams
     return app
@@ -419,9 +494,10 @@ async def _run(server: uvicorn.Server, sock: socket.socket, app: Starlette) -> N
 
 
 async def serve(
-    assistant: Assistant, cfg: DashboardConfig, token: str | None = None
+    assistant: Any, cfg: DashboardConfig, token: str | None = None
 ) -> tuple[str, asyncio.Task[None]]:
-    """Start the dashboard on the running loop; returns ``(URL with token, server task)``.
+    """Start the dashboard (for an assistant or the app host) on the running loop; returns ``(URL with
+    token, server task)``.
 
     Cancel the task to stop it. Raises :class:`OSError` when the port can't be bound.
     """

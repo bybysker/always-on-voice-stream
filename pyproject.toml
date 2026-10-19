@@ -36,8 +36,24 @@ screen = ["mss>=10.2", "pillow>=10.0"]
 dashboard = ["starlette>=0.37", "uvicorn>=0.29"]
 # Agents that actually do tasks mid-meeting.
 agents = ["claude-agent-sdk>=0.2.167"]
-all = ["voicestream[audio,local,screen,dashboard,agents]"]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "starlette>=0.37", "uvicorn>=0.29", "pillow>=10.0"]
+# The Mac app's window and menu-bar icon (`voicestream app`). Pinned: the shell reaches into
+# pywebview's Cocoa backend (voicestream/app/native.py). Installs nothing on other systems.
+mac = [
+  "pywebview==6.2.1; sys_platform == 'darwin'",
+  "pyobjc-core==12.2.2; sys_platform == 'darwin'",
+  "pyobjc-framework-Cocoa==12.2.2; sys_platform == 'darwin'",
+  "pyobjc-framework-WebKit==12.2.2; sys_platform == 'darwin'",
+  "pyobjc-framework-Quartz==12.2.2; sys_platform == 'darwin'",
+  "pyobjc-framework-AVFoundation==12.2.2; sys_platform == 'darwin'",
+  "pyobjc-framework-ServiceManagement==12.2.2; sys_platform == 'darwin'",
+  "pyobjc-framework-CoreAudio==12.2.2; sys_platform == 'darwin'",
+  "keyring>=25.7; sys_platform == 'darwin'",
+]
+# The app's backend (`voicestream app`): settings written from the UI with your comments kept
+# (tomlkit), API keys in the macOS Keychain (keyring; elsewhere ~/.voicestream/.env).
+app = ["voicestream[dashboard]", "tomlkit>=0.13.2", "keyring>=25.5"]
+all = ["voicestream[audio,local,screen,dashboard,agents,mac,app]"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "starlette>=0.37", "uvicorn>=0.29", "pillow>=10.0", "tomlkit>=0.13.2", "keyring>=25.5"]
 
 [project.scripts]
 voicestream = "voicestream.cli:main"

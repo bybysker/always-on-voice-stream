@@ -161,7 +161,7 @@ Say "**Dis Claude, …**" or "**Hey Claude, …**" to talk to the assistant dire
 |---|---|---|---|
 | OpenAI REST | `openai` (default) | $0.0045/min (`gpt-transcribe`) | One request per utterance. Stateless and robust, with about 1–2 s latency. |
 | OpenAI Realtime | `openai-realtime` | $0.0045/min, or $0.017 with `gpt-live-transcribe` | Streams while you speak, with live captions. The socket rotates before the 60-minute cap, and anything lost on a reconnect is re-sent. |
-| Deepgram | `deepgram` | about $0.0077/min (`nova-3`) | Streaming. Your `vocabulary` list becomes key terms. |
+| Deepgram | `deepgram` | about $0.0092/min (`nova-3`, multilingual) | Streaming; with `language` unset it follows French and English in the same meeting (`language=multi`). Your `vocabulary` list becomes key terms. |
 | Local Whisper | `local` | free | `faster-whisper` on your CPU or GPU. Nothing leaves the machine. |
 
 OpenAI's `gpt-4o-mini-transcribe` is cheaper at $0.003/min, but it is deprecated and shuts down

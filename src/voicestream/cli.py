@@ -1,4 +1,4 @@
-"""Command line: ``voicestream run | replay | import | devices | doctor | init | sessions | summarize | push | cost``."""
+"""Command line: ``voicestream run | replay | import | devices | doctor | init | sessions | summarize | push | cost | app``."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import argparse
 import asyncio
 import logging
 import os
-import shutil
 import sys
 import webbrowser
 from datetime import UTC, datetime, timedelta
@@ -220,126 +219,15 @@ def cmd_google_bridge(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
+    from .app.checks import failed, header, run_checks
+
     cfg = load_config(args.config)
-    ok = True
-
-    def line(status: str, what: str, detail: str = "") -> None:
-        mark = {"ok": "✔", "warn": "!", "fail": "✘"}[status]
-        print(f" {mark} {what}" + (f" — {detail}" if detail else ""))
-
-    print(f"voicestream {__version__} · python {sys.version.split()[0]} · {sys.platform}")
-    print(f"data dir: {cfg.data_path}")
-    for p in (cfg.data_path, cfg.data_path / ".env", Path("~/.voicestream/.env").expanduser()):
-        try:
-            if os.name == "posix" and p.exists() and p.stat().st_mode & 0o077:
-                line("warn", f"{p} is readable by other accounts on this computer", f"chmod {'700' if p.is_dir() else '600'} '{p}'")
-        except OSError:
-            pass
-    # transcription
-    be = cfg.transcription.backend
-    need = {"openai": "OPENAI_API_KEY", "openai-realtime": "OPENAI_API_KEY", "deepgram": "DEEPGRAM_API_KEY"}.get(be)
-    if need:
-        if os.environ.get(need):
-            line("ok", f"transcription: {be}", f"{need} set")
-        else:
-            ok = False
-            line("fail", f"transcription: {be}", f"{need} is not set")
-    elif be == "whisper-cpp":
-        from .transcribe.whisper_cpp import check as whisper_check
-
-        status, detail = whisper_check(cfg)
-        ok = ok and status != "fail"
-        line(status, "transcription: whisper.cpp on this computer (free)", detail)
-    elif be == "local":
-        try:
-            import faster_whisper  # noqa: F401
-
-            line("ok", "transcription: local faster-whisper")
-        except ImportError:
-            ok = False
-            line("fail", "transcription: local", "pip install 'voicestream[local]'")
-    # extraction
-    if cfg.brain.provider == "anthropic":
-        if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-            line("ok", f"extraction: Claude {cfg.brain.model}", f"summary {cfg.brain.summary_model}")
-        else:
-            line("warn", "extraction: ANTHROPIC_API_KEY not set", "falling back to the offline heuristic")
-    else:
-        line("warn", "extraction: offline heuristic", "set brain.provider = 'anthropic' for real extraction")
-    # audio
-    try:
-        from .audio.mic import capture_report
-
-        for status, what, detail in capture_report(cfg):
-            ok = ok and status != "fail"
-            line(status, what, detail)
-    except ImportError as exc:
-        ok = False
-        line("fail", "audio capture", f"{exc} — pip install 'voicestream[audio]'")
-    line("ok" if shutil.which("ffmpeg") else "warn", "ffmpeg", shutil.which("ffmpeg") or "not found (needed for non-WAV replay and ffmpeg capture)")
-    # agents
-    has_key = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
-    if cfg.agents.mode != "off":
-        if cfg.agents.engine == "agent-sdk":
-            try:
-                import claude_agent_sdk
-
-                if has_key:
-                    line("ok", f"agents: {cfg.agents.mode} via Agent SDK {claude_agent_sdk.__version__}", cfg.agents.model)
-                else:
-                    line("warn", f"agents: {cfg.agents.mode} via Agent SDK {claude_agent_sdk.__version__}",
-                         "ANTHROPIC_API_KEY not set: agents only run if Claude Code is logged in on this computer")
-            except ImportError:
-                line("warn", "agents: claude-agent-sdk not installed", "pip install 'voicestream[agents]' or set agents.engine = 'api'")
-        elif has_key:
-            line("ok", f"agents: {cfg.agents.mode} via single API calls", cfg.agents.model)
-        else:
-            line("warn", f"agents: {cfg.agents.mode} via single API calls", "ANTHROPIC_API_KEY not set: agents can't run")
-    else:
-        line("ok", "agents: off")
-    # dashboard
-    if cfg.dashboard.enabled:
-        try:
-            import starlette  # noqa: F401
-            import uvicorn  # noqa: F401
-
-            line("ok", f"dashboard: http://{cfg.dashboard.host}:{cfg.dashboard.port}")
-        except ImportError:
-            line("warn", "dashboard disabled", "pip install 'voicestream[dashboard]'")
-    # sinks: every enabled one gets a line, also those whose settings don't validate (they'd be skipped)
-    from pydantic import ValidationError
-
-    from .sinks.base import SinkError, build_sink, describe_config_error
-
-    async def check_sinks() -> None:
-        nonlocal ok
-        for name, raw in cfg.sinks.items():
-            try:
-                sink = build_sink(name, raw, cfg)
-            except ValidationError as exc:
-                ok = False
-                line("fail", f"sink {name}", f"{describe_config_error(name, exc)} — it would be skipped")
-                continue
-            except (KeyError, ImportError, SinkError) as exc:
-                ok = False
-                line("fail", f"sink {name}", str(exc))
-                continue
-            if sink is None:
-                continue
-            try:
-                line("ok", f"sink {sink.name}", await sink.check())
-            except Exception as exc:  # noqa: BLE001
-                ok = False
-                line("fail", f"sink {sink.name}", str(exc))
-            finally:
-                await sink.aclose()
-
-    asyncio.run(check_sinks())
-    from .costs import CostMeter
-
-    today = CostMeter(cfg, persist=True).today
-    line("ok", f"spend today ${today.total_usd:.3f}", f"budget ${cfg.budget.daily_usd:.2f}/day (+ agents ${cfg.budget.agents_daily_usd:.2f})")
-    return 0 if ok else 1
+    for line in header(cfg):
+        print(line)
+    checks = asyncio.run(run_checks(cfg))
+    for check in checks:
+        print(check.line())
+    return 1 if failed(checks) else 0
 
 
 def cmd_sessions(args: argparse.Namespace) -> int:
@@ -389,11 +277,10 @@ def _resolve_session(cfg: Config, ref: str) -> Path:
 
 
 def cmd_summarize(args: argparse.Namespace) -> int:
+    from .app.meetings import save_meeting, summarize_meeting
     from .brain.llm import ClaudeLLM, LLMUnavailable
-    from .brain.summarizer import summarize
-    from .brain.tracker import ItemTracker
     from .costs import CostMeter
-    from .storage import atomic_write, load_meeting
+    from .storage import load_meeting
 
     cfg = load_config(args.config)
     meeting, folder = load_meeting(_resolve_session(cfg, args.session))
@@ -405,24 +292,25 @@ def cmd_summarize(args: argparse.Namespace) -> int:
         except LLMUnavailable as exc:
             print(f"note: {exc}; writing notes without a model summary")
             llm = None
-        notes = await summarize(cfg, meeting, ItemTracker(meeting, None, cfg.user_name), llm)
-        if llm:
-            await llm.aclose()
-        return notes
+        try:
+            # "by Friday" means the Friday after the meeting, not after today
+            return await summarize_meeting(cfg, meeting, llm)
+        finally:
+            if llm:
+                await llm.aclose()
 
     notes = asyncio.run(go())
-    atomic_write(folder / "notes.md", notes)
-    atomic_write(folder / "meeting.json", meeting.model_dump_json(indent=1))
+    save_meeting(folder, meeting, notes)
     print(notes)
     return 0
 
 
 def cmd_push(args: argparse.Namespace) -> int:
+    from .app.meetings import push_meeting, save_meeting
     from .dispatch import Dispatcher
     from .events import EventBus
-    from .models import Event
     from .sinks.base import build_sinks
-    from .storage import atomic_write, load_meeting
+    from .storage import load_meeting
 
     cfg = load_config(args.config)
     meeting, folder = load_meeting(_resolve_session(cfg, args.session))
@@ -434,40 +322,29 @@ def cmd_push(args: argparse.Namespace) -> int:
     if not sinks:
         print("no enabled sinks (configure [sinks.<name>] in voicestream.toml)")
         return 1
-    cfg.dispatch.mode = "end"
     bus = EventBus()
-    failures: list[str] = []
-
-    def on_event(ev: Event) -> None:
-        if ev.type == "sink.error":
-            failures.append(f"{ev.data.get('item_id') or 'notes'} → {ev.data.get('sink')}: {ev.data.get('error')}")
-
-    bus.listen(on_event)
 
     def save() -> None:
-        atomic_write(folder / "meeting.json", meeting.model_dump_json(indent=1))
+        save_meeting(folder, meeting)
 
-    async def go() -> None:
+    async def go() -> dict:
         # saved after every push: an interrupted run (Ctrl+C on a slow sink) keeps the refs of what it created
         d = Dispatcher(cfg, meeting, sinks, bus, on_change=save)
         try:
-            n = await d.sync(require_stable=False)
-            synced = n == 0 and any(i.pushed for i in meeting.items.values())
-            print(f"pushed/updated {n} item(s)" + (" (the rest were already up to date)" if synced else ""))
-            if meeting.summary_markdown and not args.no_notes:
-                refs = await d.push_notes(meeting.summary_markdown)
-                for name, ref in refs.items():
-                    print(f"notes → {name}: {ref}")
+            return await push_meeting(cfg, meeting, sinks, bus=bus, notes=not args.no_notes, dispatcher=d, save=save)
         finally:
             await d.aclose()
 
     try:
-        asyncio.run(go())
+        result = asyncio.run(go())
     finally:
         save()
-    if failures:
-        print(f"{len(failures)} push(es) failed:", file=sys.stderr)
-        for f in failures:
+    print(f"pushed/updated {result['count']} item(s)" + (" (the rest were already up to date)" if result["up_to_date"] else ""))
+    for name, ref in result["notes"].items():
+        print(f"notes → {name}: {ref}")
+    if result["errors"]:
+        print(f"{len(result['errors'])} push(es) failed:", file=sys.stderr)
+        for f in result["errors"]:
             print(f"  {f}", file=sys.stderr)
         return 1
     return 0
@@ -515,25 +392,25 @@ def cmd_models(args: argparse.Namespace) -> int:
 
 
 def cmd_cost(args: argparse.Namespace) -> int:
-    from .costs import CostMeter, TokenUsage
+    from .costs import CostMeter, estimate_daily
 
     cfg = load_config(args.config)
     meter = CostMeter(cfg, persist=True)
     d = meter.today
     print(f"today: ${d.total_usd:.3f}  (speech-to-text ${d.stt_usd:.3f} for {d.stt_minutes:.1f} min, "
           f"Claude ${d.llm_usd:.3f}, agents ${d.agents_usd:.3f})")
-    hours = args.hours
-    speech_min = hours * 60 * 0.6 * 1.1  # 60% speech + VAD padding
-    tc = cfg.transcription
-    model = {"openai": tc.openai.model, "openai-realtime": tc.openai_realtime.model, "deepgram": tc.deepgram.model}.get(tc.backend, tc.backend)
-    stt = meter.stt_cost(model, speech_min * 60)
-    calls = hours * 3600 / max(30.0, cfg.brain.extract_interval_s)
-    llm = calls * meter.llm_cost(TokenUsage(cfg.brain.model, input_tokens=1500, output_tokens=400, cache_read_tokens=6000, cache_write_tokens=600))
-    summary = max(1, round(hours)) * meter.llm_cost(TokenUsage(cfg.brain.summary_model, input_tokens=25000, output_tokens=2500))
-    print(f"estimate for {hours:g} h of meetings: speech-to-text ~${stt:.2f} ({model}), "
-          f"live extraction ~${llm:.2f} ({cfg.brain.model}), summaries ~${summary:.2f} ({cfg.brain.summary_model}) "
-          f"= ~${stt + llm + summary:.2f}/day before agents")
+    e = estimate_daily(cfg, args.hours)
+    print(f"estimate for {args.hours:g} h of meetings: speech-to-text ~${e['stt_usd']:.2f} ({e['stt_model']}), "
+          f"live extraction ~${e['extraction_usd']:.2f} ({e['extraction_model']}), "
+          f"summaries ~${e['summaries_usd']:.2f} ({e['summary_model']}) "
+          f"= ~${e['total_usd']:.2f}/day before agents (~${e['per_month_usd']:.0f}/month over 20 working days)")
     return 0
+
+
+def cmd_app(args: argparse.Namespace) -> int:
+    from .app.launcher import run
+
+    return run(args)
 
 
 # ------------------------------------------------------------------- parser
@@ -617,6 +494,12 @@ def build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser("cost", help="today's spend and a daily estimate")
     c.add_argument("--hours", type=float, default=8.0, help="hours of meetings per day for the estimate")
     c.set_defaults(func=cmd_cost)
+
+    from .app.launcher import add_arguments as app_arguments  # stdlib-only module: cheap at parse time
+
+    ap = sub.add_parser("app", help="open the Voicestream app: a window and menu-bar icon on a Mac, the browser elsewhere")
+    app_arguments(ap, standalone=False)
+    ap.set_defaults(func=cmd_app)
     return p
 
 

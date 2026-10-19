@@ -102,6 +102,10 @@ class DeepgramTranscriber(Transcriber):
             params.append(("diarize_model", "latest"))  # replaces the deprecated diarize=true
         if self.language:
             params.append(("language", self.language))
+        elif self.model.startswith("nova-3"):
+            # without a language Deepgram transcribes English only; "multi" follows code-switching
+            # (a French meeting with English terms, or both). Older models have no such mode.
+            params.append(("language", "multi"))
         # nova-3 takes ``keyterm`` (prompting); older models take ``keywords``
         key = "keyterm" if self.model.startswith("nova-3") else "keywords"
         params += [(key, k) for k in self.keywords[:50]]

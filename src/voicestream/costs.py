@@ -197,3 +197,57 @@ class CostMeter:
                 log.debug("could not persist spend: %s", exc)
         if self.bus is not None:
             self.bus.publish("cost", **self.snapshot())
+
+
+# -------------------------------------------------------------------- estimate
+
+WORKDAYS_PER_MONTH = 20
+FREE_STT_BACKENDS = frozenset({"whisper-cpp", "local", "fake"})
+"""Speech-to-text that runs on this computer: no per-minute bill."""
+
+
+def estimate_daily(cfg: Config, hours: float) -> dict[str, object]:
+    """What a day with ``hours`` of meetings costs with these settings, before agents.
+
+    A deliberately simple model (``voicestream cost`` and the app's Costs screen show the same
+    numbers): someone talks 60% of the time and the voice detector adds ~10% padding; live
+    extraction runs every ``brain.extract_interval_s`` (at least 30 s) with ~1.5k fresh + 6k cached
+    tokens in and 400 out; one end-of-meeting summary per hour (25k in, 2.5k out). Agents and
+    screenshots are left out: they depend on what you approve and enable.
+    """
+    meter = CostMeter(cfg, persist=False)  # prices only: nothing is read or written
+    tc = cfg.transcription
+    speech_min = hours * 60 * 0.6 * 1.1  # 60% speech + VAD padding
+    model = {"openai": tc.openai.model, "openai-realtime": tc.openai_realtime.model, "deepgram": tc.deepgram.model}.get(
+        tc.backend, tc.backend
+    )
+    stt = 0.0 if tc.backend in FREE_STT_BACKENDS else meter.stt_cost(model, speech_min * 60)
+    calls = hours * 3600 / max(30.0, cfg.brain.extract_interval_s)
+    extraction = calls * meter.llm_cost(
+        TokenUsage(cfg.brain.model, input_tokens=1500, output_tokens=400, cache_read_tokens=6000, cache_write_tokens=600)
+    )
+    summaries = max(1, round(hours)) * meter.llm_cost(TokenUsage(cfg.brain.summary_model, input_tokens=25000, output_tokens=2500))
+    if cfg.brain.provider != "anthropic":  # offline heuristic: no Claude at all
+        extraction = summaries = 0.0
+    total = stt + extraction + summaries
+    return {
+        "hours": hours,
+        "stt_usd": stt,
+        "extraction_usd": extraction,
+        "summaries_usd": summaries,
+        "total_usd": total,
+        "per_month_usd": total * WORKDAYS_PER_MONTH,
+        "backend": tc.backend,
+        "stt_model": model,
+        "extraction_model": cfg.brain.model,
+        "summary_model": cfg.brain.summary_model,
+        "assumptions": {
+            "speech_share": 0.6,
+            "vad_padding": 1.1,
+            "speech_minutes": speech_min,
+            "extraction_calls": calls,
+            "summaries": max(1, round(hours)),
+            "workdays_per_month": WORKDAYS_PER_MONTH,
+            "agents_included": False,
+        },
+    }

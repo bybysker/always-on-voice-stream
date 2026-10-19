@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import numpy as np
+
 from .agents.runner import AgentRunner, Engine
 from .audio import AudioSource, CaptureSetupError, Clock, build_source
 from .audio.base import aclose_quietly
@@ -51,6 +53,9 @@ SILENT_SYSTEM_AFTER_S = 120.0
 """Your speech heard while system audio has been nothing but digital silence before we warn about it."""
 RESTART_DELAY_S = 2.0
 """First wait before restarting a failed live capture; doubles on each failure in a row, up to a minute."""
+FORCE_GRACE_S = 3.0
+"""After ``stop(force=True)``: how long a step already under way (the final transcription, a push in
+flight) still gets before it is cancelled. Steps not started yet are skipped."""
 
 
 def _moved(path: str, old: Path, new: Path) -> str:
@@ -174,7 +179,8 @@ class MeetingSession:
             # Wait, but never cancel: a push cancelled mid-request may exist in the sink without a ref here,
             # and finalize() would create it again (it takes the dispatcher's lock, so it waits for a round
             # still in flight); flush() likewise waits for an extraction call that is already paid for.
-            await asyncio.wait(self._tasks[:2], timeout=self.wrapup_wait_s)
+            # Only a forced stop (quitting the app) stops waiting.
+            await self.app.unless_forced(asyncio.wait(self._tasks[:2], timeout=self.wrapup_wait_s), grace=0)
         if not self.meeting.segments and not self.meeting.items:
             await self._shutdown_tasks()
             self._unlisten()
@@ -184,26 +190,32 @@ class MeetingSession:
             self.app.bus.publish("meeting.ended", meeting_id=self.meeting.id, title=self.meeting.title, notes=None, items=0)
             return None
         try:
-            await self.extractor.flush()
+            await self.app.unless_forced(self.extractor.flush())
         except Exception:
             log.exception("final extraction failed")
-        if self.agents.busy and cfg.agents.finish_wait_s > 0:
+        if self.agents.busy and cfg.agents.finish_wait_s > 0 and not self.app.forced:
             log.info("waiting up to %.0fs for running agents…", cfg.agents.finish_wait_s)
-            await self.agents.drain(cfg.agents.finish_wait_s)
+            await self.app.unless_forced(self.agents.drain(cfg.agents.finish_wait_s), grace=0)
+        if self.agents.busy and self.app.forced:
+            await self.agents.cancel_all()  # quitting: marked failed ("cancelled"), the notes say so
         if self.replayed_at is not None:
             spoken = max((s.t_end for s in self.meeting.segments), default=0.0)
             self.meeting.ended_at = self.replayed_at + timedelta(seconds=spoken)
         else:
             self.meeting.ended_at = utcnow()
         try:
-            notes = await summarize(
-                cfg,
-                self.meeting,
-                self.tracker,
-                self.app.llm if cfg.brain.provider == "anthropic" else None,
-                today=self.day,
-                budget_ok=not self.app.costs.over_budget(),
+            summarized, notes = await self.app.unless_forced(
+                summarize(
+                    cfg,
+                    self.meeting,
+                    self.tracker,
+                    self.app.llm if cfg.brain.provider == "anthropic" else None,
+                    today=self.day,
+                    budget_ok=not self.app.costs.over_budget(),
+                )
             )
+            if not summarized:  # a forced stop: basic notes now; `voicestream summarize` can redo them
+                notes = rerender(self.meeting, cfg.user_name)
         except Exception:
             log.exception("summary failed")
             notes = rerender(self.meeting, cfg.user_name)
@@ -211,11 +223,12 @@ class MeetingSession:
             notes = rerender(self.meeting, cfg.user_name)  # the agents' files moved with the folder
         self._save_notes(notes)
         try:
-            await self.dispatcher.finalize(notes)
+            await self.app.unless_forced(self.dispatcher.finalize(notes))
         except Exception:
             log.exception("final push failed")
-        # a transient failure at wrap-up (Wi-Fi still reconnecting after the Mac woke up…) gets more goes
-        self.app.track(asyncio.ensure_future(self.dispatcher.retry_failed()))
+        if not self.app.forced:
+            # a transient failure at wrap-up (Wi-Fi still reconnecting after the Mac woke up…) gets more goes
+            self.app.track(asyncio.ensure_future(self.dispatcher.retry_failed()))
         self.store.save()
         notes_path = self.store.dir / "notes.md"
         self.app.bus.publish(
@@ -248,16 +261,18 @@ class MeetingSession:
             # agents run max_concurrent at a time, each within its own time limit: wait for the whole queue
             finished = self.agents.finished
             waves = math.ceil(self.agents.pending / max(1, ac.max_concurrent))
-            await self.agents.drain(waves * ac.timeout_s + LATE_AGENT_SLACK_S)
-            if self.agents.busy and self.agents.finished == finished:
-                break  # none of them finished in time
+            await self.app.unless_forced(self.agents.drain(waves * ac.timeout_s + LATE_AGENT_SLACK_S), grace=0)
+            if self.app.forced or (self.agents.busy and self.agents.finished == finished):
+                break  # quitting, or none of them finished in time
         if self.agents.busy:
             await self.agents.cancel_all()  # marked failed ("cancelled") rather than "running" for good
         self._rename()  # held back while the agents were writing into the folder
         notes = rerender(self.meeting, self.app.cfg.user_name)
         self._save_notes(notes)
         self.store.save()
-        await self.dispatcher.sync(require_stable=False, only={i.id for i in self.meeting.items.values() if i.pushed})
+        await self.app.unless_forced(
+            self.dispatcher.sync(require_stable=False, only={i.id for i in self.meeting.items.values() if i.pushed})
+        )
         await self._shutdown_tasks()
         self._unlisten()
         self.app.bus.publish("meeting.notes_updated", meeting_id=self.meeting.id, notes=str(self.store.dir / "notes.md"))
@@ -356,6 +371,8 @@ class Assistant:
         self._system_sound = False  # system audio has delivered something other than digital silence
         self._mic_speech_s = 0.0  # your speech heard while it hadn't
         self._silent_warned = False
+        self._paused = False
+        self._force = asyncio.Event()
         self.keep_open = False
         """After a replay/import, keep running (the dashboard) until :meth:`stop`."""
 
@@ -403,14 +420,20 @@ class Assistant:
     # ------------------------------------------------------------------- run
 
     async def run(self) -> None:
-        self.sources = self._build_sources()
-        if not self.sources:
-            raise RuntimeError("no audio sources configured")
-        names = [s.name for s in self.sources]
-        self.echo.system_active = "system" in names and "mic" in names
-        self._system_live = any(s.name == "system" and s.live for s in self.sources)
-        for src in self.sources:
-            self.transcribers[src.name] = self._make_transcriber(src.name)
+        try:
+            self.sources = self._build_sources()
+            if not self.sources:
+                raise RuntimeError("no audio sources configured")
+            names = [s.name for s in self.sources]
+            self.echo.system_active = "system" in names and "mic" in names
+            self._system_live = any(s.name == "system" and s.live for s in self.sources)
+            for src in self.sources:
+                self.transcribers[src.name] = self._make_transcriber(src.name)
+        except BaseException:
+            # a missing key or device: the app keeps running and may start another assistant, so the
+            # transcribers built so far (a whisper-server child…), the Claude client and the sinks are closed
+            await self._close_clients()
+            raise
         self.bus.publish(
             "assistant.started",
             sources=[s.describe() for s in self.sources],
@@ -434,8 +457,7 @@ class Assistant:
             for src in self.sources:
                 src.stop()
             # let transcribers flush their last utterances
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(asyncio.shield(all_pipes), timeout=30)
+            await self.unless_forced(asyncio.wait({all_pipes}, timeout=30))
             if not all_pipes.done():
                 all_pipes.cancel()
             await self._merge_q.put(None)
@@ -449,22 +471,87 @@ class Assistant:
                 log.info("waiting for background work (agents) to finish… Ctrl+C again to abort")
             await self._finish_background()
             await self._linger()
-            for t in self.transcribers.values():
-                with contextlib.suppress(Exception):
-                    await t.aclose()
-            if self.llm:
-                await self.llm.aclose()
-            for sink in self.sinks:
-                with contextlib.suppress(Exception):
-                    await sink.aclose()
+            await self._close_clients()
             self.bus.publish("assistant.stopped", cost=self.costs.snapshot())
         results = all_pipes.result() if all_pipes.done() and not all_pipes.cancelled() else []
         for r in results:
             if isinstance(r, Exception) and not isinstance(r, asyncio.CancelledError):
                 log.error("capture pipeline failed: %r", r)
 
-    def stop(self) -> None:
+    async def _close_clients(self) -> None:
+        for t in self.transcribers.values():
+            with contextlib.suppress(Exception):
+                await t.aclose()
+        if self.llm:
+            with contextlib.suppress(Exception):
+                await self.llm.aclose()
+        for sink in self.sinks:
+            with contextlib.suppress(Exception):
+                await sink.aclose()
+
+    def stop(self, force: bool = False) -> None:
+        """Stop listening; the meeting in progress is wrapped up (summary, pushes) and running agents get
+        their time. ``force=True`` (quitting the app) cuts that short so it never takes minutes: agents
+        are cancelled, steps not started yet (summary, pushes) are skipped and those under way get
+        :data:`FORCE_GRACE_S`. It may follow a normal stop that is taking too long."""
+        if force:
+            self._force.set()
         self._stop.set()
+
+    @property
+    def forced(self) -> bool:
+        return self._force.is_set()
+
+    async def unless_forced(self, aw: Any, grace: float = FORCE_GRACE_S) -> tuple[bool, Any]:
+        """Await ``aw`` unless :meth:`stop` is forced: then a step not started is skipped and one under
+        way gets ``grace`` seconds before it is cancelled. Returns ``(completed, result)``; the step's
+        own exceptions propagate."""
+        if self._force.is_set():
+            if asyncio.iscoroutine(aw):
+                aw.close()  # never started: no "was never awaited" warning
+            return False, None
+        task = asyncio.ensure_future(aw)
+        forced = asyncio.ensure_future(self._force.wait())
+        try:
+            await asyncio.wait({task, forced}, return_when=asyncio.FIRST_COMPLETED)
+            if not task.done() and grace > 0:
+                await asyncio.wait({task}, timeout=grace)
+        except BaseException:
+            task.cancel()
+            raise
+        finally:
+            forced.cancel()
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+            return False, None
+        return True, task.result()
+
+    # ----------------------------------------------------------- pause/resume
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    def pause(self) -> bool:
+        """Stop hearing anything without ending the meeting: every captured frame becomes digital silence
+        of the same length, so the clocks run on, the voice detector closes the utterance in progress and
+        nothing more is transcribed (or billed). Returns whether it changed anything."""
+        if self._paused:
+            return False
+        self._paused = True
+        log.info("paused: nothing is recorded until resumed")
+        self.bus.publish("assistant.paused")
+        return True
+
+    def resume(self) -> bool:
+        if not self._paused:
+            return False
+        self._paused = False
+        log.info("resumed")
+        self.bus.publish("assistant.resumed")
+        return True
 
     async def _linger(self) -> None:
         if self.keep_open and not self._stop.is_set():
@@ -478,15 +565,22 @@ class Assistant:
         for s in self.finished_meetings:
             s.dispatcher.hurry()
         if self._background:
-            with contextlib.suppress(BaseException):
-                await asyncio.wait(self._background, timeout=self.cfg.agents.timeout_s + 2 * LATE_AGENT_SLACK_S)
+            with contextlib.suppress(Exception):
+                await self.unless_forced(
+                    asyncio.wait(set(self._background), timeout=self.cfg.agents.timeout_s + 2 * LATE_AGENT_SLACK_S), grace=0
+                )
         for s in self.finished_meetings:
             if s.agents.busy:
                 await s.agents.cancel_all()
                 s.store.save()  # now, not in a debounced save the closing loop would never run
         if self._background:  # _late_agents now writes the notes and syncs
             with contextlib.suppress(BaseException):
-                await asyncio.wait(self._background, timeout=LATE_AGENT_SLACK_S)
+                await asyncio.wait(set(self._background), timeout=FORCE_GRACE_S if self.forced else LATE_AGENT_SLACK_S)
+        if self.forced:
+            for t in list(self._background):  # quitting: whatever is still going is given up
+                t.cancel()
+                with contextlib.suppress(BaseException):
+                    await t
         for s in self.finished_meetings:
             s.flush_save()
 
@@ -549,8 +643,8 @@ class Assistant:
         if self.echo_unprotected and not self._silent_warned:
             self._silent_warned = True
             msg = (f"system audio has been pure digital silence while you talked for {SILENT_SYSTEM_AFTER_S / 60:.0f} min. "
-                   "On a call, macOS is probably withholding it: allow this terminal under Privacy & Security → "
-                   "Screen & System Audio Recording, then restart the terminal. Until system audio comes through, "
+                   "On a call, macOS is probably withholding it: allow Voicestream (or the terminal running it) under "
+                   "Privacy & Security → Screen & System Audio Recording, then restart it. Until system audio comes through, "
                    "the others' voices from your speakers count as yours and 'Hey Claude' commands wait for your OK.")
             log.warning(msg)
             self.bus.publish("source.error", source="system", error=msg)
@@ -561,20 +655,25 @@ class Assistant:
         frames = src.frames()
         try:
             async for frame in frames:
+                if self._paused:
+                    # the device stays open (resuming is instant), but nothing it hears goes any further
+                    frame = AudioFrame(frame.source, np.zeros_like(frame.samples), frame.t_start)
+                    zero_s = 0.0  # nor does the silence count as a missing microphone permission
+                elif src.name == "mic" and src.live and not warned:
+                    # a denied macOS microphone permission yields exact digital silence, not an error
+                    zero_s = zero_s + frame.duration if not frame.samples.any() else 0.0
+                    if zero_s >= 10.0:
+                        warned = True
+                        msg = ("microphone delivers only digital silence — check the microphone permission "
+                               "(Privacy & Security → Microphone) for Voicestream or the terminal running it")
+                        log.warning(msg)
+                        self.bus.publish("source.error", source=src.name, error=msg)
                 if self.current is not None and self.cfg.capture.store_audio:
                     self.current.store.write_audio(frame)
                 if src.name == "system" and not self._system_sound and frame.samples.any():
                     self._system_sound = True
                     if self._silent_warned:
                         log.warning("system audio is coming through now")
-                if src.name == "mic" and src.live and not warned:
-                    # a denied macOS microphone permission yields exact digital silence, not an error
-                    zero_s = zero_s + frame.duration if not frame.samples.any() else 0.0
-                    if zero_s >= 10.0:
-                        warned = True
-                        msg = "microphone delivers only digital silence — check the OS microphone permission for this terminal"
-                        log.warning(msg)
-                        self.bus.publish("source.error", source=src.name, error=msg)
                 yield frame
         finally:
             await aclose_quietly(frames)
@@ -738,6 +837,8 @@ class Assistant:
             # between meetings, the last one in full: a fresh dashboard can still review, edit and push it
             "previous": last.meeting.model_dump(mode="json") if last and cur is None else None,
             "cost": self.costs.snapshot(),
+            "listening": "paused" if self._paused else "listening",
+            "stopping": self._stop.is_set(),
         }
 
     def approve_agent(self, item_id: str, prompt: str | None = None, meeting_id: str | None = None) -> bool:

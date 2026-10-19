@@ -87,7 +87,7 @@ def test_pricing_overrides_from_config(cfg: Config) -> None:
 def test_stt_cost_per_minute(cfg: Config) -> None:
     m = CostMeter(cfg, persist=False)
     assert m.stt_cost("gpt-transcribe", 600) == pytest.approx(0.045)
-    assert m.stt_cost("nova-3", 60) == pytest.approx(0.0077)
+    assert m.stt_cost("nova-3", 60) == pytest.approx(0.0092)  # multilingual: French and English
     assert m.stt_cost("local", 3600) == 0.0
     m.add_stt("gpt-transcribe", 120)
     assert m.today.stt_minutes == pytest.approx(2.0) and m.today.stt_usd == pytest.approx(0.009)
