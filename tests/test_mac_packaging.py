@@ -337,6 +337,11 @@ def test_release_job_publishes_tagged_builds_only() -> None:
     assert "permissions:\n      contents: write" in release
     assert "actions/download-artifact@v8" in release and "name: ${{ needs.app.outputs.dmg }}" in release
     assert 'gh release create "$GITHUB_REF_NAME" "$DMG"' in release
+    # the release page says how to install an app Apple hasn't notarized, in English and French
+    assert "--notes-file packaging/mac/release-notes.md --generate-notes" in release
+    assert "sparse-checkout: packaging/mac/release-notes.md" in release
+    notes = (ROOT / "packaging" / "mac" / "release-notes.md").read_text(encoding="utf-8")
+    assert "**Open Anyway**" in notes and "**Ouvrir quand même**" in notes and "Apple Silicon" in notes
     assert "dmg: ${{ steps.dmg.outputs.name }}" in wf
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "https://github.com/bybysker/always-on-voice-stream/releases" in readme

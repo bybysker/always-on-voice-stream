@@ -182,6 +182,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Release notes
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: packaging/mac/release-notes.md
+          sparse-checkout-cone-mode: false
+
       - name: Download the DMG
         uses: actions/download-artifact@v8
         with:
@@ -198,5 +204,7 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "$DMG" --clobber  # a re-run: replace the file
           else
-            gh release create "$GITHUB_REF_NAME" "$DMG" --verify-tag --title "Voicestream $GITHUB_REF_NAME" --generate-notes
+            # how to install it on top, then GitHub's list of what changed
+            gh release create "$GITHUB_REF_NAME" "$DMG" --verify-tag --title "Voicestream $GITHUB_REF_NAME" \
+              --notes-file packaging/mac/release-notes.md --generate-notes
           fi
