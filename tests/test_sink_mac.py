@@ -495,7 +495,7 @@ class MockReminders:
             [NODE, str(self.dir / "harness.js"), str(script), str(self.state_path)],
             stdin=stdin,
             timeout=timeout,
-            env={"PATH": os.environ.get("PATH", ""), "TZ": "Europe/Amsterdam"},
+            env=_proc.child_env() | {"TZ": "Europe/Amsterdam"},  # node needs SYSTEMROOT & co on Windows
         )
         self.stdout.append(res.stdout)
         return res
@@ -898,9 +898,9 @@ async def test_command_without_item_command(cfg: Config, meeting: Meeting) -> No
 
 
 async def test_command_check_runs_nothing(cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    tool = tmp_path / "bin" / "promethee"
+    tool = tmp_path / "bin" / ("promethee.cmd" if os.name == "nt" else "promethee")  # Windows finds it via PATHEXT
     tool.parent.mkdir()
-    tool.write_text("#!/bin/sh\n")
+    tool.write_text("@echo off\n" if os.name == "nt" else "#!/bin/sh\n")
     tool.chmod(0o755)
     monkeypatch.setenv("PATH", str(tool.parent))
     sink, runner = command(cfg, item_command="promethee add {title}", notes_command=[sys.executable, "-V"])

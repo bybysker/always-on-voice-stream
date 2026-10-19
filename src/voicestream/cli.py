@@ -231,7 +231,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(f"data dir: {cfg.data_path}")
     for p in (cfg.data_path, cfg.data_path / ".env", Path("~/.voicestream/.env").expanduser()):
         try:
-            if p.exists() and p.stat().st_mode & 0o077:
+            if os.name == "posix" and p.exists() and p.stat().st_mode & 0o077:
                 line("warn", f"{p} is readable by other accounts on this computer", f"chmod {'700' if p.is_dir() else '600'} '{p}'")
         except OSError:
             pass

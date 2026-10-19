@@ -168,7 +168,7 @@ def test_imported_meeting_is_dated_by_when_it_took_place(tmp_path: Path, monkeyp
     capsys.readouterr()
     (folder,) = list_sessions(tmp_path / "data")
     assert not folder.name.startswith("2026-03-02")  # filed when imported, so `push last` finds it
-    assert (folder / "transcript.md").read_text().startswith("# Transcript — 2026-03-02 14:30")
+    assert (folder / "transcript.md").read_text(encoding="utf-8").startswith("# Transcript — 2026-03-02 14:30")
     assert cli.main(["-c", str(cfgp), "sessions"]) == 0
     assert "2026-03-02 14:30" in capsys.readouterr().out
     assert cli.main(["-c", str(cfgp), "push", "last"]) == 0

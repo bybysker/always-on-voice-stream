@@ -937,20 +937,27 @@ def test_s2_data_dir_and_cli_files_are_private(tmp_path: Path, monkeypatch: pyte
         p = tmp_path / "zoom.vtt"
         p.write_text(VTT)
         assert cli.main(["-c", str(cfgp), "import", str(p)]) == 0
-        assert os.umask(0o022) == 0o022  # restored after the command
+        restored = os.umask(0o022)
     finally:
         os.umask(old)
-    assert data.stat().st_mode & 0o777 == 0o700
     folder = list_sessions(data)[0]
-    for f in (folder / "transcript.md", folder / "meeting.json", folder / "notes.md", data / "TODO.md"):
+    files = (folder / "transcript.md", folder / "meeting.json", folder / "notes.md", data / "TODO.md")
+    assert all(f.is_file() for f in files)
+    if os.name != "posix":
+        return  # Windows has no permission bits for these to set (access comes from the user profile's ACLs)
+    assert restored == 0o022  # the umask is restored after the command
+    assert data.stat().st_mode & 0o777 == 0o700
+    for f in files:
         assert f.stat().st_mode & 0o077 == 0, f
 
 
 def test_s2_init_makes_the_config_dir_private(tmp_path: Path) -> None:
     target = tmp_path / "new" / "voicestream.toml"
     assert cli.main(["init", str(target)]) == 0
-    assert target.parent.stat().st_mode & 0o777 == 0o700
-    assert (target.parent / ".env").stat().st_mode & 0o777 == 0o600
+    assert (target.parent / ".env").is_file()
+    if os.name == "posix":  # Windows has no permission bits to set
+        assert target.parent.stat().st_mode & 0o777 == 0o700
+        assert (target.parent / ".env").stat().st_mode & 0o777 == 0o600
 
 
 def test_s2_doctor_warns_about_a_readable_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -964,7 +971,8 @@ def test_s2_doctor_warns_about_a_readable_data_dir(tmp_path: Path, monkeypatch: 
     cfgp = tmp_path / "voicestream.toml"
     cfgp.write_text(f'data_dir = "{data.as_posix()}"\n')
     cli.main(["-c", str(cfgp), "doctor"])
-    assert f"! {data} is readable by other accounts on this computer — chmod 700" in capsys.readouterr().out
+    warned = f"! {data} is readable by other accounts on this computer — chmod 700" in capsys.readouterr().out
+    assert warned == (os.name == "posix")  # Windows reports every folder as 0o777: no false alarm there
 
 
 # ----------------------------------------------------- S3: HubSpot gets attendees, not mentions

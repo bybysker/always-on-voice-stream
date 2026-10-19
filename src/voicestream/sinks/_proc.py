@@ -17,7 +17,12 @@ from pathlib import Path
 
 from .base import SinkError
 
-BASE_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TZ")
+BASE_ENV = (
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TZ",
+    # Windows: without these many programs can't even start (no secrets in them)
+    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP",
+    "USERPROFILE", "USERNAME", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+)  # fmt: skip
 """Environment variables every program gets (plus ``LC_*``)."""
 
 
@@ -69,7 +74,11 @@ async def run(
             proc.kill()
             await proc.wait()
     assert proc.returncode is not None
-    return Result(proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace"))
+    return Result(proc.returncode, _text(out), _text(err))
+
+
+def _text(data: bytes) -> str:
+    return data.decode("utf-8", "replace").replace("\r\n", "\n")  # Windows line endings
 
 
 def not_retried(exc: SinkError) -> SinkError:

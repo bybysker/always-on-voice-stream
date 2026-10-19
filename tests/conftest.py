@@ -14,7 +14,9 @@ from voicestream.models import Meeting  # noqa: E402
 @pytest.fixture(autouse=True)
 def _private_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
     """load_config() also reads ~/.voicestream/.env: never let a developer's real keys into a test."""
-    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
+    home = str(tmp_path_factory.mktemp("home"))
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)  # what Path.home() reads on Windows
 
 
 @pytest.fixture

@@ -686,9 +686,10 @@ async def test_24_bit_wav_is_decoded(tmp_path: Path) -> None:
 def test_file_spec_keeps_an_at_sign_inside_the_path(cfg: Config) -> None:
     path = "/Users/alex/Library/CloudStorage/GoogleDrive-alex@gmail.com/My Drive/standup.m4a"
     named = build_source(f"file:{path}@system", cfg, Clock(), speed=0)  # what `voicestream replay` builds
-    assert isinstance(named, FFmpegSource) and (named.name, named.input_args) == ("system", ["-i", path])
+    native = str(Path(path))  # backslashes on Windows
+    assert isinstance(named, FFmpegSource) and (named.name, named.input_args) == ("system", ["-i", native])
     plain = build_source(f"file:{path}", cfg, Clock(), speed=0)
-    assert isinstance(plain, FFmpegSource) and (plain.name, plain.input_args) == ("mic", ["-i", path])
+    assert isinstance(plain, FFmpegSource) and (plain.name, plain.input_args) == ("mic", ["-i", native])
 
 
 def test_ffmpeg_spec_takes_only_a_plain_name_after_the_last_at_sign(cfg: Config) -> None:
