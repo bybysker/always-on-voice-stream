@@ -49,6 +49,12 @@ def build_transcriber(
         return DeepgramTranscriber(
             tc.deepgram, vad=cfg.vad, language=tc.language, keywords=keywords, on_usage=on_usage, on_partial=on_partial
         )
+    if backend == "whisper-cpp":
+        from .whisper_cpp import WhisperCppTranscriber
+
+        return WhisperCppTranscriber(
+            cfg, vad=cfg.vad, language=tc.language, prompt=", ".join(keywords) or None, on_usage=on_usage
+        )
     if backend == "local":
         from .local_whisper import LocalWhisperTranscriber
 

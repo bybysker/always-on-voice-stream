@@ -244,6 +244,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         else:
             ok = False
             line("fail", f"transcription: {be}", f"{need} is not set")
+    elif be == "whisper-cpp":
+        from .transcribe.whisper_cpp import check as whisper_check
+
+        status, detail = whisper_check(cfg)
+        ok = ok and status != "fail"
+        line(status, "transcription: whisper.cpp on this computer (free)", detail)
     elif be == "local":
         try:
             import faster_whisper  # noqa: F401
@@ -467,6 +473,47 @@ def cmd_push(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_models(args: argparse.Namespace) -> int:
+    from . import stt_models
+
+    cfg = load_config(args.config)
+    if args.action in ("download", "remove") and not args.name:
+        print(f"error: name a model, e.g. `voicestream models {args.action} {stt_models.DEFAULT_MODEL}`", file=sys.stderr)
+        return 2
+    if args.action == "download":
+        names = [args.name] + ([stt_models.VAD_MODEL] if cfg.transcription.whisper_cpp.vad else [])
+        for name in dict.fromkeys(names):
+            if stt_models.is_installed(cfg, name):
+                print(f"{name}: already downloaded")
+                continue
+            shown = [-1]
+
+            def progress(done: int, total: int | None, name: str = name) -> None:
+                pct = int(done * 100 / total) if total else -1
+                if pct != shown[0]:
+                    shown[0] = pct
+                    size = f"{done / 1e6:.0f}/{total / 1e6:.0f} MB" if total else f"{done / 1e6:.0f} MB"
+                    print(f"\r{name}: {size}" + (f" ({pct}%)" if pct >= 0 else ""), end="", flush=True)
+
+            try:
+                path = asyncio.run(stt_models.download(cfg, name, on_progress=progress))
+            except stt_models.DownloadError as exc:
+                print(f"\nerror: {exc}", file=sys.stderr)
+                return 1
+            print(f"\n{name}: saved to {path}")
+        return 0
+    if args.action == "remove":
+        print(f"{args.name}: removed" if stt_models.remove(cfg, args.name) else f"{args.name}: not downloaded")
+        return 0
+    current = cfg.transcription.whisper_cpp.model
+    print(f"models folder: {stt_models.models_dir(cfg)}")
+    for m in stt_models.CATALOG.values():
+        mark = "✔" if stt_models.is_installed(cfg, m.name) else " "
+        use = "  ← in use" if m.name == current and cfg.transcription.backend == "whisper-cpp" else ""
+        print(f" {mark} {m.name:<22} {m.size / 1e6:>6.0f} MB  {m.label:<16} {m.note}{use}")
+    return 0
+
+
 def cmd_cost(args: argparse.Namespace) -> int:
     from .costs import CostMeter, TokenUsage
 
@@ -501,7 +548,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     def common(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--title", help="meeting title")
-        sp.add_argument("--backend", choices=["openai", "openai-realtime", "deepgram", "local", "fake"])
+        sp.add_argument("--backend", choices=["openai", "openai-realtime", "deepgram", "whisper-cpp", "local", "fake"])
         sp.add_argument("--language", help="ISO-639-1 language hint, e.g. en")
         sp.add_argument("--agents", choices=["off", "suggest", "commands", "auto"])
         sp.add_argument("--dispatch", choices=["end", "immediate", "manual"])
@@ -561,6 +608,11 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--no-notes", action="store_true")
     ps.add_argument("--force", action="store_true", help="also push a meeting that is still in progress")
     ps.set_defaults(func=cmd_push)
+
+    mo = sub.add_parser("models", help="speech models for free on-device transcription (whisper.cpp)")
+    mo.add_argument("action", nargs="?", choices=["list", "download", "remove"], default="list")
+    mo.add_argument("name", nargs="?", help="e.g. large-v3-turbo-q5_0 (see `voicestream models`)")
+    mo.set_defaults(func=cmd_models)
 
     c = sub.add_parser("cost", help="today's spend and a daily estimate")
     c.add_argument("--hours", type=float, default=8.0, help="hours of meetings per day for the estimate")

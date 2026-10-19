@@ -110,13 +110,41 @@ class LocalWhisperConfig(_Section):
     beam_size: int = 1
 
 
+class WhisperCppConfig(_Section):
+    """Free, private transcription on your own computer with whisper.cpp (Metal GPU on Apple Silicon)."""
+
+    model: str = "large-v3-turbo-q5_0"
+    """A model from ``voicestream models`` (downloaded once into ``models_dir``), or a path to a ggml file."""
+    models_dir: str | None = None
+    """Default: ``<data_dir>/models``."""
+    binary: str | None = None
+    """Path to ``whisper-server``. Default: the copy inside the Voicestream app, else PATH and
+    Homebrew (``brew install whisper-cpp``)."""
+    allowed_languages: list[str] = Field(default_factory=list)
+    """When auto-detection picks a language not listed here (short or noisy clips can come out
+    as Dutch or Welsh), the utterance is transcribed again in the likeliest listed one.
+    Example: ``["fr", "en"]``. Empty = accept any language."""
+    vad: bool = True
+    """Also run whisper.cpp's Silero voice detector on each utterance (skips non-speech that
+    would otherwise come back as invented sentences). Needs the small ``silero-v6.2.0`` model."""
+    no_speech_threshold: float = 0.6
+    threads: int = 0
+    """CPU threads; 0 = the number of performance cores (up to 8)."""
+    gpu: bool = True
+    startup_timeout_s: float = 120.0
+    timeout_s: float = 120.0
+
+
 class TranscriptionConfig(_Section):
-    backend: Literal["openai", "openai-realtime", "deepgram", "local", "fake"] = "openai"
+    backend: Literal["openai", "openai-realtime", "deepgram", "whisper-cpp", "local", "fake"] = "openai"
+    """``whisper-cpp`` runs on this computer for free; ``openai``/``deepgram`` are paid cloud services;
+    ``local`` is faster-whisper on the CPU (for Intel Macs and Linux without whisper.cpp)."""
     language: str | None = None
     """ISO-639-1 hint, e.g. ``en``. ``None`` = auto-detect."""
     openai: OpenAITranscribeConfig = Field(default_factory=OpenAITranscribeConfig)
     openai_realtime: OpenAIRealtimeConfig = Field(default_factory=OpenAIRealtimeConfig)
     deepgram: DeepgramConfig = Field(default_factory=DeepgramConfig)
+    whisper_cpp: WhisperCppConfig = Field(default_factory=WhisperCppConfig)
     local: LocalWhisperConfig = Field(default_factory=LocalWhisperConfig)
 
 
