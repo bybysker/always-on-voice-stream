@@ -538,6 +538,8 @@ async def test_real_whisper_server_transcribes_speech(cfg: Config, lang: str) ->
         t.language = lang  # type: ignore[attr-defined]
         await timed(f"same utterance, language fixed to {lang}", t.transcribe_utterance(speech, None))  # type: ignore[attr-defined]
         used_vad = server.vad_model is not None
+        if used_vad:  # what whisper.cpp's own voice detection costs (Silero, always on 4 CPU threads)
+            await timed(f"same, language fixed to {lang}, voice detection off", _without_vad(t, speech, lang))
     finally:
         await t.aclose()  # whisper-server prints its timings when it shuts down
     words = lambda s: {w.strip(".,!?;:'’").lower() for w in s.split() if len(w) > 3}  # noqa: E731
@@ -553,14 +555,23 @@ async def test_real_whisper_server_transcribes_speech(cfg: Config, lang: str) ->
     assert res.language == lang and overlap >= 0.6, res.text
 
 
+async def _without_vad(t: Any, speech: Utterance, lang: str) -> Any:
+    fields = {**t._fields(lang, None), "vad": "false"}  # the server's flags are copied for each request
+    data = await t.server.inference(wc.wav_bytes(speech.samples), fields)
+    return wc.TranscribeResult(wc.parse_reply(data, t.wc.no_speech_threshold)[0])
+
+
 def _server_timings(server: wc.WhisperServer) -> list[str]:
-    """The last ``whisper_print_timings`` block of the server's log (load, mel, encode, decode, total…)."""
+    """The last ``whisper_print_timings`` block of the server's log (load, mel, encode, decode, total…),
+    all requests together, and the voice detection's own running total."""
     try:
         text = server._log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ["(no log)"]
     lines = [ln.split("whisper_print_timings:", 1)[1].strip() for ln in text.splitlines() if "whisper_print_timings:" in ln]
-    return lines[-12:] or ["(no whisper_print_timings lines in its log)"]
+    vad = [ln.split("whisper_vad_detect_speech:", 1)[1].strip() for ln in text.splitlines() if "whisper_vad_detect_speech: vad time" in ln]
+    return lines[-12:] + [f"voice detection, {len(vad)} requests: {v}" for v in vad[-1:]] or \
+        ["(no whisper_print_timings lines in its log)"]
 
 
 def test_silence_reaches_no_one(whisper_cfg: Config) -> None:
