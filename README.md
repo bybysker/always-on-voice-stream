@@ -77,7 +77,9 @@ on again), open Voicestream and allow it when asked. The Keychain may also ask o
 version may read your saved keys: click **Always Allow**.
 
 To build the app yourself on a Mac: `packaging/mac/build.sh` (the comments at its top list what to
-install first).
+install first). To publish a release, push a `vX.Y.Z` tag that matches the version in
+`pyproject.toml`, or open **Actions → mac app → Run workflow** and type that tag: the build is
+tested, then attached to a new release with the notes in `packaging/mac/release-notes.md`.
 
 ### Installer l'application (Mac)
 

@@ -3,15 +3,20 @@ name: mac app
 # Builds Voicestream.app on a real Apple Silicon Mac, tests the on-device speech-to-text with the
 # whisper-server it bundles (real model, speech made with `say`), launches the packaged app in
 # self-test mode (window, page, menu-bar icon, hide/reopen, quit) and uploads the DMG. For a v*
-# tag it also publishes the DMG as a GitHub release (the README's download link for people
-# without a GitHub account). Everything it runs is in packaging/mac/build.sh, so a Mac can do the
-# same by hand.
+# tag, or a manual run (Actions → mac app → Run workflow) given a release tag, it also publishes
+# the DMG as a GitHub release (the README's download link for people without a GitHub account).
+# Everything it runs is in packaging/mac/build.sh, so a Mac can do the same by hand.
 
 on:
   push:
     branches: [claude/clever-pascal-hdj7ym]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Also publish this build as a release, tagging this commit (e.g. v0.1.0). Empty: just build."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -173,9 +178,9 @@ jobs:
           if-no-files-found: warn
 
   release:
-    name: publish the release (v* tags)
+    name: publish the release (v* tags, or a manual run given one)
     needs: app
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.release, 'v')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # the only job that may write to the repository, and only for a tag
@@ -199,12 +204,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           DMG: dist/${{ needs.app.outputs.dmg }}
+          # a pushed tag, or the tag a manual run was given (an input: never pasted into the script)
+          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.release }}
         run: |
           ls -l dist
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$DMG" --clobber  # a re-run: replace the file
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$ ]] || { echo "::error::not a release tag: $TAG"; exit 1; }
+          [[ "$DMG" == *"-${TAG#v}-arm64.dmg" ]] || { echo "::error::$TAG isn't the app's version ($DMG)"; exit 1; }
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$DMG" --clobber  # a re-run: replace the file
           else
+            # a pushed tag must be there already; a manual run tags the commit it built
+            verify=(); [[ "$GITHUB_REF" == refs/tags/* ]] && verify=(--verify-tag)
             # how to install it on top, then GitHub's list of what changed
-            gh release create "$GITHUB_REF_NAME" "$DMG" --verify-tag --title "Voicestream $GITHUB_REF_NAME" \
+            gh release create "$TAG" "$DMG" "${verify[@]}" --target "$GITHUB_SHA" --title "Voicestream $TAG" \
               --notes-file packaging/mac/release-notes.md --generate-notes
           fi

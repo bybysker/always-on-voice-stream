@@ -333,10 +333,15 @@ def test_release_job_publishes_tagged_builds_only() -> None:
     wf = (ROOT / ".github" / "workflows" / "mac-app.yml").read_text(encoding="utf-8")
     release = wf[wf.index("\n  release:"):]
     assert "permissions:\n  contents: read" in wf  # everything else stays read-only
-    assert "needs: app" in release and "if: startsWith(github.ref, 'refs/tags/v')" in release
+    assert "needs: app" in release
+    assert "if: startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.release, 'v')" in release
     assert "permissions:\n      contents: write" in release
     assert "actions/download-artifact@v8" in release and "name: ${{ needs.app.outputs.dmg }}" in release
-    assert 'gh release create "$GITHUB_REF_NAME" "$DMG"' in release
+    assert 'gh release create "$TAG" "$DMG" "${verify[@]}" --target "$GITHUB_SHA"' in release
+    # a manual run's tag reaches the script through the environment, checked, never as ${{ }} in it
+    run = release[release.index("run: |"):]
+    assert "${{" not in run and "TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.release }}" in release
+    assert '-${TAG#v}-arm64.dmg' in run  # the tag must be the app's version
     # the release page says how to install an app Apple hasn't notarized, in English and French
     assert "--notes-file packaging/mac/release-notes.md --generate-notes" in release
     assert "sparse-checkout: packaging/mac/release-notes.md" in release
