@@ -33,6 +33,7 @@ from voicestream.app.host import AppHost
 from voicestream.app.meetings import Meetings
 from voicestream.app.settings import save_changes
 from voicestream.config import load_config, load_dotenv
+from voicestream.dashboard.app_routes import ASSETS
 from voicestream.dashboard.server import TOKEN_HEADER, create_app
 from voicestream.models import Item, Meeting
 from voicestream.storage import load_meeting
@@ -66,7 +67,7 @@ def _concrete(path: str) -> str:
 def test_every_route_needs_the_token_and_a_loopback_host(host: AppHost) -> None:
     """Enumerated from the app itself, so a route added later can't forget the guard."""
     app = create_app(host, TOKEN)
-    public = {"/", "/app", "/static/app.js", "/static/app.css"}
+    public = {"/", "/app", *ASSETS}  # the pages, their script and style sheet, the fonts
     checked = 0
     with TestClient(app, base_url=BASE) as anonymous:
         for route in app.routes:

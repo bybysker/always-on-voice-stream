@@ -55,7 +55,7 @@ MIN_SIZE = (900, 640)  # the UI is laid out for 900×640 and up
 FRAME_NAME = "Voicestream main window"
 """NSWindow frame autosave name: AppKit remembers the window's size and place (and copes with a
 screen that is no longer connected) in the app's user defaults."""
-BACKGROUND = {"light": "#F4F5F7", "dark": "#0E1014"}  # the UI's --bg, shown before the page paints
+BACKGROUND = {"light": "#F8F8F8", "dark": "#0F0F0F"}  # the UI's --ground, shown before the page paints
 LOAD_TIMEOUT_S = 45.0
 MAIN_THREAD_TIMEOUT_S = 10.0
 SELFTEST_PAUSE_S = 3.0  # time for CI's screenshot at each self-test phase

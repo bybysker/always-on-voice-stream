@@ -107,6 +107,22 @@ def test_static_files_are_served_only_when_present(host: AppHost, tmp_path: Path
             assert anonymous.get(path).status_code in (401, 404), path
 
 
+def test_the_bundled_fonts_are_served_from_the_app_itself(host: AppHost) -> None:
+    """The UI's typeface ships with the app (no font service: the app works offline and loads
+    nothing from the internet), with its licence; the page's CSP allows fonts from itself only."""
+    static = Path(app_routes.__file__).parent / "static"
+    assert (static / "fonts" / "OFL.txt").read_text(encoding="utf-8").startswith("Geist")
+    css = (static / "app.css").read_text(encoding="utf-8")
+    with TestClient(create_app(host, TOKEN), base_url=BASE) as anonymous:
+        assert "font-src 'self';" in anonymous.get("/app").headers["content-security-policy"]
+        for name in app_routes.FONTS:
+            assert f"url('/static/fonts/{name}')" in css, name  # each one is used, and only these
+            r = anonymous.get("/static/fonts/" + name)  # a style sheet's font request can't send the token
+            assert r.status_code == 200 and r.headers["content-type"] == "font/woff2" and r.content[:4] == b"wOF2", name
+        assert anonymous.get("/static/fonts/OFL.txt").status_code in (401, 404)
+    assert set(re.findall(r"url\('/static/fonts/([^']+)'\)", css)) == set(app_routes.FONTS)
+
+
 def test_plain_dashboard_has_no_app_routes(host: AppHost) -> None:
     from test_dashboard import FakeAssistant
 
