@@ -15,18 +15,26 @@ offers a global shortcut to an app. The native shell (:mod:`.native`) uses it on
 only (Carbon's event calls are not thread safe) and keeps it for the life of the app: Carbon holds
 on to the raw pointer of the ctypes callback, not to the Python object.
 
+With ⌥ held a Mac's ``KeyboardEvent.key`` is the character ⌥ types (⌥A is æ on a French keyboard),
+which says nothing of what is printed on the key: :func:`current_layout` asks macOS what each key
+types with nothing held on the keyboard layout in use (``UCKeyTranslate`` on its 'uchr' data), and
+the shell hands that to the page and to the preferences' checks (main thread only too).
+
 Every constant and signature below comes from the macOS SDK headers, quoted by name: HIToolbox's
-``CarbonEvents.h``, ``CarbonEventsCore.h`` and ``Events.h``
-(``Carbon.framework/Frameworks/HIToolbox.framework/Headers``), ``MacTypes.h`` for the base types,
-and AppKit's ``NSEvent.h`` and ``NSText.h`` for the menu.
+``CarbonEvents.h``, ``CarbonEventsCore.h``, ``Events.h`` and ``TextInputSources.h``
+(``Carbon.framework/Frameworks/HIToolbox.framework/Headers``), CarbonCore's ``UnicodeUtilities.h``
+(``CoreServices.framework/Frameworks/CarbonCore.framework/Headers``), CoreFoundation's ``CFBase.h``,
+``CFData.h`` and ``CFString.h``, ``MacTypes.h`` for the base types, and AppKit's ``NSEvent.h`` and
+``NSText.h`` for the menu.
 """
 
 from __future__ import annotations
 
 import ctypes
 import logging
+import string
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -119,7 +127,10 @@ RESERVED: dict[str, str] = {
         "ctrl+shift+cmd+Digit3", "ctrl+shift+cmd+Digit4",              # screenshots
         "ctrl+cmd+KeyF", "alt+cmd+KeyD",                               # full screen, the Dock
         "ctrl+ArrowLeft", "ctrl+ArrowRight", "ctrl+ArrowUp", "ctrl+ArrowDown",  # Spaces, Mission Control
-        "cmd+F5", "alt+cmd+F5", "ctrl+F2", "ctrl+F3",                  # VoiceOver, accessibility, keyboard focus
+        "cmd+F5", "alt+cmd+F5",                                        # VoiceOver, accessibility
+        # keyboard navigation (Keyboard Shortcuts → Keyboard): keyboard access, focus on the menu bar,
+        # the Dock, the next window, the toolbar, the floating window, how Tab moves, the status menus
+        "ctrl+F1", "ctrl+F2", "ctrl+F3", "ctrl+F4", "ctrl+F5", "ctrl+F6", "ctrl+F7", "ctrl+F8",
     ), "mac"),
 }  # fmt: skip
 """Combinations taken already, by their :func:`combo_id`: ``"app"`` (every app's own commands) or
@@ -206,7 +217,8 @@ def label(code: str, key: str = "") -> str:
     (``key`` may be the character above it); a letter is in capitals, as on the key."""
     key = (key or "").strip()
     if (code.startswith("Key") or code in PUNCTUATION) and len(key) == 1 and key.isprintable():
-        return key.upper()
+        upper = key.upper()
+        return upper if len(upper) == 1 else key  # the German ß is ß on the key, not SS
     if code.startswith(("Key", "Digit")):
         return code.removeprefix("Key").removeprefix("Digit")
     if code in PUNCTUATION:
@@ -345,6 +357,17 @@ def _declare(lib: Any) -> Any:
     return lib
 
 
+def _open(paths: Iterable[str], declare: Callable[[Any], Any]) -> Any:
+    """``declare(library)`` for the first of ``paths`` that loads; raises ``OSError`` saying why none did."""
+    errors = []
+    for path in paths:
+        try:
+            return declare(ctypes.CDLL(path))
+        except (OSError, AttributeError, ValueError) as exc:  # AttributeError, ValueError: a symbol is missing
+            errors.append(f"{path}: {exc}")
+    raise OSError("; ".join(errors))
+
+
 def carbon() -> Any:
     """HIToolbox with the hot key calls declared (loaded once). Raises ``OSError`` off macOS, or where
     it can't be loaded."""
@@ -352,15 +375,7 @@ def carbon() -> Any:
     if _LIB is None:
         if sys.platform != "darwin":
             raise OSError("global keyboard shortcuts are a macOS feature")
-        errors = []
-        for path in CARBON_PATHS:
-            try:
-                _LIB = _declare(ctypes.CDLL(path))
-                break
-            except (OSError, AttributeError) as exc:  # AttributeError: a symbol is missing
-                errors.append(f"{path}: {exc}")
-        else:
-            raise OSError("; ".join(errors))
+        _LIB = _open(CARBON_PATHS, _declare)
     return _LIB
 
 
@@ -463,3 +478,157 @@ class CarbonHotKey:
         except Exception:  # an exception must not cross into C
             log.exception("the keyboard shortcut failed")
         return NO_ERR
+
+
+# ------------------------------------------------------------ the keyboard layout
+
+LAYOUT_CODES = (*(f"Key{c}" for c in string.ascii_uppercase), *PUNCTUATION)
+"""The keys whose label depends on the layout: a digit is always shown as its digit, the others as
+macOS draws them."""
+US_LAYOUTS = frozenset({"com.apple.keylayout.US", "com.apple.keylayout.ABC"})
+"""Layouts (``kTISPropertyInputSourceID``) whose letter and punctuation keys type what a US keyboard
+prints on them, as on the macOS CI runners."""
+
+CORE_SERVICES_PATHS = (
+    "/System/Library/Frameworks/CoreServices.framework/CoreServices",  # the umbrella, which re-exports CarbonCore
+    "/System/Library/Frameworks/CoreServices.framework/Frameworks/CarbonCore.framework/CarbonCore",
+)
+CORE_FOUNDATION_PATHS = ("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",)
+KEY_ACTION_DOWN = 0  # UnicodeUtilities.h kUCKeyActionDown: the character the key types going down
+NO_DEAD_KEYS = 1 << 0
+"""UnicodeUtilities.h ``kUCKeyTranslateNoDeadKeysMask`` (``1L << kUCKeyTranslateNoDeadKeysBit``, 0): a
+dead key (^ on a French keyboard) gives its own character rather than waiting for the next key."""
+UTF8 = 0x08000100  # CFString.h kCFStringEncodingUTF8
+MAX_CHARS = 4  # UCKeyTranslate's buffer, in UniChars: a key types one character (two for one beyond the BMP)
+
+_LAYOUT_LIBS: Any = None  # (HIToolbox, CoreServices, CoreFoundation, the two property keys), once loaded
+
+
+def _declare_tis(lib: Any) -> Any:
+    """TextInputSources.h (``TISInputSourceRef`` and ``CFStringRef`` are pointers) and Events.h, in HIToolbox."""
+    p = ctypes.c_void_p
+    for name, restype, argtypes in (
+        # TextInputSources.h: TISInputSourceRef TISCopyCurrentKeyboardLayoutInputSource(void): "the keyboard
+        #   layout currently being used" (the one an input method types with, too); the Copy rule: CFRelease it
+        ("TISCopyCurrentKeyboardLayoutInputSource", p, []),
+        # TextInputSources.h: void *TISGetInputSourceProperty(TISInputSourceRef inputSource, CFStringRef
+        #   propertyKey); the Get rule: not released
+        ("TISGetInputSourceProperty", p, [p, p]),
+        # Events.h: UInt8 LMGetKbdType(void): the physical keyboard type, as UCKeyTranslate wants it
+        ("LMGetKbdType", ctypes.c_uint8, []),
+    ):  # fmt: skip
+        fn = getattr(lib, name)
+        fn.restype, fn.argtypes = restype, argtypes
+    return lib
+
+
+def _declare_uc(lib: Any) -> Any:
+    """UnicodeUtilities.h, in CarbonCore. MacTypes.h: UInt16, UInt32 and OptionBits as named,
+    UniCharCount ``unsigned long``, UniChar a UInt16."""
+    u16, u32 = ctypes.c_uint16, ctypes.c_uint32
+    # OSStatus UCKeyTranslate(const UCKeyboardLayout *keyLayoutPtr, UInt16 virtualKeyCode, UInt16 keyAction,
+    #   UInt32 modifierKeyState, UInt32 keyboardType, OptionBits keyTranslateOptions, UInt32 *deadKeyState,
+    #   UniCharCount maxStringLength, UniCharCount *actualStringLength, UniChar unicodeString[])
+    fn = lib.UCKeyTranslate
+    fn.restype = ctypes.c_int32
+    fn.argtypes = [ctypes.c_void_p, u16, u16, u32, u32, u32, ctypes.POINTER(u32), ctypes.c_ulong,
+                   ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(u16)]
+    return lib
+
+
+def _declare_cf(lib: Any) -> Any:
+    """CoreFoundation (every CF*Ref is a pointer; CFBase.h: CFIndex a ``signed long``; MacTypes.h: Boolean
+    an ``unsigned char``)."""
+    p = ctypes.c_void_p
+    for name, restype, argtypes in (
+        ("CFDataGetBytePtr", p, [p]),  # CFData.h: const UInt8 *CFDataGetBytePtr(CFDataRef theData)
+        # CFString.h: Boolean CFStringGetCString(CFStringRef theString, char *buffer, CFIndex bufferSize,
+        #   CFStringEncoding encoding) (CFStringEncoding: a UInt32)
+        ("CFStringGetCString", ctypes.c_ubyte, [p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]),
+        ("CFRelease", None, [p]),  # CFBase.h: void CFRelease(CFTypeRef cf)
+    ):  # fmt: skip
+        fn = getattr(lib, name)
+        fn.restype, fn.argtypes = restype, argtypes
+    return lib
+
+
+def _layout_libs() -> tuple[Any, Any, Any, int, int]:
+    global _LAYOUT_LIBS
+    if _LAYOUT_LIBS is None:
+        if sys.platform != "darwin":
+            raise OSError("the keyboard layout is read from macOS")
+        tis = _open(CARBON_PATHS, _declare_tis)
+        # TextInputSources.h: extern const CFStringRef kTISPropertyInputSourceID, kTISPropertyUnicodeKeyLayoutData:
+        # variables holding the keys, which in_dll reads (a missing one raises ValueError)
+        try:
+            source_id = ctypes.c_void_p.in_dll(tis, "kTISPropertyInputSourceID").value
+            uchr = ctypes.c_void_p.in_dll(tis, "kTISPropertyUnicodeKeyLayoutData").value
+        except ValueError as exc:
+            raise OSError(str(exc)) from None
+        _LAYOUT_LIBS = (tis, _open(CORE_SERVICES_PATHS, _declare_uc), _open(CORE_FOUNDATION_PATHS, _declare_cf),
+                        source_id, uchr)
+    return _LAYOUT_LIBS
+
+
+def _cf_string(cf: Any, ref: Any) -> str:
+    buf = ctypes.create_string_buffer(256)
+    if ref and cf.CFStringGetCString(ref, buf, len(buf), UTF8):
+        return buf.value.decode("utf-8", "replace")
+    return ""
+
+
+def current_layout() -> tuple[str, dict[str, str]]:
+    """``(input source ID, {code: character})``: what each letter and punctuation key types with nothing
+    held on the keyboard layout in use — ``("com.apple.keylayout.French", {"KeyQ": "a", "KeyA": "q",
+    "Semicolon": "m", …})`` — as ``UCKeyTranslate`` gives it from the layout's 'uchr' data. A key that
+    types no single visible character is left out.
+
+    Main thread only (TextInputSources.h: "If you are a UI application, you must call TextInputSources
+    API on the main thread"; Events.h: LMGetKbdType is not thread safe). Raises ``OSError`` off macOS,
+    or for a layout with only 'KCHR' data, whose 'uchr' data is NULL."""
+    tis, uc, cf, source_id, uchr = _layout_libs()
+    source = tis.TISCopyCurrentKeyboardLayoutInputSource()
+    if not source:
+        raise OSError("macOS gave no current keyboard layout")
+    try:
+        ident = _cf_string(cf, tis.TISGetInputSourceProperty(source, source_id))
+        data = tis.TISGetInputSourceProperty(source, uchr)  # a CFDataRef, owned by the source: kept until released
+        if not data:
+            raise OSError(f"the keyboard layout {ident or '?'} has no 'uchr' data")
+        layout = cf.CFDataGetBytePtr(data)
+        kind = tis.LMGetKbdType()
+        utf16 = "utf-16-le" if sys.byteorder == "little" else "utf-16-be"  # UniChars, in the CPU's order
+        keys: dict[str, str] = {}
+        for code in LAYOUT_CODES:
+            dead, length, chars = ctypes.c_uint32(0), ctypes.c_ulong(0), (ctypes.c_uint16 * MAX_CHARS)()
+            err = uc.UCKeyTranslate(layout, KEY_CODES[code], KEY_ACTION_DOWN, 0, kind, NO_DEAD_KEYS, ctypes.byref(dead),
+                                    MAX_CHARS, ctypes.byref(length), chars)  # modifierKeyState 0: nothing held
+            if err != NO_ERR:
+                continue
+            char = bytes(chars)[: 2 * min(length.value, MAX_CHARS)].decode(utf16, "replace")
+            if len(char) == 1 and char.isprintable() and not char.isspace():
+                keys[code] = char
+        return ident, keys
+    finally:
+        cf.CFRelease(source)
+
+
+def layout_problem(source_id: str, keys: Mapping[str, str]) -> str | None:
+    """What is wrong with ``keys`` (:func:`current_layout`'s) as a keyboard layout's, or ``None`` — the
+    self-test's check: each letter key types a character of its own, with nothing held (no capitals),
+    and on a US layout (:data:`US_LAYOUTS`) the one a US keyboard prints on it. The two keys an ISO
+    keyboard swaps (Backquote and IntlBackslash) are left out of that."""
+    letters = {code: keys.get(code, "") for code in LAYOUT_CODES if code.startswith("Key")}
+    missing = [code for code, char in letters.items() if len(char) != 1]
+    if missing:
+        return "no character for " + ", ".join(missing)
+    if len(set(letters.values())) != len(letters):
+        return "two letter keys type the same character"
+    if any(char != char.lower() for char in letters.values()):
+        return "a letter key types a capital with nothing held"
+    if source_id in US_LAYOUTS:
+        wrong = [f"{code} {keys.get(code)!r}" for code in LAYOUT_CODES
+                 if code not in ("Backquote", "IntlBackslash") and keys.get(code) != label(code).lower()]
+        if wrong:
+            return f"{source_id} is a US layout, but: " + ", ".join(wrong)
+    return None

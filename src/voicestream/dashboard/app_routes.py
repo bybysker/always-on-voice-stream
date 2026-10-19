@@ -28,7 +28,7 @@ from ..app import secrets as keys
 from ..app.checks import run_checks
 from ..app.host import HostError
 from ..app.meetings import MeetingBusy, MeetingNotFound, resolve_folder
-from ..app.prefs import Hotkey
+from ..app.prefs import Hotkey, layout_context
 from ..app.settings import SettingsError, save_checked, settings_view
 from ..costs import estimate_daily
 from .server import AgentApproval, ItemEdit, NewItem, _Body, _error, _parse  # noqa: F401 - shared bodies
@@ -87,7 +87,7 @@ class PrefsPatch(_Body):
     ui_language: Literal["auto", "en", "fr"] | None = None
     window: dict[str, Any] | None = Field(None)
     hotkey: Hotkey | None = None
-    """The keyboard shortcut, checked as the page checks it (``null``: turned off)."""
+    """The keyboard shortcut, checked as the page checks it, by the Mac's keyboard layout (``null``: turned off)."""
     hotkey_sound: bool | None = None
 
 
@@ -383,7 +383,8 @@ class AppApi:
         return JSONResponse(self.host.complete_setup().model_dump(mode="json"))
 
     async def patch_prefs(self, request: Request) -> JSONResponse:
-        body = await _parse(request, PrefsPatch)
+        # a shortcut recorded with ⌥ held may come without its label: the Mac's keyboard layout has it
+        body = await _parse(request, PrefsPatch, layout_context(self.host.keyboard_layout))
         return JSONResponse(self.host.update_prefs(body.model_dump(exclude_unset=True)).model_dump(mode="json"))
 
     async def hotkey_recording(self, request: Request) -> JSONResponse:

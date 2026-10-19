@@ -1313,12 +1313,16 @@ def test_reminders_permission_is_asked_during_setup(make_app: Callable[..., UIAp
     assert len(app.reminders_checks) == 2
 
 
-def _fake_mac_shell(app: UIApp, taken: tuple[str, ...] = ("KeyT",)) -> None:
+def _fake_mac_shell(app: UIApp, taken: tuple[str, ...] = ("KeyT",), layout: dict[str, str] | None = None) -> None:
     """What the native shell does with the keyboard shortcut, without a Mac: it registers the one the
-    preferences name and tells the host what macOS answered (``taken``: keys another app holds)."""
+    preferences name and tells the host what macOS answered (``taken``: keys another app holds), and
+    what the keys type on the keyboard layout (``layout``; none: the shell couldn't read it)."""
     host = app.host
     host.capabilities["hotkey"] = True
     assert host.loop is not None
+    if layout:
+        host.loop.call_soon_threadsafe(host.set_keyboard_layout, layout)
+        _wait(lambda: host.keyboard_layout == layout)
 
     def on_state(state: dict[str, Any]) -> None:  # on the host's loop, like the shell's listener
         hk, st = state["prefs"]["hotkey"], state["hotkey"]
@@ -1389,6 +1393,13 @@ def test_keyboard_shortcut_settings(make_app: Callable[..., UIApp], open_page: C
     expect(keys).to_have_text("⌃⌘A")
     hk = app.host.prefs.hotkey
     assert hk is not None and (hk.code, hk.mods, hk.key) == ("KeyQ", ["ctrl", "cmd"], "A")
+    # ⌃⌥ there: with ⌃ held WebKit gives what the key types without the modifiers, not ⌥'s character —
+    # what it says is kept (it used to be dropped for the US letter, Q)
+    pg.click("#shortcut-change")
+    pg.evaluate("document.dispatchEvent(new KeyboardEvent('keydown', {code: 'KeyQ', key: 'a', ctrlKey: true, altKey: true}))")
+    expect(keys).to_have_text("⌃⌥A")
+    hk = app.host.prefs.hotkey
+    assert hk is not None and (hk.code, hk.mods, hk.key) == ("KeyQ", ["ctrl", "alt"], "A")
 
     # a combination another app holds
     pg.click("#shortcut-change")
@@ -1427,7 +1438,7 @@ def test_keyboard_shortcut_settings(make_app: Callable[..., UIApp], open_page: C
                                              "Escape", "Comma", "Semicolon", "Backquote", "ArrowLeft", "Fn", "Numpad1")
               for mods in ([], ["shift"], ["cmd"], ["alt"], ["ctrl"], ["shift", "cmd"], ["alt", "cmd"], ["ctrl", "cmd"],
                            ["ctrl", "alt"], ["alt", "shift", "cmd"], ["ctrl", "shift", "cmd"])
-              for key in ("", "q", ",", "m")]  # fmt: skip
+              for key in ("", "q", ",", "m", "ß")]  # fmt: skip
     page_says = pg.evaluate("(combos) => combos.map(([c, m, k]) => [shortcutProblem(c, m, k), shortcutLabel(c, k)])", combos)
     for (code, mods, key), (why, label) in zip(combos, page_says, strict=True):
         assert why == hotkey.problem(code, mods, key), (code, mods, key)
@@ -1478,6 +1489,69 @@ def test_keyboard_shortcut_in_french_and_outside_the_mac_app(make_app: Callable[
     pg.locator('#boot').wait_for(state='hidden')
     expect(pg.locator("#shortcut-hint")).to_have_text(" Vous pouvez aussi appuyer sur ⌥⌘R dans n’importe quelle app.")
     p.shot("live-stopped-shortcut-fr")
+
+
+AZERTY = {  # what the keys of a French Mac keyboard type with nothing held, as the shell reads it from macOS
+    **{f"Key{c}": c.lower() for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"},
+    "KeyQ": "a", "KeyA": "q", "KeyW": "z", "KeyZ": "w", "KeyM": ",", "Semicolon": "m", "Comma": ";", "Period": ":",
+    "Slash": "=", "Minus": ")", "Equal": "-", "BracketLeft": "^", "BracketRight": "$", "Quote": "ù", "Backslash": "`",
+    "Backquote": "<", "IntlBackslash": "@",
+}  # fmt: skip
+
+
+def test_keyboard_shortcut_held_with_option_on_an_azerty_keyboard(make_app: Callable[..., UIApp],
+                                                                  open_page: Callable[..., Page]) -> None:
+    """With ⌥ held a Mac gives the page the character ⌥ types (⌥A is æ on a French keyboard), not what is
+    printed on the key: the label and the check come from what the keys type on the keyboard layout, as
+    the Mac app read it from macOS — not from the US letter at that place, which showed ⌥⌘Q for the key
+    printed A and refused ⌥⌘Z as ⌥⌘W."""
+    from playwright.sync_api import expect
+    from pydantic import ValidationError
+
+    from voicestream.app import hotkey
+    from voicestream.app.prefs import Hotkey
+
+    app = make_app(setup_done=True)
+    _fake_mac_shell(app, layout=AZERTY)
+    p = open_page(app, locale="fr-FR")
+    pg = p.page
+    pg.goto(app.url + "#/settings/general")
+    pg.locator('#boot').wait_for(state='hidden')
+    keys, error = pg.locator("#shortcut-keys"), pg.locator("#shortcut-error")
+    option = "document.dispatchEvent(new KeyboardEvent('keydown', {code: '%s', key: '%s', altKey: true, metaKey: true}))"
+    pg.click("#shortcut-change")
+    pg.evaluate(option % ("KeyZ", "Â"))  # ⌥⌘ and the key printed W: Close All there
+    expect(error).to_have_text(
+        "⌥⌘W est une commande de toutes les apps Mac (Quitter, Fermer, Masquer, Placer dans le Dock, Réglages) : choisissez-en un autre.")
+    p.shot("settings-shortcut-azerty-option-refused-fr")
+    pg.evaluate(option % ("KeyQ", "æ"))  # ⌥⌘ and the key printed A
+    expect(keys).to_have_text("⌥⌘A")
+    hk = app.host.prefs.hotkey
+    assert hk is not None and (hk.code, hk.mods, hk.key) == ("KeyQ", ["alt", "cmd"], "A")
+    pg.goto(app.url + "#/live")
+    pg.locator('#boot').wait_for(state='hidden')
+    expect(pg.locator("#shortcut-hint")).to_have_text(" Vous pouvez aussi appuyer sur ⌥⌘A dans n’importe quelle app.")
+
+    # the page and the server agree: what the page makes of a keydown with ⌥ held is what the server makes
+    # of the same key sent with no label, by the same layout
+    events = [{"code": code, "key": AZERTY.get(code, "") if "ctrlKey" in mods else "◊", **mods}
+              for code in ("KeyQ", "KeyA", "KeyW", "KeyZ", "KeyM", "KeyH", "KeyR", "Semicolon", "Comma", "Quote",
+                           "Digit3", "F5", "Escape")
+              for mods in ({"altKey": True, "metaKey": True}, {"altKey": True}, {"altKey": True, "shiftKey": True,
+                           "metaKey": True}, {"ctrlKey": True, "altKey": True}, {"ctrlKey": True, "altKey": True,
+                           "metaKey": True})]  # fmt: skip
+    page_says = pg.evaluate("(evs) => evs.map((ev) => { const hk = shortcutFromEvent(new KeyboardEvent('keydown', ev));"
+                            " return [hk.mods, hk.key, shortcutProblem(hk.code, hk.mods, hk.key), shortcutText(hk)]; })",
+                            events)
+    for ev, (mods, key, why, text) in zip(events, page_says, strict=True):
+        if ev["code"] in AZERTY:
+            assert key == AZERTY[ev["code"]], ev  # what is printed on the key, whichever way it came
+        try:
+            saved = Hotkey.model_validate({"code": ev["code"], "mods": mods, "key": ""}, context={"layout": AZERTY})
+        except ValidationError as exc:
+            assert why is not None and hotkey.explain(why, ev["code"], mods, key) in str(exc), (ev, why, str(exc))
+        else:
+            assert why is None and hotkey.describe(ev["code"], saved.mods, saved.key) == text, (ev, why, text)
 
 
 def test_google_bridge_script_route(tmp_path: Path) -> None:

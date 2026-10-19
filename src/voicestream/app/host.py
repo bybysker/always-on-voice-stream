@@ -31,7 +31,8 @@ the default input (or meeting audio alone) and takes it back when it is (:class:
 The native shell talks to the host from its main thread with :meth:`AppHost.run_in_thread`,
 :meth:`AppHost.call` and :meth:`AppHost.add_state_listener`. Its global keyboard shortcut
 (:mod:`.hotkey`) calls :meth:`AppHost.listen_toggle`, and the shell says with
-:meth:`AppHost.set_hotkey_status` whether macOS took the shortcut. Optional platform glue lives in
+:meth:`AppHost.set_hotkey_status` whether macOS took the shortcut, and with
+:meth:`AppHost.set_keyboard_layout` what the keys type on the Mac's keyboard. Optional platform glue lives in
 ``voicestream.app.native_hooks`` when the shell provides it (all functions optional):
 
 * ``microphone_status() -> "granted" | "denied" | "undetermined" | "restricted"`` (AVFoundation);
@@ -357,6 +358,10 @@ class AppHost:
         """What the native shell says of the shortcut: ``ok`` (works from any app), ``taken`` (by another
         app), ``failed`` (``error``: macOS's code), ``off``, ``paused`` (Settings is recording a new one)
         or, until it has said, ``pending``."""
+        self.keyboard_layout: dict[str, str] = {}
+        """What each letter and punctuation key types with nothing held on the Mac's keyboard layout
+        (``KeyboardEvent.code`` → character, :func:`.hotkey.current_layout`), as the native shell read it;
+        empty elsewhere. A shortcut recorded with ⌥ held is shown and checked by it (the page can't tell)."""
         self._hotkey_recording: asyncio.TimerHandle | None = None
         self._toggling: asyncio.Task[None] | None = None
         """What the last press of the shortcut started, while it is being carried out."""
@@ -512,6 +517,7 @@ class AppHost:
                 "hotkey_sound": self.prefs.hotkey_sound,
             },
             "hotkey": {**self.hotkey, "recording": self._hotkey_recording is not None},
+            "keyboard_layout": dict(self.keyboard_layout),
             "capabilities": dict(self.capabilities),
             "today_usd": round(self.costs.today.total_usd, 4),
         }
@@ -867,16 +873,22 @@ class AppHost:
         when listening — the meeting in progress is wrapped up and its notes written, as with Stop, but
         nobody is asked first (you pressed it on purpose, maybe in another app); resume when paused.
 
-        Returns what it does (:meth:`toggle_action`) at once, for the shell's sound: the work goes on in
-        the background, a stop wrapping a meeting up can take a while."""
+        Returns what it did (:meth:`toggle_action`), for the shell's sound. A stop at once: wrapping a
+        meeting up can take a while, and goes on in the background. A start, restart or resume once it
+        is carried out (a start returns once listening is up, or after :data:`START_WAIT_S`), or
+        ``"error"`` when it failed — a missing key, a permission, a microphone that gave up: those
+        become state ``error`` rather than an exception, and the sound must not say it worked."""
         action = self.toggle_action()
         if action is None:
             return None
         run = {"start": self.listen_start, "restart": self.listen_restart, "stop": self.listen_stop,
                "resume": self.listen_resume}[action]  # fmt: skip
-        self._toggling = asyncio.ensure_future(run())
-        self.track(self._toggling)
-        return action
+        task = self._toggling = asyncio.ensure_future(run())
+        self.track(task)
+        if action == "stop":
+            return action
+        await asyncio.wait({task})  # the work isn't cancelled if this is
+        return "error" if self.status == "error" else action
 
     async def _apply_pending(self) -> None:
         await asyncio.sleep(0)  # after the rest of the meeting.ended listeners
@@ -940,7 +952,7 @@ class AppHost:
                     hook(bool(changes["start_at_login"]))
                 except Exception as exc:  # noqa: BLE001 - e.g. needs approval in System Settings
                     raise HostError(f"could not change launch at login: {exc}") from None
-        self.prefs = update_prefs(changes, self.prefs_path)
+        self.prefs = update_prefs(changes, self.prefs_path, layout=self.keyboard_layout)
         if "hotkey" in changes:
             # the shell registers it when it sees this state (the same one again: it tries again, as
             # one macOS refused may be free now), then says whether macOS took it
@@ -967,6 +979,13 @@ class AppHost:
         new = {"status": status, "error": error}
         if new != self.hotkey:
             self.hotkey = new
+            self._publish_state()
+
+    def set_keyboard_layout(self, keys: dict[str, str]) -> None:
+        """The native shell, on the loop: what the keys type on the Mac's keyboard layout (see
+        :attr:`keyboard_layout`), read at launch and when Settings starts recording a shortcut."""
+        if keys != self.keyboard_layout:
+            self.keyboard_layout = dict(keys)
             self._publish_state()
 
     def complete_setup(self) -> Prefs:

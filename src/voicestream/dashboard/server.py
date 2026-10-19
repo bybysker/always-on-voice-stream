@@ -228,8 +228,8 @@ def _target(request: Request) -> tuple[str, str | None]:
     return request.path_params["item_id"], request.query_params.get("meeting_id") or None
 
 
-async def _parse(request: Request, model: type[_B]) -> _B:
-    return model.model_validate_json(await request.body() or b"{}")
+async def _parse(request: Request, model: type[_B], context: dict[str, Any] | None = None) -> _B:
+    return model.model_validate_json(await request.body() or b"{}", context=context)
 
 
 def _sse(event: Event) -> str:

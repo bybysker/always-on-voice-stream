@@ -838,8 +838,11 @@ async def test_start_in_an_error_state_with_an_assistant_restarts_it(tmp_path: P
 
 
 async def _toggled(host: AppHost, expect: str | None, *settled: str) -> None:
-    """Press the shortcut: it says at once what it does, then the state gets there."""
+    """Press the shortcut: it says what it did (a stop at once, a start once it is up or failed), then
+    the state gets there."""
     assert await host.listen_toggle() == expect
+    if expect in ("start", "restart", "resume", "error"):
+        assert host.status in settled  # said once it was known how it went, not before
     if settled:
         await _until(lambda: host.status in settled and host.toggle_action() is not None)
 
@@ -874,8 +877,12 @@ async def test_the_shortcut_does_nothing_while_starting_stopping_or_quitting(tmp
         host.status = busy
         assert host.toggle_action() is None and await host.listen_toggle() is None
     host.status = "stopped"
-    # two presses in a row: the second comes before the first one's start has changed the state
-    assert await host.listen_toggle() == "start" and await host.listen_toggle() is None
+    # two presses in a row (each its own call on the loop, as the shell posts them): the second comes
+    # while the first one's start is being carried out, before it has changed the state
+    first = asyncio.ensure_future(host.listen_toggle())
+    await asyncio.sleep(0)
+    assert host.status == "stopped" and await host.listen_toggle() is None
+    assert await first == "start"
     await _until(lambda: host.status == "listening" and host.toggle_action() == "stop")
     await host.shutdown()
     assert host.toggle_action() is None and await host.listen_toggle() is None and host.status == "stopped"
@@ -886,8 +893,10 @@ async def test_the_shortcut_after_a_failed_start_tries_again(tmp_path: Path) -> 
         raise TranscriptionError("DEEPGRAM_API_KEY is not set", fatal=True)
 
     host = _host(tmp_path, factory=broken)
-    await _toggled(host, "start", "error")
+    await _toggled(host, "error", "error")  # a start that failed: said so (the shell's sound must not say it worked)
     assert host.error.startswith("Speech-to-text with Deepgram needs your Deepgram key")
+    assert host.toggle_action() == "restart"
+    await _toggled(host, "error", "error")  # the restart fails the same way
     host._factory = _factory()  # fixed meanwhile
     await _toggled(host, "restart", "listening")
     await host.listen_stop()
@@ -917,6 +926,18 @@ async def test_the_shortcut_preference_and_what_the_shell_says(tmp_path: Path) -
     assert host.state()["prefs"]["hotkey"] is None and load_prefs(tmp_path / "app.json").hotkey is None
     with pytest.raises(ValueError, match="every Mac app has"):
         host.update_prefs({"hotkey": {"code": "KeyW", "mods": ["cmd"]}})
+
+    # what the keys type on the Mac's keyboard (French AZERTY here), from the shell: in the state for the
+    # page, and what a shortcut sent without its label is checked and shown by
+    assert host.state()["keyboard_layout"] == {}
+    seen.clear()
+    host.set_keyboard_layout({"KeyQ": "a", "KeyA": "q", "KeyZ": "w", "KeyW": "z"})
+    host.set_keyboard_layout({"KeyQ": "a", "KeyA": "q", "KeyZ": "w", "KeyW": "z"})  # the same: nothing new to tell
+    assert [s["keyboard_layout"] for s in seen] == [{"KeyQ": "a", "KeyA": "q", "KeyZ": "w", "KeyW": "z"}]
+    assert host.update_prefs({"hotkey": {"code": "KeyQ", "mods": ["ctrl", "cmd"]}}).hotkey.key == "A"
+    with pytest.raises(ValueError, match="⌥⌘W is a command every Mac app has"):
+        host.update_prefs({"hotkey": {"code": "KeyZ", "mods": ["alt", "cmd"]}})
+    assert load_prefs(tmp_path / "app.json").hotkey.key == "A"  # what was saved: the label, read back as such
 
 
 # ----------------------------------------------------------- settings edited by hand, the Keychain

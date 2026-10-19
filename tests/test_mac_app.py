@@ -47,6 +47,7 @@ class FakeHost:
         self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
         self.server: ThreadingHTTPServer | None = None
         self.assistant: Any = None
+        self.start_fails = False  # a press's start goes to the error state
 
     # --- the contract
     def run_in_thread(self) -> str:
@@ -113,11 +114,16 @@ class FakeHost:
         return hotkey.TOGGLE.get(self._state["state"])
 
     async def listen_toggle(self) -> str | None:
+        """As AppHost's: a start that went to the error state (``start_fails``) is said as ``error``."""
         self.calls.append(("listen_toggle", None))
-        return self.toggle_action()
+        action = self.toggle_action()
+        return "error" if action in ("start", "restart") and self.start_fails else action
 
     def set_hotkey_status(self, status: str, error: int | None = None) -> None:
         self.calls.append(("set_hotkey_status", (status, error)))
+
+    def set_keyboard_layout(self, keys: dict[str, str]) -> None:
+        self.calls.append(("set_keyboard_layout", dict(keys)))
 
     def update_prefs(self, changes: dict[str, Any]) -> None:
         self.calls.append(("update_prefs", changes))
@@ -461,6 +467,20 @@ def test_menu_model() -> None:
         assert _menu(_state("stopped", **{**shortcut, "hotkey": {"status": status}}))["listen"].shortcut == ""
     azerty = {"prefs": {"hotkey": {"code": "KeyQ", "mods": ["ctrl", "cmd"], "key": "A"}}, "hotkey": {"status": "ok"}}
     assert _menu(_state("stopped", **azerty))["listen"].shortcut == "a"  # AppKit shows the character
+
+    # paused, a press resumes (hotkey.TOGGLE): the shortcut is shown next to Resume listening, not next to
+    # Stop listening, where it would be read as a stop
+    assert hotkey.TOGGLE["paused"] == "resume"
+    for lang, resume, stop in (("en", "Resume listening", "Stop listening"), ("fr", "Reprendre l'écoute", "Arrêter l'écoute")):
+        paused = {e.key: e for e in native.menu_model(_state("paused", minutes=4, **shortcut), lang, "disabled", now=NOW)}
+        assert (paused["pause"].title, paused["pause"].shortcut, paused["pause"].modifiers) == (resume, "r", 0x180000)
+        assert (paused["listen"].title, paused["listen"].shortcut) == (stop, "")
+        assert paused["listen"].modifiers == hotkey.APPKIT_MODIFIERS["cmd"]  # NSMenuItem's default, with no key
+    listening = _menu(_state("listening", minutes=4, **shortcut))
+    assert listening["pause"].shortcut == "" and listening["listen"].shortcut == "r"  # listening: a press stops
+    for st in ("stopped", "error", "starting", "stopping", "listening"):
+        assert native.shortcut_entry(_state(st)) == "listen"
+    assert native.shortcut_entry(_state("paused")) == "pause"
 
 
 def test_which_shortcut_the_shell_registers() -> None:
@@ -956,6 +976,20 @@ def test_a_press_toggles_listening_and_plays_a_sound(host: FakeHost, appkit: Rec
     time.sleep(0.1)
     assert len(played) == 4
 
+    # a start that failed (a missing key, a permission…): not the "it worked" sound, another one
+    host.start_fails = True
+    for state in ("stopped", "error"):
+        host._state["state"] = state
+        shell.state = _hk_state(state, status="ok")
+        before = len(played)
+        shell.on_hotkey()
+        assert _wait(lambda n=before: len(played) == n + 1)
+        assert played[-1] == "Basso" and native.SOUNDS["error"] not in (native.SOUNDS["start"], native.SOUNDS["stop"])
+    host._state["state"] = "listening"  # a stop is said at once, whatever comes of its wrap-up
+    shell.state = _hk_state("listening", status="ok")
+    shell.on_hotkey()
+    assert _wait(lambda: played[-1] == "Pop")
+
 
 def test_the_selftest_presses_the_shortcut_without_listening(host: FakeHost, appkit: Recorder,
                                                              hotkeys: list[FakeHotKeys]) -> None:
@@ -977,6 +1011,22 @@ def test_the_selftest_presses_the_shortcut_without_listening(host: FakeHost, app
 
     listen.returns["keyEquivalent"] = ""  # the menu doesn't show it
     assert shell._check_hotkey()["in_menu"] is False
+    # macOS took it but the host was never told (its state still says pending): the menu, the Live hint and
+    # Settings all lack it — the menu showing nothing must not pass because nothing was expected
+    shell.state = _hk_state(status="pending")
+    info = shell._hotkey_info()
+    assert info["wanted"] is True and info["host_status"] == "pending" and info["menu"]["key"] == ""
+    assert info["in_menu"] is False
+    # paused: a press resumes, so the shortcut is on Resume listening (and only there)
+    shell.state = _hk_state("paused", status="ok")
+    pause = Recorder(keyEquivalent="r", keyEquivalentModifierMask=hotkey.appkit_mask(["alt", "cmd"]))
+    shell._entries["pause"] = pause
+    info = shell._hotkey_info()
+    assert info["menu"]["entry"] == "pause" and info["in_menu"] is True
+    pause.returns["keyEquivalent"] = ""  # still next to Stop listening instead
+    listen.returns["keyEquivalent"] = "r"
+    assert shell._hotkey_info()["in_menu"] is False
+    listen.returns["keyEquivalent"] = ""
     # turned off in the preferences: the default one is registered for the test, then removed again
     shell.state = _hk_state(code=None)
     shell._sync_hotkey()
@@ -985,6 +1035,79 @@ def test_the_selftest_presses_the_shortcut_without_listening(host: FakeHost, app
     assert out["temporary"] is True and out["registered"] == "⌥⌘R" and out["reaches_host"] is True
     assert out["in_menu"] is True  # nothing shown, as nothing is set: right
     assert hotkeys[0].registered is None
+
+
+AZERTY_KEYS = {"KeyQ": "a", "KeyA": "q", "KeyW": "z", "KeyZ": "w", "Semicolon": "m", "KeyM": ","}
+
+
+def test_the_shell_tells_the_host_what_the_keys_type(host: FakeHost, appkit: Recorder,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read from macOS on the main thread at launch, and again when Settings starts recording a shortcut
+    (the layout may have been switched since); told to the host until its state says it."""
+    host.thread.start()
+    layouts = [("com.apple.keylayout.French", AZERTY_KEYS)]
+    reads: list[str] = []
+
+    def current_layout() -> tuple[str, dict[str, str]]:
+        reads.append(threading.current_thread().name)
+        return layouts[-1]
+
+    def told() -> list[Any]:
+        return [args for name, args in host.calls if name == "set_keyboard_layout"]
+
+    monkeypatch.setattr(native.hotkey, "current_layout", current_layout)
+    shell = _shell(host)
+    shell.state = _hk_state()
+    shell._sync_layout()
+    assert reads == []  # not before the app has finished launching
+    shell._launched = True
+    shell.state = _hk_state(hotkey_cap=False)  # no Carbon: no shortcut to show
+    shell._sync_layout()
+    assert reads == []
+
+    shell.state = _hk_state()
+    shell._sync_layout()
+    assert reads == [threading.current_thread().name]  # the caller's thread: the main one, in the app
+    assert _wait(lambda: told() == [AZERTY_KEYS])
+    shell.state = {**_hk_state(), "keyboard_layout": AZERTY_KEYS}  # the host has it now
+    shell._sync_layout()
+    shell._sync_layout()
+    time.sleep(0.1)
+    assert len(reads) == 1 and len(told()) == 1  # not read, nor told, at every state
+
+    layouts.append(("com.apple.keylayout.US", {"KeyQ": "q", "KeyA": "a"}))  # switched to another layout
+    shell.state = {**_hk_state(recording=True), "keyboard_layout": AZERTY_KEYS}  # Settings records a shortcut
+    shell._sync_layout()
+    assert len(reads) == 2 and _wait(lambda: told()[-1] == {"KeyQ": "q", "KeyA": "a"})
+    shell.state = {**_hk_state(recording=True), "keyboard_layout": {"KeyQ": "q", "KeyA": "a"}}
+    shell._sync_layout()
+    assert len(reads) == 2  # still the same recording
+
+    def broken() -> tuple[str, dict[str, str]]:
+        raise OSError("the keyboard layout com.apple.keylayout.Old has no 'uchr' data")
+
+    monkeypatch.setattr(native.hotkey, "current_layout", broken)
+    shell.state = {**_hk_state(recording=False), "keyboard_layout": {"KeyQ": "q", "KeyA": "a"}}
+    shell._sync_layout()
+    shell.state = {**_hk_state(recording=True), "keyboard_layout": {"KeyQ": "q", "KeyA": "a"}}
+    shell._sync_layout()  # unreadable now: Settings goes by what the page knows (the physical key)
+    assert _wait(lambda: told()[-1] == {})
+
+
+def test_the_selftest_reads_the_keyboard_layout(host: FakeHost, appkit: Recorder,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    us = {code: hotkey.label(code).lower() for code in hotkey.LAYOUT_CODES}
+    monkeypatch.setattr(native.hotkey, "current_layout", lambda: ("com.apple.keylayout.US", us))
+    shell = _shell(host)
+    shell.state = {**_hk_state(), "keyboard_layout": us}
+    info = shell._layout_info()
+    assert (info["id"], info["keys"]["KeyQ"], info["problem"], info["told_host"]) == ("com.apple.keylayout.US", "q",
+                                                                                    None, True)
+    shell.state = _hk_state()  # the host was never told
+    assert shell._layout_info()["told_host"] is False
+    swapped = us | {"KeyQ": "a", "KeyA": "q"}  # the virtual key codes mixed up, say
+    monkeypatch.setattr(native.hotkey, "current_layout", lambda: ("com.apple.keylayout.US", swapped))
+    assert shell._layout_info()["problem"] == "com.apple.keylayout.US is a US layout, but: KeyA 'q', KeyQ 'a'"
 
 
 # ---------------------------------------------------------------- macOS hooks

@@ -32,8 +32,10 @@ listening from the menu bar. "Open Voicestream", the Dock or Finder brings both 
 The keyboard shortcut (⌥⌘R unless changed in Settings → General) starts and stops listening from any
 app, window open or not: Carbon's hot key (:mod:`.hotkey`), registered on the main thread once the
 app has launched and again whenever the preference changes, the result told to the host for the
-Settings page. A press is like a menu click (it only posts to the host); a short sound says it
-worked, and the menu shows the same shortcut next to Start/Stop listening.
+Settings page, with what the keys type on the current keyboard layout (:func:`.hotkey.current_layout`:
+the page can't tell with ⌥ held). A press is like a menu click (it only posts to the host); a short
+sound says it worked — once a start is known to have worked, another one when it failed — and the
+menu shows the same shortcut next to what a press does (Start/Stop listening, Resume while paused).
 """
 
 from __future__ import annotations
@@ -93,8 +95,9 @@ WILL_TERMINATE = "NSApplicationWillTerminateNotification"
 SIG_REOPEN = b"Z@:@Z"  # (BOOL)applicationShouldHandleReopen:(NSApplication *) hasVisibleWindows:(BOOL)
 SIG_WILL_TERMINATE = b"v@:@"  # (void)applicationWillTerminate:(NSNotification *)
 
-SOUNDS = {"start": "Tink", "restart": "Tink", "resume": "Tink", "stop": "Pop"}
-"""What the keyboard shortcut plays (macOS's own sounds, /System/Library/Sounds) for what it did."""
+SOUNDS = {"start": "Tink", "restart": "Tink", "resume": "Tink", "stop": "Pop", "error": "Basso"}
+"""What the keyboard shortcut plays (macOS's own sounds, /System/Library/Sounds) for what it did;
+``error``: listening could not start (the menu bar says why)."""
 HOTKEY_ANSWER_S = 5.0  # the self-test's wait for the host's answer to a press
 
 LISTENING_STATES = frozenset({"starting", "listening", "paused"})
@@ -273,12 +276,20 @@ def hotkey_wanted(state: dict[str, Any], *, quitting: bool = False) -> tuple[str
 
 
 def listen_shortcut(state: dict[str, Any]) -> tuple[str, int]:
-    """The key equivalent and modifier mask shown next to Start/Stop listening: the keyboard shortcut,
-    once macOS took it (nothing otherwise: the menu would teach a shortcut that does nothing)."""
+    """The key equivalent and modifier mask shown in the menu next to what a press does
+    (:func:`shortcut_entry`): the keyboard shortcut, once macOS took it (nothing otherwise: the menu
+    would teach a shortcut that does nothing)."""
     hk = (state.get("prefs") or {}).get("hotkey")
     if not hk or (state.get("hotkey") or {}).get("status") != "ok":
         return "", 0
     return hotkey.key_equivalent(str(hk["code"]), str(hk.get("key") or "")), hotkey.appkit_mask(hk.get("mods") or ())
+
+
+def shortcut_entry(state: dict[str, Any]) -> str:
+    """The menu entry the keyboard shortcut is shown next to: the one that does what a press does now
+    (:data:`.hotkey.TOGGLE`) — "Resume listening" while paused (a press resumes: next to "Stop
+    listening" it would be read as a stop), else Start/Stop listening."""
+    return "pause" if hotkey.TOGGLE.get(str(state.get("state") or "stopped")) == "resume" else "listen"
 
 
 def menu_model(state: dict[str, Any], lang: str, login: str, *, now: datetime | None = None,
@@ -292,14 +303,16 @@ def menu_model(state: dict[str, Any], lang: str, login: str, *, now: datetime | 
     stopped = current in ("stopped", "error")
     login_on = login in ("enabled", "requires_approval")
     key, mods = listen_shortcut(state)
+    shortcut: dict[str, Any] = {"shortcut": key, "modifiers": mods}
+    on_pause, on_listen = (shortcut, {}) if shortcut_entry(state) == "pause" else ({}, shortcut)
     return [
         MenuEntry("status", state_line(state, lang, now, quitting=quitting), enabled=False),
         MenuEntry("sep1"),
         MenuEntry("open", s["open"], enabled=not quitting),
         MenuEntry("sep2"),
         MenuEntry("pause", s["resume"] if current == "paused" else s["pause"], enabled=not busy,
-                  visible=current in ("listening", "paused")),
-        MenuEntry("listen", s["start"] if stopped else s["stop"], enabled=not busy, shortcut=key, modifiers=mods),
+                  visible=current in ("listening", "paused"), **on_pause),
+        MenuEntry("listen", s["start"] if stopped else s["stop"], enabled=not busy, **on_listen),
         MenuEntry("end_meeting", s["end_meeting"], enabled=not busy, visible=bool(state.get("in_meeting"))),
         MenuEntry("sep3", visible=login != "unsupported"),
         MenuEntry("login", s["login_approval"] if login == "requires_approval" else s["login"], enabled=not quitting,
@@ -569,6 +582,8 @@ class MacShell:
         self._hotkey_tried: tuple[str, tuple[str, ...]] | None = None  # what was last registered (or tried)
         self._hotkey_status: dict[str, Any] | None = None  # what macOS said of it: told to the host
         self._hotkey_err: int | None = None  # RegisterEventHotKey's OSStatus, for the self-test
+        self._layout: dict[str, str] | None = None  # what the keys type on the keyboard layout, as last read
+        self._recording = False  # Settings was recording a shortcut at the last state
         self._probe: list[Any] | None = None  # the self-test's press: the host's answers, nothing done
 
     # ------------------------------------------------------------ startup
@@ -757,7 +772,7 @@ class MacShell:
         """Main thread: a new host state."""
         self.state = state or {}
         self.lang = self._language()
-        for step in (self._update_activity, self._sync_hotkey, self.render, self._update_timer):
+        for step in (self._update_activity, self._sync_hotkey, self._sync_layout, self.render, self._update_timer):
             try:
                 step()
             except Exception:  # noqa: BLE001
@@ -874,9 +889,35 @@ class MacShell:
 
         self._post(report())
 
+    def _sync_layout(self) -> None:
+        """Main thread, at each host state: tell the host what the keys type on the keyboard layout in use
+        (:func:`.hotkey.current_layout`), which Settings shows and checks a shortcut by — with ⌥ held the
+        page only gets the character ⌥ types. Read at launch, and again each time Settings starts recording
+        a shortcut: the layout may have been switched since."""
+        caps = self.state.get("capabilities") or {}
+        if not self._launched or not caps.get("hotkey") or self.quitting:
+            return
+        recording = bool((self.state.get("hotkey") or {}).get("recording"))
+        if self._layout is None or (recording and not self._recording):
+            try:
+                self._layout = hotkey.current_layout()[1]
+            except Exception as exc:  # noqa: BLE001 - Settings then goes by what the page knows
+                log.warning("could not read the keyboard layout: %s", exc)
+                self._layout = {}
+        self._recording = recording
+        if self._layout != (self.state.get("keyboard_layout") or {}):
+            layout = dict(self._layout)
+
+            async def report() -> None:
+                setter = getattr(self.host, "set_keyboard_layout", None)
+                if setter is not None:
+                    setter(layout)
+
+            self._post(report())
+
     def on_hotkey(self) -> None:
         """Main thread (Carbon's handler): the shortcut was pressed. Like a menu click it only posts to the
-        host; the sound plays once the host has said what the press does."""
+        host; the sound plays once the host has said what the press did (a start: once it is up, or failed)."""
         if self._probe is not None:  # the self-test's press: ask the host what it would do, change nothing
             try:
                 self._probe.append(self.host.call(self._ask_toggle()))
@@ -886,7 +927,9 @@ class MacShell:
         self._post(self._toggle())
 
     async def _toggle(self) -> None:
-        """On the host's loop."""
+        """On the host's loop. A stop is said at once (its wrap-up takes a while); a start, restart or
+        resume once the host knows how it went — ``error`` when it failed, with its own sound: the
+        "it worked" one must not play for a start that went to the error state."""
         from PyObjCTools import AppHelper
 
         action = await self.host.listen_toggle()
@@ -898,8 +941,8 @@ class MacShell:
         return ask() if ask is not None else None
 
     def _feedback(self, action: str) -> None:
-        """Main thread: a short sound, so you know the shortcut worked without looking (the menu-bar icon
-        changes too). Settings → General can turn it off."""
+        """Main thread: a short sound, so you know the shortcut worked — or not — without looking (the
+        menu-bar icon changes too). Settings → General can turn it off."""
         if not (self.state.get("prefs") or {}).get("hotkey_sound", True):
             return
         import AppKit
@@ -1119,6 +1162,9 @@ class MacShell:
             checks["hotkey_registered"] = shortcut.get("register_result") == hotkey.NO_ERR and bool(shortcut.get("registered"))
             checks["hotkey_reaches_host"] = bool(shortcut.get("reaches_host"))
             checks["hotkey_in_menu"] = bool(shortcut.get("in_menu"))
+            report["keyboard_layout"] = layout = self._on_main(self._layout_info) or {}
+            checks["keyboard_layout"] = (bool(layout.get("keys")) and layout.get("problem") is None
+                                         and bool(layout.get("told_host")))
             launcher.write_phase(self.report_path, "window")
             time.sleep(SELFTEST_PAUSE_S)
             report["menu"] = self._check_menu()
@@ -1252,17 +1298,30 @@ class MacShell:
 
     def _hotkey_info(self) -> dict[str, Any]:
         hk = self._hotkeys
-        listen = self._entries.get("listen")
+        entry = shortcut_entry(self.state)
+        item = self._entries.get(entry)
         key, mods = listen_shortcut(self.state)
-        shown = (str(listen.keyEquivalent()), int(listen.keyEquivalentModifierMask())) if listen is not None else None
+        shown = (str(item.keyEquivalent()), int(item.keyEquivalentModifierMask())) if item is not None else None
+        wanted = (self.state.get("prefs") or {}).get("hotkey") is not None
         return {
             "registered": hotkey.describe(*hk.registered) if hk is not None and hk.registered else None,
             "register_result": self._hotkey_err,
             "status": dict(self._hotkey_status or {}),
             "host_status": (self.state.get("hotkey") or {}).get("status"),
-            "menu": {"key": shown[0], "mask": shown[1]} if shown else None,
-            "in_menu": shown is not None and shown[0] == key and (not key or shown[1] == mods),
+            "wanted": wanted,
+            "menu": {"entry": entry, "key": shown[0], "mask": shown[1]} if shown else None,
+            # the menu shows what the host's state says macOS took — and shows something when a shortcut
+            # is set: a status that never reached the host leaves the menu (and Settings) without it
+            "in_menu": (shown is not None and shown[0] == key and (not key or shown[1] == mods)
+                        and (bool(key) or not wanted)),
         }
+
+    def _layout_info(self) -> dict[str, Any]:
+        """Main thread: the keyboard layout as macOS gives it (Settings shows a shortcut recorded with ⌥
+        held by it), whether it looks like one, and whether the host was told it."""
+        ident, keys = hotkey.current_layout()  # an OSError goes in the report (_on_main)
+        return {"id": ident, "keys": keys, "problem": hotkey.layout_problem(ident, keys),
+                "told_host": keys == (self.state.get("keyboard_layout") or {})}
 
     def _check_menu(self) -> dict[str, Any]:
         """Open the status item's menu for CI's screenshot, then close it again."""

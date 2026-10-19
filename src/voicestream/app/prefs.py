@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -18,6 +19,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    ValidationInfo,
     ValidatorFunctionWrapHandler,
     field_validator,
     model_validator,
@@ -38,18 +40,36 @@ class Hotkey(BaseModel):
     """The physical key, as ``KeyboardEvent.code`` names it (``"KeyR"``): the same place whatever the layout."""
     mods: list[Literal["ctrl", "alt", "shift", "cmd"]] = Field(default_factory=lambda: list(hk.DEFAULT_MODS))
     key: str = Field("", max_length=16)
-    """What is printed on that key on this keyboard (``KeyboardEvent.key``), only ever shown; filled in
-    from the code when it isn't a plain character."""
+    """What is printed on that key on this keyboard (``KeyboardEvent.key``), only ever shown; when the page
+    couldn't tell, what the key types on the current layout (the validation context's ``layout``), else
+    what a US keyboard prints there."""
 
     @model_validator(mode="after")
-    def _usable(self) -> Hotkey:
-        """Refused as the Settings page refuses it: a key with nothing held, or one apps or macOS use."""
+    def _usable(self, info: ValidationInfo) -> Hotkey:
+        """Refused as the Settings page refuses it: a key with nothing held, or one apps or macOS use.
+
+        With ⌥ held a Mac gives the page the character ⌥ types, so it may send no ``key``: the one this
+        keyboard's layout has for the code (:func:`.hotkey.current_layout`, from the native shell, passed
+        as ``context={"layout": …}``) is then what is checked and shown, as the page does."""
         self.mods = hk.normalize_mods(self.mods)  # type: ignore[assignment]
-        reason = hk.problem(self.code, self.mods, self.key)
+        key = self.key or layout_key(info.context, self.code)
+        reason = hk.problem(self.code, self.mods, key)
         if reason is not None:
-            raise ValueError(hk.explain(reason, self.code, self.mods, self.key))
-        self.key = hk.label(self.code, self.key)
+            raise ValueError(hk.explain(reason, self.code, self.mods, key))
+        self.key = hk.label(self.code, key)
         return self
+
+
+def layout_key(context: Any, code: str) -> str:
+    """What ``code`` types on the keyboard layout a validation ``context`` names (``""``: none)."""
+    layout = context.get("layout") if isinstance(context, Mapping) else None
+    char = layout.get(code) if isinstance(layout, Mapping) else None
+    return char if isinstance(char, str) else ""
+
+
+def layout_context(layout: Mapping[str, str] | None) -> dict[str, Any] | None:
+    """The validation context for a :class:`Hotkey` recorded on a keyboard with this layout."""
+    return {"layout": dict(layout)} if layout else None
 
 
 class Prefs(BaseModel):
@@ -117,10 +137,12 @@ def save_prefs(prefs: Prefs, path: Path | None = None) -> None:
     write_private(path or prefs_path(), prefs.model_dump_json(indent=1) + "\n")
 
 
-def update_prefs(changes: dict[str, Any], path: Path | None = None) -> Prefs:
-    """Validate ``changes`` (raises pydantic ``ValidationError``), apply them and save."""
-    upd = PrefsUpdate.model_validate(changes).model_dump(exclude_unset=True)
+def update_prefs(changes: dict[str, Any], path: Path | None = None, layout: Mapping[str, str] | None = None) -> Prefs:
+    """Validate ``changes`` (raises pydantic ``ValidationError``), apply them and save. ``layout``: what the
+    keys type on this keyboard, for a shortcut sent without its label (see :class:`Hotkey`)."""
+    context = layout_context(layout)
+    upd = PrefsUpdate.model_validate(changes, context=context).model_dump(exclude_unset=True)
     keep = {k: v for k, v in upd.items() if v is not None or k in ("window", "hotkey")}  # null: none, off
-    prefs = Prefs.model_validate(load_prefs(path).model_dump() | keep)  # validated again: a Hotkey, not a dict
+    prefs = Prefs.model_validate(load_prefs(path).model_dump() | keep, context=context)  # again: a Hotkey, not a dict
     save_prefs(prefs, path)
     return prefs
