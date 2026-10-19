@@ -160,7 +160,7 @@ function t(key, vars) {
 
 /** Plural forms: ``tp('meetings.actions', 3)`` uses ``meetings.actions.one`` / ``.other``. */
 function tp(key, n, vars) {
-  const form = new Intl.PluralRules(LANG).select(n) === 'one' ? 'one' : 'other';
+  const form = intl(Intl.PluralRules, LANG).select(n) === 'one' ? 'one' : 'other';
   return t(key + '.' + form, { n: fmtNum(n), ...vars });
 }
 
@@ -171,12 +171,27 @@ function locale() {
 
 // ======================================================================== formatting
 
-function fmtNum(n) { return new Intl.NumberFormat(locale()).format(n); }
+/** One Intl formatter per kind, locale and options, kept: making one is slow, and a long meeting's
+ *  strip and lists format thousands of numbers. */
+const INTL = new Map();
+function intl(Kind, loc, opts) {
+  const key = Kind.name + '|' + loc + '|' + (opts ? JSON.stringify(opts) : '');
+  let f = INTL.get(key);
+  if (!f) { f = new Kind(loc, opts); INTL.set(key, f); }
+  return f;
+}
+
+function fmtNum(n) { return intl(Intl.NumberFormat, locale()).format(n); }
+
+/** A figure with exactly ``digits`` decimals and no unit: "1.60", "1,60" (an axis whose unit is in its title). */
+function fmtFixed(n, digits) {
+  return intl(Intl.NumberFormat, locale(), { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(n);
+}
 
 function money(x, digits) {
   const v = Number(x) || 0;
   const d = digits ?? (v > 0 && v < 0.01 ? 3 : 2);  // a fraction of a cent still shows as spent
-  return new Intl.NumberFormat(locale(), { style: 'currency', currency: 'USD', minimumFractionDigits: d, maximumFractionDigits: d }).format(v);
+  return intl(Intl.NumberFormat, locale(), { style: 'currency', currency: 'USD', minimumFractionDigits: d, maximumFractionDigits: d }).format(v);
 }
 
 function fmtTs(seconds) {
@@ -212,9 +227,9 @@ function fmtDuration(seconds) {
 
 function fmtBytes(n) {
   const mb = (n || 0) / (1024 * 1024);
-  if (mb >= 1024) return t('size.gb', { n: new Intl.NumberFormat(locale(), { maximumFractionDigits: 1 }).format(mb / 1024) });
+  if (mb >= 1024) return t('size.gb', { n: intl(Intl.NumberFormat, locale(), { maximumFractionDigits: 1 }).format(mb / 1024) });
   if (mb >= 1) return t('size.mb', { n: fmtNum(Math.round(mb)) });
-  return t('size.mb', { n: new Intl.NumberFormat(locale(), { maximumFractionDigits: 1 }).format(mb) });
+  return t('size.mb', { n: intl(Intl.NumberFormat, locale(), { maximumFractionDigits: 1 }).format(mb) });
 }
 
 function fmtDue(item) {
@@ -858,7 +873,8 @@ function tick() {
   const extra = $('state-extra');
   if (extra) extra.textContent = S.app && S.app.in_meeting && elapsed != null ? t('state.meeting_for', { time: fmtDuration(elapsed) }) : '';
   if (LV.elapsed && S.live.meeting) LV.elapsed.textContent = elapsed != null ? fmtTs(elapsed) : '';
-  if (LV.voices && inMeetingView()) LV.voices.setTotal(elapsed);
+  // a minute at a time: each new length lays out every bar of the strip again
+  if (LV.voices && inMeetingView()) LV.voices.setTotal(Math.ceil((elapsed || 0) / 60) * 60);
   const now = Date.now();
   for (const m of S.live.meters.values()) {
     if (now - m.at > 2500) { m.fill.style.width = '0%'; m.el.classList.remove('speech'); }
@@ -1136,7 +1152,7 @@ function addItemForm(board, post, { disabled = false, compact = false } = {}) {
   const title = h('input', { class: 'title-in', placeholder: t('items.add_ph'), 'aria-label': t('item.title'), required: true, maxlength: 200 });
   const owner = h('input', { class: 'narrow', placeholder: t('item.owner'), 'aria-label': t('item.owner'), maxlength: 80 });
   const due = h('input', { class: 'narrow', placeholder: t('item.due_ph'), 'aria-label': t('item.due_label'), maxlength: 80 });
-  const submit = h('button', { type: 'submit', class: 'btn primary', disabled, 'aria-label': t('items.add') },
+  const submit = h('button', { type: 'submit', class: 'btn', disabled, 'aria-label': t('items.add') },
     icon('plus'), h('span', { class: 'btn-label' }, t('items.add')));
   const form = h('form', { class: 'add', autocomplete: 'off' }, kind, title, owner, due, submit);
   form.addEventListener('submit', (e) => {
@@ -1252,10 +1268,10 @@ function buildLive() {
   fill(root);  // renderLive puts in the view on show: between meetings, or the meeting
   for (const [kind, data] of S.live.segs) {
     LV.lines.append(kind === 'seg' ? segLine(data) : screenLine(data));
-    if (kind === 'seg') LV.voices.add(data);
+    if (kind === 'seg') LV.voices.add(data, false);
   }
   for (const item of S.live.items.values()) markSaid(LV.lines, item);
-  LV.voices.setItems(S.live.items.values());
+  LV.voices.setItems(S.live.items.values());  // and its legend, once
   LV.tEmpty.hidden = S.live.segs.length > 0;
   renderPartials();
 }
@@ -1358,12 +1374,29 @@ function renderIdle() {
   renderLastMeeting();
 }
 
+/** The meetings, newest first, as far back as the last 7 days go at least: the week's figures count
+ *  every one of them, and always-on makes a meeting of each talk after a quiet spell. */
+async function recentMeetings() {
+  const since = Date.now() - 7 * 86400000;
+  const page = (offset) => api('GET', '/api/meetings?limit=100&offset=' + offset);
+  const first = await page(0);
+  const rows = first.meetings, seen = new Set(rows.map((r) => r.folder));
+  let total = first.total;
+  while (rows.length && rows.length < total && (toDate(rows[rows.length - 1].started_at) || 0) >= since) {
+    const more = await page(rows.length);
+    const fresh = more.meetings.filter((r) => !seen.has(r.folder));  // one that began meanwhile moves the rest down
+    if (!fresh.length) break;
+    for (const r of fresh) { seen.add(r.folder); rows.push(r); }
+    total = more.total;
+  }
+  return rows;
+}
+
 const refreshLast = debounce(async () => {
   S.lastMeetingFailed = false;
   try {
-    const data = await api('GET', '/api/meetings?limit=30');
-    S.recent = data.meetings;
-    const m = S.lastMeeting = data.meetings[0] || null;
+    S.recent = await recentMeetings();
+    const m = S.lastMeeting = S.recent[0] || null;
     S.lastMeetingLoaded = true;
     // the last meeting itself: its to-dos and decisions, not only how many, and who spoke when
     const detail = m ? (await api('GET', '/api/meetings/' + enc(m.folder))).meeting : null;
@@ -1437,8 +1470,8 @@ function lastVoices(m) {
   const segs = S.lastSegments || [];
   if (!segs.length) return null;
   const strip = new VoiceStrip('last');
-  for (const seg of segs) strip.add(seg);
-  strip.setItems(S.lastItems || []);
+  for (const seg of segs) strip.add(seg, false);
+  strip.setItems(S.lastItems || []);  // and its legend, once
   strip.setTotal(m.duration_s || 0);
   strip.el.classList.add('inline');
   return strip.el;
@@ -1712,7 +1745,8 @@ class VoiceStrip {
     this.setItems([]);
   }
 
-  add(seg) {
+  /** One more line; ``legend`` false when more follow at once (the legend is drawn after the last). */
+  add(seg, legend = true) {
     if (!seg || this.at.has(seg.id)) return;
     const lane = seg.source === 'mic' ? 'me' : 'others';
     const dur = Math.max(0, (seg.t_end || 0) - (seg.t_start || 0));
@@ -1724,7 +1758,7 @@ class VoiceStrip {
     bar.style.setProperty('--d', String(dur));
     this.tracks[lane].append(bar);
     if (this.end > this.total) this.setTotal(this.end);
-    this.renderLegend();
+    if (legend) this.renderLegend();
   }
 
   /** Where each to-do and decision was said: its first line's time. */
@@ -1745,7 +1779,7 @@ class VoiceStrip {
     this.renderLegend();
   }
 
-  /** The strip's length in seconds: the meeting so far (live), or up to its last words. */
+  /** The strip's length in seconds: the meeting so far (live, a whole minute), or up to its last words. */
   setTotal(seconds) {
     const total = Math.max(60, this.end, seconds || 0);
     if (Math.abs(total - this.total) < 0.5) return;
@@ -1757,7 +1791,8 @@ class VoiceStrip {
       this.count = count;
       const labels = [];
       for (let s = 0; s <= total; s += step) {
-        const label = h('span', {}, s === 0 ? '0' : fmtDuration(s));
+        // every other one, from four steps up, is left out on a phone (app.css): 3 or 4 labels there
+        const label = h('span', { class: count >= 4 && (s / step) % 2 === 1 ? 'minor' : null }, s === 0 ? '0' : fmtDuration(s));
         label.style.setProperty('--s', String(s));
         labels.push(label);
       }
@@ -2162,13 +2197,19 @@ function drawDetail() {
   document.title = title + ' · Voicestream';
   let duration = m.segments && m.segments.length ? Math.max(...m.segments.map((s) => s.t_end)) : m.ended_at ? (toDate(m.ended_at) - toDate(m.started_at)) / 1000 : 0;
   if (inProgress) duration = Math.max(duration, (Date.now() - toDate(m.started_at)) / 1000);  // so far, as the sidebar counts it
+  // how long, in what language, with whom: the facts beside the tabs say it; when the window is too
+  // narrow for them to be beside (app.css), they go under the tabs, and the title's line says it too
+  const lang = langName(m.language);
   const meta = [
     h('span', {}, fmtLongDate(m.started_at)),
     h('span', {}, fmtClock(m.started_at) + (m.ended_at ? '–' + fmtClock(m.ended_at) : '')),
-  ];
+    duration > 0 && fmtDuration(duration),
+    lang,
+    m.participants && m.participants.length && t('meetings.with', { names: m.participants.join(', ') }),
+  ].filter(Boolean);
   const mac = S.app && S.app.platform === 'darwin';
   const actions = h('div', { class: 'row' },
-    btn(t('meetings.push'), { cls: 'primary', id: 'push-meeting', disabled: readOnly, onclick: (e) => pushMeeting(e.currentTarget) }, 'send'),
+    btn(t('meetings.push'), { id: 'push-meeting', disabled: readOnly, onclick: (e) => pushMeeting(e.currentTarget) }, 'send'),
     btn(D.summarizing ? t('meetings.rewriting') : t('meetings.rewrite'), {
       id: 'rewrite-notes', disabled: inProgress || D.summarizing, title: t('meetings.rewrite_help'),
       onclick: rewriteNotes,
@@ -2205,17 +2246,25 @@ function drawDetail() {
 
   // the meeting as it went: who spoke when, and where each to-do and decision was said
   const voices = new VoiceStrip('detail');
-  for (const seg of m.segments || []) voices.add(seg);
-  voices.setItems(Object.values(m.items || {}));
+  for (const seg of m.segments || []) voices.add(seg, false);
+  voices.setItems(Object.values(m.items || {}));  // and its legend, once
   voices.setTotal(duration);
 
   fill(root,
     h('div', { class: 'detail-head' }, back, h('h1', {}, title),
-      h('div', { class: 'meta-line' }, meta.flatMap((el, i) => (i ? [h('span', { 'aria-hidden': 'true', class: 'sep' }, '·'), el] : [el]))),
+      // each part after the first with its "·", so no line of it ends on one
+      h('div', { class: 'meta-line' }, meta.map((el, i) => (i
+        ? h('span', { class: 'with-sep' + (typeof el === 'string' ? ' facts-here' : '') }, h('span', { 'aria-hidden': 'true', class: 'sep' }, '·'), el)
+        : el))),
       m.tldr && h('p', { class: 'tldr' }, m.tldr), actions),
     ...notes.map((n) => h('div', { class: 'readonly-note' }, n)),
     (m.segments || []).length ? voices.el : null,
     h('div', { class: 'detail-grid' }, h('div', { class: 'tabwrap' }, tabs, panel), detailFacts(m, duration)));
+}
+
+/** A meeting's language by name: "French", or its code when Voicestream has no name for it. */
+function langName(code) {
+  return code ? (has('lang.name.' + code.slice(0, 2)) ? t('lang.name.' + code.slice(0, 2)) : code) : '';
 }
 
 /** The meeting's facts beside its tabs: how long, in what language, with whom, what came out, where it went. */
@@ -2226,7 +2275,7 @@ function detailFacts(m, duration) {
   const decisions = items.filter((i) => i.kind === 'decision').length;
   const pushed = {};
   for (const i of items) for (const sink of Object.keys(i.pushed || {})) pushed[sink] = true;
-  const lang = m.language && (has('lang.name.' + m.language.slice(0, 2)) ? t('lang.name.' + m.language.slice(0, 2)) : m.language);
+  const lang = langName(m.language);
   const dash = h('span', { class: 'none' }, '—');
   const rows = [
     ['length', duration > 0 ? fmtDuration(duration) : dash],
@@ -2340,7 +2389,7 @@ function emailPanel(D) {
         await copyText((e.subject ? e.subject + '\n\n' : '') + body);
         toast(t('email.copied'), 'ok');
       }) }, 'copy'),
-      h('a', { class: 'btn primary', id: 'mail-link', href, target: '_blank', rel: 'noopener noreferrer' }, icon('mail'), t('email.open_mail')),
+      h('a', { class: 'btn', id: 'mail-link', href, target: '_blank', rel: 'noopener noreferrer' }, icon('mail'), t('email.open_mail')),
       h('span', { class: 'muted small' }, t('email.never_sent'))));
 }
 
@@ -2502,7 +2551,8 @@ function historyCard(rows) {
     const y = (1 - frac) * 100;
     const g = h('div', { class: 'gridline' + (frac === 0 ? ' base' : '') });
     g.style.top = y + '%';
-    const lab = h('span', { class: 'ytick', 'aria-hidden': 'true' }, money(top * frac, frac ? digits : 0));
+    // figures only: "US$" on each one ran into the plot in French, and the subtitle says "in US dollars"
+    const lab = h('span', { class: 'ytick', 'aria-hidden': 'true' }, fmtFixed(top * frac, frac ? digits : 0));
     lab.style.top = y + '%';
     plot.append(g, lab);
   }
@@ -3292,10 +3342,12 @@ function showSaveError(field, message) {
   renderSaveBar();
 }
 
-/** One settings section as a row: what it is about on the left, its controls in a panel on the right. */
+/** One settings section as a row: what it is about on the left, its controls in a panel on the right.
+ *  ``lead`` is its sentence, or ``[sentence, ...more]`` with what goes under it (a summary of what is on). */
 function card(title, lead, ...body) {
+  const [text, ...more] = [].concat(lead || []);
   return h('section', { class: 'set-row' },
-    h('div', { class: 'set-label' }, h('h2', {}, title), lead && h('p', { class: 'lead' }, lead)),
+    h('div', { class: 'set-label' }, h('h2', {}, title), text && h('p', { class: 'lead' }, text), more),
     h('div', { class: 'card set-panel' }, ...body));
 }
 
@@ -3316,7 +3368,7 @@ function generalSection() {
         errorEl('transcription.language')),
       field('always_on.idle_split_minutes', t('set.idle'), numberInput('always_on.idle_split_minutes', { min: 0, max: 240, step: 1 }),
         { help: t('set.idle_help'), extra: h('span', { class: 'suffix' }, t('set.minutes')) })),
-    card(t('set.app'), null,
+    card(t('set.app'), t('set.app_lead'),
       h('div', { class: 'field', dataset: { path: 'pref:ui_language' } },
         h('label', { for: 'p-ui_language' }, t('set.ui_language')),
         h('div', { class: 'control' }, uiLanguageSelect())),
@@ -3363,11 +3415,27 @@ function sttSection() {
       h('p', { class: 'small' }, h('a', { href: SECRET_LINKS.DEEPGRAM_API_KEY, target: '_blank', rel: 'noopener noreferrer' }, t('key.where_deepgram'), ' ', icon('external'))));
   }
   return h('div', {},
-    card(t('stt.title'), t('stt.lead'),
+    card(t('stt.title'), [t('stt.lead'), sttSummary()],
       h('div', { class: 'field', dataset: { path: 'transcription.backend' } },
         choiceCards(t('stt.title'), options, backend, (v) => { setDraft('transcription.backend', v); redrawSection(); }),
         errorEl('transcription.backend')),
       detail));
+}
+
+/** Beside the choices, what turns the voices into text now (as saved), as Your tools lists what is on. */
+function sttSummary() {
+  const backend = savedVal('transcription.backend');
+  const engine = { 'whisper-cpp': 'stt.local', openai: 'stt.openai', 'openai-realtime': 'stt.openai', deepgram: 'stt.deepgram' }[backend];
+  let detail = null;
+  if (backend === 'whisper-cpp') {
+    const m = S.models && S.models.models.find((x) => x.name === savedVal('transcription.whisper_cpp.model'));
+    if (m) detail = t('stt.summary_model', { name: modelLabel(m), size: fmtBytes(m.size) });
+  } else if (backend === 'openai' || backend === 'deepgram') {
+    const price = sttPrice(savedVal(`transcription.${backend}.model`));
+    if (price) detail = t('stt.summary_price', { price });
+  }
+  return h('div', { class: 'summary', id: 'stt-summary' }, t('stt.summary'),
+    h('span', {}, icon('check'), engine ? t(engine) : t('stt.other', { name: backend })), detail);
 }
 
 function claudeSection() {
@@ -4438,7 +4506,8 @@ const STRINGS = {
     'set.languages': 'Languages spoken in your meetings',
     'set.idle': 'A meeting ends after this much silence', 'set.minutes': 'minutes',
     'set.idle_help': 'The next time someone speaks, a new meeting starts. 0 = never end a meeting by itself.',
-    'set.app': 'The app', 'set.ui_language': 'App language', 'set.ui_auto': 'Same as the Mac',
+    'set.app': 'The app', 'set.app_lead': 'How Voicestream opens, its language and its keyboard shortcut.',
+    'set.ui_language': 'App language', 'set.ui_auto': 'Same as the Mac',
     'set.listen_on_launch': 'Start listening when Voicestream opens',
     'set.listen_on_launch_help': 'Otherwise, press Start listening yourself.',
     'set.start_at_login': 'Open Voicestream when I log in', 'set.login_help': 'Voicestream starts in the menu bar.',
@@ -4467,6 +4536,7 @@ const STRINGS = {
     'lang.other': 'Other: {code}', 'lang.other.desc': 'As set in the settings file.',
 
     'stt.title': 'Speech-to-text', 'stt.lead': 'What turns the voices into text.',
+    'stt.summary': 'In use:', 'stt.summary_model': 'Speech model: {name} · {size}', 'stt.summary_price': 'About {price} per hour of speech',
     'stt.local': 'On this Mac — free & private', 'stt.local_desc': 'The audio never leaves your Mac. Needs a one-time download.',
     'stt.openai': 'OpenAI — online', 'stt.deepgram': 'Deepgram — online',
     'stt.cloud_desc': 'About {price} per hour of speech. Needs a key.',
@@ -4861,7 +4931,8 @@ const STRINGS = {
     'set.languages': 'Langues parlées en réunion',
     'set.idle': 'Une réunion se termine après ce silence', 'set.minutes': 'minutes',
     'set.idle_help': 'Dès que quelqu’un reparle, une nouvelle réunion commence. 0 = ne jamais terminer une réunion d’elle-même.',
-    'set.app': 'L’application', 'set.ui_language': 'Langue de l’application', 'set.ui_auto': 'Comme le Mac',
+    'set.app': 'L’application', 'set.app_lead': 'Comment Voicestream s’ouvre, sa langue et son raccourci clavier.',
+    'set.ui_language': 'Langue de l’application', 'set.ui_auto': 'Comme le Mac',
     'set.listen_on_launch': 'Commencer l’écoute à l’ouverture de Voicestream',
     'set.listen_on_launch_help': 'Sinon, appuyez vous-même sur Commencer l’écoute.',
     'set.start_at_login': 'Ouvrir Voicestream à l’ouverture de session', 'set.login_help': 'Voicestream démarre dans la barre des menus.',
@@ -4890,6 +4961,7 @@ const STRINGS = {
     'lang.other': 'Autre : {code}', 'lang.other.desc': 'Selon le fichier de réglages.',
 
     'stt.title': 'Transcription', 'stt.lead': 'Ce qui transforme les voix en texte.',
+    'stt.summary': 'Utilisé :', 'stt.summary_model': 'Modèle : {name} · {size}', 'stt.summary_price': 'Environ {price} par heure de parole',
     'stt.local': 'Sur ce Mac — gratuit et privé', 'stt.local_desc': 'L’audio ne quitte jamais votre Mac. Un téléchargement unique.',
     'stt.openai': 'OpenAI — en ligne', 'stt.deepgram': 'Deepgram — en ligne',
     'stt.cloud_desc': 'Environ {price} par heure de parole. Demande une clé.',

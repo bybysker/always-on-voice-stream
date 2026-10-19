@@ -843,6 +843,257 @@ def test_french_ui_follows_the_system_language(make_app: Callable[..., UIApp], o
     expect(pg.locator("#setup-h")).to_have_text("À propos de vous")
     # nothing scrolls sideways in the smallest window
     assert pg.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    # the permissions step: the longer French words wrap beside their icon, each Test button stays on its row
+    pg.evaluate("sessionStorage.setItem('voicestream-setup-step', '4')")
+    pg.reload()
+    pg.locator('#boot').wait_for(state='hidden')
+    expect(pg.locator("#setup-h")).to_have_text("Autorisations")
+    assert pg.evaluate(PERM_ROWS_HOLD) == [True, True]
+
+
+PERM_ROWS_HOLD = """() => [...document.querySelectorAll('.perm')].map((row) => {
+  const [icon, text, button] = [':scope > .icon', ':scope > .grow', ':scope > .btn']
+    .map((sel) => row.querySelector(sel).getBoundingClientRect());
+  return icon.right <= text.left && text.right <= button.left  // one line: icon, words, button
+    && icon.top < text.bottom && button.top < text.bottom && text.top < button.bottom;
+})"""
+"""For each permission row: are its icon, its words and its Test button side by side on one line?"""
+
+
+def _contrast(fg: str, bg: str) -> float:
+    """The WCAG contrast of two computed colours (``rgb(r, g, b)``)."""
+    def luminance(css: str) -> float:
+        channels = [float(v) / 255 for v in re.findall(r"[\d.]+", css)[:3]]
+        r, g, b = (c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    hi, lo = sorted((luminance(fg), luminance(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_a_meeting_in_the_smallest_mac_window(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """The Mac window stops at MIN_SIZE (900×640; its web view as wide, and a title bar shorter). That is
+    still the window's layout, not the phone's: the sidebar with its screens and the meeting's clock,
+    and the meeting's two panes side by side with the to-dos in view, only the panes scrolling. And the
+    voice strip grows a minute at a time: each new length lays out every one of its bars again."""
+    from itertools import pairwise
+
+    from playwright.sync_api import expect
+
+    from voicestream.app.native import MIN_SIZE
+
+    app = make_app(setup_done=True, listen_on_launch=True)
+    _wait_state(app, "listening")
+    p = open_page(app, size=MIN_SIZE)
+    pg = p.page
+    app.say("Bonjour, on fait le point sur le budget.")
+    app.say("Je vais envoyer le budget à Sam d'ici vendredi.")
+    app.say("We decided to keep the price at 29 euros.", source="system")
+    expect(pg.locator("#meeting-heading")).to_be_visible()
+    pg.click("#extract")
+    expect(pg.locator("#screen-live [data-kind=action] .item").first).to_be_visible()
+    layout = """() => {
+      const panes = document.querySelector('#screen-live .panes');
+      const [transcript, items] = [...panes.querySelectorAll(':scope > .pane')].map((el) => el.getBoundingClientRect());
+      const page = document.documentElement;
+      return { columns: getComputedStyle(panes).gridTemplateColumns.split(' ').length, transcript, items,
+               fits: page.scrollHeight <= innerHeight && page.scrollWidth <= innerWidth, height: innerHeight };
+    }"""
+    for width, height in (MIN_SIZE, (MIN_SIZE[0], MIN_SIZE[1] - 28)):
+        pg.set_viewport_size({"width": width, "height": height})
+        expect(pg.locator("#nav")).to_be_visible()
+        expect(pg.locator("#menu-btn")).to_be_hidden()
+        expect(pg.locator("#state-extra")).to_contain_text("Meeting in progress")
+        got = pg.evaluate(layout)
+        assert got["columns"] == 2 and got["fits"], got
+        assert got["items"]["top"] == got["transcript"]["top"] and got["items"]["bottom"] <= got["height"], got
+    p.shot("live-meeting-smallest-window")
+    # narrower, in a browser: the sidebar folds into a bar; the panes stay side by side down to the phone
+    pg.set_viewport_size({"width": 760, "height": 600})
+    expect(pg.locator("#menu-btn")).to_be_visible()
+    got = pg.evaluate(layout)
+    assert got["columns"] == 2 and got["fits"] and got["items"]["bottom"] <= got["height"], got
+    pg.set_viewport_size({"width": 390, "height": 844})
+    assert pg.evaluate(layout)["columns"] == 1
+
+    # three and a half minutes in: the strip is 4 minutes long until the clock passes them
+    pg.set_viewport_size({"width": MIN_SIZE[0], "height": MIN_SIZE[1]})
+    pg.evaluate("() => { const start = Date.now() - 210000; meetingElapsed = () => (Date.now() - start) / 1000; }")
+    totals = []
+    pg.wait_for_timeout(1100)  # the clock ticks every second
+    for _ in range(4):
+        pg.wait_for_timeout(700)
+        plot = pg.locator("#screen-live .voices-plot")
+        totals.append(float(plot.evaluate("(el) => getComputedStyle(el).getPropertyValue('--total')")))
+    assert totals == [240.0] * 4, totals
+    # a whole number of minutes puts a label at the strip's end: on a phone, 3 or 4 labels, apart
+    pg.set_viewport_size({"width": 390, "height": 844})
+    labels = pg.evaluate("""() => [...document.querySelectorAll('#screen-live .axis > span')].filter((el) => el.offsetParent)
+      .map((el) => [el.getBoundingClientRect().left, el.getBoundingClientRect().right])""")
+    assert 3 <= len(labels) <= 4 and all(a[1] + 8 <= b[0] for a, b in pairwise(labels)), labels
+
+
+def test_a_meeting_page_in_the_mac_window(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """At the window's default size the facts go under the tabs: the title's line then says how long,
+    in what language and with whom, and the facts start on the cards' edge. One filled button on the
+    screen, the recorder's; the words a to-do came from have a straight edge; redrawing the page draws
+    the voice strip's legend once and makes no new number formatter."""
+    from playwright.sync_api import expect
+
+    from voicestream.app.native import WINDOW_SIZE
+    from voicestream.storage import atomic_write, load_meeting
+
+    app = make_app(setup_done=True, meetings=True)
+    folder = app.folder_of("Budget review")
+    meeting, path = load_meeting(app.root / "data" / "sessions" / folder)
+    meeting.participants, meeting.language = ["Camille", "Sam Lefèvre"], "en"  # as the wrap-up finds them
+    atomic_write(path / "meeting.json", meeting.model_dump_json(indent=1))
+    p = open_page(app, size=WINDOW_SIZE)
+    pg = p.page
+    pg.goto(app.url + f"#/meetings/{folder}/notes")
+    pg.locator('#boot').wait_for(state='hidden')
+    meta = pg.locator(".detail-head .meta-line")
+    extra = meta.locator(".facts-here")  # what the facts say, there too
+    expect(extra).to_have_text(["·under a minute", "·English", "·with Camille, Sam Lefèvre"])
+    for i in range(3):
+        expect(extra.nth(i)).to_be_visible()
+    box = meta.bounding_box()
+    assert box and box["y"] + box["height"] <= WINDOW_SIZE[1]  # on the first screen
+    facts, tabs = pg.locator(".facts h2").bounding_box(), pg.locator(".tabwrap").bounding_box()
+    assert facts and tabs and facts["y"] > tabs["y"] + tabs["height"] and abs(facts["x"] - tabs["x"]) < 1
+    for tab in ("notes", "actions", "transcript", "email"):
+        pg.click(f"#tab-{tab}")
+        expect(pg.locator("#tab-" + tab)).to_have_attribute("aria-selected", "true")
+        assert pg.locator(".btn.primary:visible").count() == 1, tab
+        expect(pg.locator("#primary")).to_have_class(re.compile(r"\bprimary\b"))
+    pg.click("#tab-transcript")
+    said = pg.locator(".tline.said").first
+    expect(said).to_be_visible()
+    corners = said.evaluate("(el) => [getComputedStyle(el).borderTopLeftRadius, getComputedStyle(el).borderBottomLeftRadius]")
+    assert corners == ["0px", "0px"]
+
+    counted = pg.evaluate("""() => {
+      const made = { formats: 0, plurals: 0, legends: 0 };
+      const count = (Kind, key) => new Proxy(Kind, { construct(target, args) { made[key]++; return new target(...args); } });
+      Intl.NumberFormat = count(Intl.NumberFormat, 'formats');
+      Intl.PluralRules = count(Intl.PluralRules, 'plurals');
+      const legend = VoiceStrip.prototype.renderLegend;
+      VoiceStrip.prototype.renderLegend = function () { made.legends++; return legend.call(this); };
+      selectTab('transcript');  // once to make what this tab needs, then again: nothing new
+      Object.assign(made, { formats: 0, plurals: 0, legends: 0 });
+      selectTab('transcript');
+      return made;
+    }""")
+    assert counted == {"formats": 0, "plurals": 0, "legends": 1}, counted
+
+    # wide enough: the facts beside the tabs, and the title's line says only when
+    pg.set_viewport_size({"width": 1440, "height": 900})
+    for i in range(3):
+        expect(extra.nth(i)).to_be_hidden()
+    facts, tabs = pg.locator(".facts h2").bounding_box(), pg.locator(".tabwrap").bounding_box()
+    assert facts and tabs and facts["x"] > tabs["x"] + tabs["width"] and facts["y"] < tabs["y"] + tabs["height"]
+
+
+def test_settings_in_french_in_the_dark(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """Every settings section says what it is about beside its panel, Speech-to-text also what is in
+    use; the permission rows keep their Test button on their line in French; and the button that
+    confirms what cannot be undone reads at 4.5:1 or more, in the dark as in the light."""
+    from playwright.sync_api import expect
+
+    from voicestream.app.native import WINDOW_SIZE
+
+    app = make_app(setup_done=True, backend="whisper-cpp", models=("large-v3-turbo-q5_0", stt_models.VAD_MODEL))
+    p = open_page(app, locale="fr-FR", scheme="dark", size=WINDOW_SIZE)
+    pg = p.page
+    pg.click("nav a[href='#/settings']")
+    for sec in ("general", "stt", "claude", "audio", "tools", "agents", "advanced"):
+        pg.click(f".subnav a[href='#/settings/{sec}']")
+        expect(pg.locator(f".subnav a[href='#/settings/{sec}']")).to_have_attribute("aria-current", "page")
+        leads = pg.locator("#settings-body .set-label").evaluate_all(
+            "(labels) => labels.map((el) => el.querySelector('.lead')?.textContent.trim() || '')")
+        assert leads and all(leads), (sec, leads)
+    pg.click(".subnav a[href='#/settings/general']")
+    expect(pg.locator(".set-label", has_text="L’application")).to_contain_text("son raccourci clavier")
+    pg.click(".subnav a[href='#/settings/stt']")
+    summary = pg.locator("#stt-summary")
+    for words in ("Utilisé :", "Sur ce Mac — gratuit et privé", "Modèle : ", " Mo"):
+        expect(summary).to_contain_text(words)
+
+    pg.click(".subnav a[href='#/settings/audio']")
+    expect(pg.locator(".perm")).to_have_count(2)
+    assert pg.evaluate(PERM_ROWS_HOLD) == [True, True]
+    p.shot("settings-audio-fr-dark")
+
+    pg.click(".subnav a[href='#/settings/stt']")
+    for scheme in ("dark", "light"):
+        pg.emulate_media(color_scheme=scheme)
+        pg.locator("[data-model='large-v3-turbo-q5_0'] .status .btn").click()  # Supprimer
+        ok = pg.locator("#ask-ok")
+        expect(ok).to_have_text("Supprimer")
+        expect(ok).to_have_class(re.compile(r"\bdanger solid\b"))
+        colours = ok.evaluate("(el) => [getComputedStyle(el).color, getComputedStyle(el).backgroundColor]")
+        assert _contrast(*colours) >= 4.5, (scheme, colours)
+        pg.click("#ask-cancel")
+        expect(pg.locator("#ask")).to_be_hidden()
+
+
+def test_costs_chart_in_french(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """The y ticks are figures only ("1,60", the subtitle says "in US dollars"): "1,60 $US" ran past
+    its lane onto the gridlines, at every width."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True)
+    app.spend_history()
+    p = open_page(app, locale="fr-FR")
+    pg = p.page
+    pg.click("#spend")
+    expect(pg.locator(".chart .col")).to_have_count(30)
+    expect(pg.locator(".history")).to_contain_text("Par jour, en dollars US")
+    assert pg.locator(".chart .ytick").all_inner_texts() == ["0", "0,40", "0,80", "1,20", "1,60"]
+    past_the_lane = """() => {
+      const plot = document.querySelector('.chart .plot').getBoundingClientRect().left;
+      return [...document.querySelectorAll('.chart .ytick')].map((tick) => {
+        const words = document.createRange();
+        words.selectNodeContents(tick);
+        return words.getBoundingClientRect().right - plot;
+      });
+    }"""
+    for width, height in ((1440, 900), (390, 844)):
+        pg.set_viewport_size({"width": width, "height": height})
+        over = pg.evaluate(past_the_lane)
+        assert len(over) == 5 and max(over) <= -2, (width, over)  # clear of the gridlines' start
+
+
+def test_the_week_counts_every_meeting_of_the_week(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """Always-on makes a meeting of each talk after ten quiet minutes, so a busy week holds more than a
+    page of the meetings list: Live's "Last 7 days" counts every one of them, not the newest 30."""
+    import shutil
+
+    from playwright.sync_api import expect
+
+    from voicestream.storage import atomic_write, load_meeting
+
+    app = make_app(setup_done=True, meetings=True)
+    sessions = app.root / "data" / "sessions"
+    src = sessions / app.folder_of("Hiring plan")
+    meeting, _ = load_meeting(src)
+    for i in range(130):  # every quarter of an hour, from two days ago back
+        shift = timedelta(days=2, minutes=15 * i)
+        clone = meeting.model_copy(update={"id": f"{meeting.id}-{i:03d}", "title": f"Quick sync {i}",
+                                           "started_at": meeting.started_at - shift,
+                                           "ended_at": meeting.ended_at and meeting.ended_at - shift})
+        dest = sessions / f"{clone.started_at.astimezone():%Y-%m-%d_%H%M%S}-quick-sync-{i:03d}"
+        shutil.copytree(src, dest)
+        atomic_write(dest / "meeting.json", clone.model_dump_json(indent=1))
+    since = datetime.now().astimezone() - timedelta(days=7)
+    rows = [r for r in app.host.meetings.list(limit=500)["meetings"] if datetime.fromisoformat(r["started_at"]) >= since]
+    assert len(rows) == 133  # today's, yesterday's, three days ago and the 130
+    want = {"meetings": len(rows), "actions": sum(r["counts"]["action"] for r in rows),
+            "mine": sum(r["my_actions"] for r in rows), "decisions": sum(r["counts"]["decision"] for r in rows)}
+    p = open_page(app)
+    pg = p.page
+    for key, n in want.items():
+        expect(pg.locator(f"#live-week .figures .{key} dd")).to_have_text(f"{n:,}")
 
 
 def test_markdown_renderer_never_creates_markup(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
