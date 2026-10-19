@@ -19,9 +19,10 @@ English, and has Claude turn it into action items, decisions and notes.
  audio                                               └─ transcript.md · notes.md · TODO.md (local, always)
 ```
 
-It costs **about $2 per day for 8 hours of meetings**: roughly $1.40 for speech-to-text,
-$0.10–0.50 for live extraction and $0.05–0.15 per meeting for the wrap-up notes (`voicestream cost`
-shows the estimate for your settings). Agent work is extra and has its own budget.
+It costs **about $0.80 per day for 8 hours of meetings** with speech-to-text on your Mac (free,
+the app's default): about $0.15 for live extraction and $0.60 for the wrap-up notes. Cloud
+speech-to-text adds about $1.40 a day (OpenAI). `voicestream cost` shows the estimate for your
+settings. Agent work is extra and has its own budget.
 
 ---
 
@@ -235,7 +236,8 @@ Say "**Dis Claude, …**" or "**Hey Claude, …**" to talk to the assistant dire
 
 | Backend | `transcription.backend` | Price | Notes |
 |---|---|---|---|
-| OpenAI REST | `openai` (default) | $0.0045/min (`gpt-transcribe`) | One request per utterance. Stateless and robust, with about 1–2 s latency. |
+| whisper.cpp, on your Mac | `whisper-cpp` (the app's choice) | free | `whisper-server` on the Metal GPU; nothing leaves the Mac. Get a model in the app's setup or with `voicestream models download` (547 MB, `large-v3-turbo-q5_0`). French and English are detected; `allowed_languages` keeps a short clip from coming out as another language. |
+| OpenAI REST | `openai` (config default) | $0.0045/min (`gpt-transcribe`) | One request per utterance. Stateless and robust, with about 1–2 s latency. |
 | OpenAI Realtime | `openai-realtime` | $0.0045/min, or $0.017 with `gpt-live-transcribe` | Streams while you speak, with live captions. The socket rotates before the 60-minute cap, and anything lost on a reconnect is re-sent. |
 | Deepgram | `deepgram` | about $0.0092/min (`nova-3`, multilingual) | Streaming; with `language` unset it follows French and English in the same meeting (`language=multi`). Your `vocabulary` list becomes key terms. |
 | Local Whisper | `local` | free | `faster-whisper` on your CPU or GPU. Nothing leaves the machine. |
@@ -541,13 +543,14 @@ of meetings, with about 60% speech:
 
 | Part | Model | Per day |
 |---|---|---|
-| Speech-to-text | `gpt-transcribe` | ≈ $1.40 |
+| Speech-to-text | on your Mac (`whisper-cpp`), or `gpt-transcribe` | free, or ≈ $1.40 |
 | Live extraction | `claude-haiku-5-5`, cached, every ~90 s while people talk | ≈ $0.10–0.50 |
 | Wrap-up and notes | `claude-sonnet-5-5`, once per meeting | ≈ $0.05–0.15 per meeting |
 | Screen descriptions (optional) | `claude-haiku-5-5` | ≈ $0.05 |
 | Agents (optional) | `claude-opus-5-5` | ≈ $0.02–0.30 per task, capped |
 
-`budget.daily_usd` (default $3) is a soft cap on transcription plus Claude. When it's reached,
+That is about $0.76 a day (≈ $15 a month over 20 working days) with speech-to-text on your Mac,
+and about $2.20 with OpenAI's. `budget.daily_usd` (default $3) is a soft cap on transcription plus Claude. When it's reached,
 extraction falls back to an offline rule-based extractor and screenshots stop. Spend is tracked
 per day in `~/.voicestream/spend/`.
 
