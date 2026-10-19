@@ -1277,6 +1277,7 @@ function renderIdle() {
   fill(LV.heroIcon, icon(ic, 'xl'));
   LV.heroTitle.textContent = title;
   LV.heroText.textContent = text;
+  if (st === 'stopped') LV.heroText.append(shortcutHint() || '');
   const row = [];
   if (st === 'stopped') row.push(btn(t('action.start'), { cls: 'primary big', onclick: (e) => listen('start', e.currentTarget) }, 'play'));
   if (st === 'paused') row.push(btn(t('action.resume'), { cls: 'primary big', onclick: (e) => listen('resume', e.currentTarget) }, 'play'));
@@ -2955,7 +2956,8 @@ function generalSection() {
         h('label', { for: 'p-ui_language' }, t('set.ui_language')),
         h('div', { class: 'control' }, uiLanguageSelect())),
       prefSwitch('listen_on_launch', t('set.listen_on_launch'), t('set.listen_on_launch_help')),
-      prefSwitch('start_at_login', t('set.start_at_login'), loginHelp, { disabled: !caps.login_item })));
+      prefSwitch('start_at_login', t('set.start_at_login'), loginHelp, { disabled: !caps.login_item }),
+      shortcutSetting()));
 }
 
 function uiLanguageSelect() {
@@ -3646,6 +3648,192 @@ async function finishSetup(W, start) {
   return false;
 }
 
+// ================================================================= keyboard shortcut
+// The shortcut that starts and stops listening from any app (Settings → General). The Mac app
+// registers it with macOS (voicestream/app/hotkey.py, whose rules these are: keep the two in step)
+// and says whether macOS took it. The key is the physical one (KeyboardEvent.code), so the shortcut
+// stays on the same key whatever the keyboard layout; what is printed on it (KeyboardEvent.key) is
+// only shown — and looked at for the commands menus give the character a key types (⌘Q, ⌘W…).
+
+const SHORTCUT_MODS = ['ctrl', 'alt', 'shift', 'cmd'];  // in macOS's order: ⌃⌥⇧⌘
+const SHORTCUT_GLYPHS = { ctrl: '⌃', alt: '⌥', shift: '⇧', cmd: '⌘' };
+const SHORTCUT_EVENT_MODS = { ctrl: 'ctrlKey', alt: 'altKey', shift: 'shiftKey', cmd: 'metaKey' };
+const SHORTCUT_DEFAULT = { code: 'KeyR', mods: ['alt', 'cmd'], key: 'R' };
+const SHORTCUT_PUNCT = {
+  Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\', Semicolon: ';', Quote: "'",
+  Comma: ',', Period: '.', Slash: '/', Backquote: '`', IntlBackslash: '§',
+};
+const SHORTCUT_SPECIAL = {
+  Space: null, Enter: '↩', Tab: '⇥', Backspace: '⌫', Escape: '⎋', ArrowLeft: '←', ArrowRight: '→', ArrowDown: '↓', ArrowUp: '↑',
+};  // Space is a word (shortcut.key.space)
+const SHORTCUT_RESERVED = Object.fromEntries([
+  // every Mac app's own commands: Quit, Close, Hide, Minimize, Settings (and their ⌥ variants)
+  ...['cmd+KeyQ', 'cmd+KeyW', 'cmd+KeyH', 'cmd+KeyM', 'cmd+Comma', 'alt+cmd+KeyH', 'alt+cmd+KeyW', 'alt+cmd+KeyM'].map((c) => [c, 'app']),
+  // macOS's own: switching apps and windows, Spotlight, input sources, Force Quit, locking, screenshots…
+  ...['cmd+Tab', 'shift+cmd+Tab', 'cmd+Backquote', 'shift+cmd+Backquote', 'cmd+IntlBackslash', 'shift+cmd+IntlBackslash',
+    'cmd+Space', 'alt+cmd+Space', 'ctrl+Space', 'ctrl+alt+Space', 'ctrl+cmd+Space', 'alt+cmd+Escape',
+    'ctrl+cmd+KeyQ', 'shift+cmd+KeyQ', 'alt+shift+cmd+KeyQ', 'shift+cmd+Digit3', 'shift+cmd+Digit4', 'shift+cmd+Digit5',
+    'shift+cmd+Digit6', 'ctrl+shift+cmd+Digit3', 'ctrl+shift+cmd+Digit4', 'ctrl+cmd+KeyF', 'alt+cmd+KeyD',
+    'ctrl+ArrowLeft', 'ctrl+ArrowRight', 'ctrl+ArrowUp', 'ctrl+ArrowDown', 'cmd+F5', 'alt+cmd+F5', 'ctrl+F2', 'ctrl+F3',
+  ].map((c) => [c, 'mac']),
+]);
+
+function shortcutUsable(code) {
+  return /^Key[A-Z]$|^Digit[0-9]$|^F([1-9]|1[0-9])$/.test(code) || Object.hasOwn(SHORTCUT_PUNCT, code) || Object.hasOwn(SHORTCUT_SPECIAL, code);
+}
+
+function shortcutMods(mods) { return SHORTCUT_MODS.filter((m) => (mods || []).includes(m)); }
+
+/** What is printed on the key: its label here when that is a plain character, else a US keyboard's. */
+function shortcutLabel(code, key) {
+  const k = String(key || '').trim();
+  if ((/^Key/.test(code) || Object.hasOwn(SHORTCUT_PUNCT, code)) && [...k].length === 1 && /^[^\p{C}\p{Z}]$/u.test(k)) return k.toUpperCase();
+  if (/^Key|^Digit/.test(code)) return code.replace(/^Key|^Digit/, '');
+  if (Object.hasOwn(SHORTCUT_PUNCT, code)) return SHORTCUT_PUNCT[code];
+  if (code === 'Space') return t('shortcut.key.space');
+  return SHORTCUT_SPECIAL[code] || code;
+}
+
+/** The US key for what this one types (the AZERTY key printed Q is KeyQ here), for the menu commands. */
+function shortcutTyped(code, key) {
+  if (!/^Key/.test(code) && !Object.hasOwn(SHORTCUT_PUNCT, code)) return code;
+  const char = shortcutLabel(code, key);
+  if (/^[A-Z]$/.test(char)) return 'Key' + char;
+  return Object.keys(SHORTCUT_PUNCT).find((c) => SHORTCUT_PUNCT[c] === char) || code;
+}
+
+/** Why a combination can't be the shortcut (shortcut.why.<reason>), or null. */
+function shortcutProblem(code, mods, key) {
+  if (!shortcutUsable(code)) return 'unknown_key';
+  const held = shortcutMods(mods);
+  const strong = held.filter((m) => m !== 'shift');
+  if (!strong.length) return 'needs_modifier';
+  const reserved = SHORTCUT_RESERVED[[...held, shortcutTyped(code, key)].join('+')];
+  if (reserved) return 'reserved_' + reserved;
+  if (strong.length === 1 && !/^F\d+$/.test(code)) return 'one_modifier';
+  if (strong.length === 1 && strong[0] === 'alt') return 'option_only';  // macOS 15 can refuse it to every app
+  return null;
+}
+
+function shortcutText(hk) {
+  return shortcutMods(hk.mods).map((m) => SHORTCUT_GLYPHS[m]).join('') + shortcutLabel(hk.code, hk.key);
+}
+
+/** A keydown as a shortcut. With ⌥ held a Mac gives the character ⌥ types (⌥R is ®), and with ⇧ the
+ *  shifted one: the label then comes from the physical key. */
+function shortcutFromEvent(e) {
+  const mods = SHORTCUT_MODS.filter((m) => e[SHORTCUT_EVENT_MODS[m]]);
+  const plain = !e.altKey && !(e.shiftKey && Object.hasOwn(SHORTCUT_PUNCT, e.code));
+  return { code: e.code, mods, key: plain && [...e.key].length === 1 ? e.key : '' };
+}
+
+/** The Live screen's line for when it isn't listening: the shortcut, once macOS took it. */
+function shortcutHint() {
+  const a = S.app;
+  const hk = a && a.prefs.hotkey;
+  if (!hk || !a.capabilities.hotkey || !a.hotkey || a.hotkey.status !== 'ok') return null;
+  return h('span', { id: 'shortcut-hint' }, ' ' + t('shortcut.hint', { keys: shortcutText(hk) }));
+}
+
+/** Settings → General: the shortcut, with Change (records the next combination pressed), Turn off and
+ *  Reset, and the sound it plays. Saved at once, as macOS's own keyboard settings are: whether macOS
+ *  took it is what you want to know next. Elsewhere than the Mac app, it says it is a Mac feature. */
+function shortcutSetting() {
+  const box = h('div', { id: 'shortcut-setting', dataset: { path: 'pref:hotkey' } });
+  let recording = false, error = '', timer = null;
+  const mac = () => Boolean(S.app.capabilities && S.app.capabilities.hotkey);
+
+  const tellHost = (active) => api('POST', '/api/hotkey/recording', { active }).catch(() => { /* back on by itself */ });
+  const stop = (tell) => {
+    if (!recording) return;
+    recording = false;
+    clearTimeout(timer);
+    document.removeEventListener('keydown', onKey, true);
+    window.removeEventListener('blur', onBlur);
+    if (tell) tellHost(false);
+  };
+  const record = () => {
+    recording = true;
+    error = '';
+    document.addEventListener('keydown', onKey, true);
+    window.addEventListener('blur', onBlur);  // gone to another app: that press is not for us
+    timer = setTimeout(() => { stop(true); draw(); }, 30000);  // the app turns it back on by then too
+    tellHost(true);  // the current shortcut is off meanwhile, or pressing it would not reach this page
+    draw();
+    $('shortcut-keys').focus({ preventScroll: true });  // not the button: Space or Enter would press it
+  };
+  const onBlur = () => { stop(true); draw(); };
+  const backToChange = () => { if (box.isConnected && $('shortcut-change')) $('shortcut-change').focus({ preventScroll: true }); };
+  function onKey(e) {
+    if (!box.isConnected) { stop(true); return; }
+    e.preventDefault();
+    e.stopPropagation();
+    const held = SHORTCUT_MODS.filter((m) => e[SHORTCUT_EVENT_MODS[m]]);
+    if (/^(Shift|Control|Alt|Meta|OS)(Left|Right)$|^CapsLock$|^Fn/.test(e.code) || ['Shift', 'Control', 'Alt', 'Meta', 'AltGraph', 'CapsLock', 'Fn'].includes(e.key)) {
+      draw(held);  // only modifiers so far: show them
+      return;
+    }
+    if (e.code === 'Escape' && !held.length) { stop(true); error = ''; draw(); backToChange(); return; }
+    const hk = shortcutFromEvent(e);
+    const why = shortcutProblem(hk.code, hk.mods, hk.key);
+    if (why) { error = t('shortcut.why.' + why, { keys: shortcutText(hk) }); draw(); return; }  // try another
+    stop(false);  // saving it ends the recording
+    save(hk, null);
+  }
+  const save = async (hk, button) => {
+    error = '';
+    const res = await act(button, async () => {
+      await api('PATCH', '/api/prefs', { hotkey: hk });
+      setApp(await api('GET', '/api/app'));
+      return true;
+    });
+    if (!res) { tellHost(false); draw(); return; }
+    draw();
+    // the focus was on the keys shown (recorded from the keyboard) or on a button that is gone now
+    if (!document.activeElement || document.activeElement === document.body) backToChange();
+    // the app registers it with macOS and says what macOS answered: wait for it (a moment)
+    for (let i = 0; i < 20 && mac() && S.app.hotkey && S.app.hotkey.status === 'pending'; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      try { setApp(await api('GET', '/api/app')); } catch (_) { break; }
+    }
+    if (box.isConnected) draw();
+  };
+  const statusText = (hk) => {
+    const st = S.app.hotkey || {};
+    if (!hk) return t('shortcut.status.off');
+    if (st.status === 'ok') return t('shortcut.status.ok');
+    if (st.status === 'taken') return t('shortcut.status.taken');
+    if (st.status === 'failed') return t('shortcut.status.failed', { code: st.error });
+    return '';  // pending: the answer is on its way
+  };
+  const draw = (held) => keepFocus(box, () => {
+    const hk = S.app.prefs.hotkey;
+    const isDefault = hk && hk.code === SHORTCUT_DEFAULT.code && shortcutMods(hk.mods).join() === SHORTCUT_DEFAULT.mods.join();
+    let keys = hk ? shortcutText(hk) : t('shortcut.off');
+    if (recording) keys = held && held.length ? held.map((m) => SHORTCUT_GLYPHS[m]).join('') + '…' : t('shortcut.press');
+    const ok = mac() && hk && (S.app.hotkey || {}).status === 'ok';
+    const pill = h('span', { class: 'pill' + (recording ? ' info' : ok ? ' ok' : ''), id: 'shortcut-keys', tabindex: recording ? '-1' : null }, keys);
+    const controls = mac() ? [
+      btn(recording ? t('common.cancel') : t('shortcut.change'), { cls: 'small', id: 'shortcut-change',
+        onclick: () => { if (recording) { stop(true); draw(); } else record(); } }),
+      !recording && hk && btn(t('shortcut.turn_off'), { cls: 'small ghost', id: 'shortcut-off', onclick: (e) => save(null, e.currentTarget) }),
+      !recording && !isDefault && btn(t('shortcut.reset', { keys: shortcutText(SHORTCUT_DEFAULT) }), { cls: 'small ghost', id: 'shortcut-reset',
+        onclick: (e) => save({ ...SHORTCUT_DEFAULT }, e.currentTarget) }),
+    ] : [];
+    const help = !mac() ? t('shortcut.mac_only') : recording ? t('shortcut.press_help') : statusText(hk);
+    fill(box,
+      h('div', { class: 'field' + (error ? ' invalid' : '') },
+        h('span', { class: 'label', id: 'shortcut-label' }, t('shortcut.label')),
+        h('div', { class: 'control', role: 'group', 'aria-labelledby': 'shortcut-label', 'aria-describedby': 'shortcut-status shortcut-error' },
+          pill, ...controls),
+        h('p', { class: 'help', id: 'shortcut-status', role: 'status' }, help),
+        h('p', { class: 'field-error', id: 'shortcut-error', role: error ? 'alert' : null }, error)),
+      mac() && prefSwitch('hotkey_sound', t('shortcut.sound'), t('shortcut.sound_help')));
+  });
+  draw();
+  return box;
+}
+
 // ========================================================================== strings
 // Every word the app shows, in English and French. Plain words for people who never open a
 // terminal: "speech-to-text on this Mac", never "whisper-cpp backend".
@@ -3862,6 +4050,22 @@ const STRINGS = {
     'set.listen_on_launch_help': 'Otherwise, press Start listening yourself.',
     'set.start_at_login': 'Open Voicestream when I log in', 'set.login_help': 'Voicestream starts in the menu bar.',
     'set.login_unavailable': 'Only available in the Voicestream app for Mac.',
+    'shortcut.label': 'Keyboard shortcut', 'shortcut.change': 'Change', 'shortcut.turn_off': 'Turn off',
+    'shortcut.reset': 'Reset to {keys}', 'shortcut.off': 'Off', 'shortcut.key.space': 'Space',
+    'shortcut.press': 'Press the new shortcut…', 'shortcut.press_help': 'Hold ⌘, ⌥ or ⌃ and press a key. Esc cancels.',
+    'shortcut.mac_only': 'In the Voicestream app for Mac, a keyboard shortcut starts and stops listening from any app.',
+    'shortcut.status.ok': 'Works from any app, even with this window closed: it starts and stops listening.',
+    'shortcut.status.taken': 'Already used by another app — choose another.',
+    'shortcut.status.failed': 'macOS refused this shortcut (error {code}) — choose another.',
+    'shortcut.status.off': 'Turned off. Start and stop listening from the menu bar or this window.',
+    'shortcut.why.unknown_key': 'Voicestream can’t use this key for a shortcut: choose a letter, a digit, a function key or a punctuation key.',
+    'shortcut.why.needs_modifier': 'Hold ⌘, ⌥ or ⌃ as well: {keys} alone types or does something else.',
+    'shortcut.why.one_modifier': '{keys} is taken in many apps already (⌘C copies, ⌥E types an accent, ⌃C stops a Terminal command): hold a second one of ⌘, ⌥ or ⌃, as in ⌥⌘R.',
+    'shortcut.why.reserved_app': '{keys} is a command every Mac app has (Quit, Close, Hide, Minimize, Settings): choose another.',
+    'shortcut.why.reserved_mac': 'macOS uses {keys} itself (switching apps or windows, Spotlight, input sources, screenshots, Force Quit…): choose another.',
+    'shortcut.why.option_only': 'macOS 15 can refuse a shortcut held with ⌥ alone, or ⌥⇧ ({keys}): hold ⌘ or ⌃ too.',
+    'shortcut.sound': 'Play a sound when the shortcut starts or stops listening', 'shortcut.sound_help': 'So you know it worked without looking.',
+    'shortcut.hint': 'You can also press {keys} in any app.',
 
     'lang.fr+en': 'French and English', 'lang.fr+en.desc': 'Either language, even both in one meeting.',
     'lang.fr': 'French', 'lang.fr.desc': 'Meetings in French only.',
@@ -4252,6 +4456,22 @@ const STRINGS = {
     'set.listen_on_launch_help': 'Sinon, appuyez vous-même sur Commencer l’écoute.',
     'set.start_at_login': 'Ouvrir Voicestream à l’ouverture de session', 'set.login_help': 'Voicestream démarre dans la barre des menus.',
     'set.login_unavailable': 'Disponible uniquement dans l’application Voicestream pour Mac.',
+    'shortcut.label': 'Raccourci clavier', 'shortcut.change': 'Modifier', 'shortcut.turn_off': 'Désactiver',
+    'shortcut.reset': 'Revenir à {keys}', 'shortcut.off': 'Désactivé', 'shortcut.key.space': 'Espace',
+    'shortcut.press': 'Tapez le nouveau raccourci…', 'shortcut.press_help': 'Maintenez ⌘, ⌥ ou ⌃ et appuyez sur une touche. Échap pour annuler.',
+    'shortcut.mac_only': 'Dans l’application Voicestream pour Mac, un raccourci clavier démarre et arrête l’écoute depuis n’importe quelle app.',
+    'shortcut.status.ok': 'Fonctionne depuis n’importe quelle app, même fenêtre fermée : il démarre et arrête l’écoute.',
+    'shortcut.status.taken': 'Déjà utilisé par une autre app — choisissez-en un autre.',
+    'shortcut.status.failed': 'macOS a refusé ce raccourci (erreur {code}) — choisissez-en un autre.',
+    'shortcut.status.off': 'Désactivé. Démarrez et arrêtez l’écoute depuis la barre des menus ou cette fenêtre.',
+    'shortcut.why.unknown_key': 'Voicestream ne peut pas utiliser cette touche pour un raccourci : choisissez une lettre, un chiffre, une touche de fonction ou de ponctuation.',
+    'shortcut.why.needs_modifier': 'Maintenez aussi ⌘, ⌥ ou ⌃ : seul, {keys} sert à écrire ou à autre chose.',
+    'shortcut.why.one_modifier': '{keys} est déjà pris dans beaucoup d’apps (⌘C copie, ⌥E met un accent, ⌃C arrête une commande du Terminal) : maintenez une deuxième touche parmi ⌘, ⌥ ou ⌃, comme dans ⌥⌘R.',
+    'shortcut.why.reserved_app': '{keys} est une commande de toutes les apps Mac (Quitter, Fermer, Masquer, Placer dans le Dock, Réglages) : choisissez-en un autre.',
+    'shortcut.why.reserved_mac': 'macOS utilise lui-même {keys} (changer d’app ou de fenêtre, Spotlight, sources de saisie, captures d’écran, Forcer à quitter…) : choisissez-en un autre.',
+    'shortcut.why.option_only': 'macOS 15 peut refuser un raccourci avec ⌥ seule, ou ⌥⇧ ({keys}) : maintenez aussi ⌘ ou ⌃.',
+    'shortcut.sound': 'Jouer un son quand le raccourci démarre ou arrête l’écoute', 'shortcut.sound_help': 'Pour savoir que c’est fait sans regarder.',
+    'shortcut.hint': 'Vous pouvez aussi appuyer sur {keys} dans n’importe quelle app.',
 
     'lang.fr+en': 'Français et anglais', 'lang.fr+en.desc': 'L’une ou l’autre, même les deux dans une réunion.',
     'lang.fr': 'Français', 'lang.fr.desc': 'Réunions en français uniquement.',

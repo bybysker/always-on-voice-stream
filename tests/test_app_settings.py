@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from pathlib import Path
@@ -352,6 +353,24 @@ def test_prefs_defaults_save_and_validation(tmp_path: Path) -> None:
     path.write_text("{not json", encoding="utf-8")
     assert prefs_mod.load_prefs(path) == prefs_mod.Prefs()  # a broken file never stops the app
     assert prefs_mod.prefs_path() == Path("~/.voicestream/app.json").expanduser()
+
+
+def test_the_keyboard_shortcut_preference(tmp_path: Path) -> None:
+    path = tmp_path / "app.json"
+    p = prefs_mod.load_prefs(path)
+    assert p.hotkey == prefs_mod.Hotkey(code="KeyR", mods=["alt", "cmd"], key="R") and p.hotkey_sound is True
+    p = prefs_mod.update_prefs({"hotkey": {"code": "Digit7", "mods": ["cmd", "ctrl"], "key": "è"}, "hotkey_sound": False}, path)
+    assert p.hotkey == prefs_mod.Hotkey(code="Digit7", mods=["ctrl", "cmd"], key="7")  # a digit is its digit
+    assert json.loads(path.read_text())["hotkey"] == {"code": "Digit7", "mods": ["ctrl", "cmd"], "key": "7"}
+    assert prefs_mod.update_prefs({"ui_language": "fr"}, path).hotkey == p.hotkey  # left alone
+    assert prefs_mod.update_prefs({"hotkey": None}, path).hotkey is None  # null: turned off
+    assert prefs_mod.load_prefs(path).hotkey is None and not prefs_mod.load_prefs(path).hotkey_sound
+    # a saved shortcut this version refuses (a hand edit, a newer app's rules): the default, the rest kept
+    path.write_text(json.dumps({"setup_done": True, "ui_language": "fr", "hotkey": {"code": "KeyQ", "mods": ["cmd"]}}))
+    p = prefs_mod.load_prefs(path)
+    assert p.setup_done and p.ui_language == "fr" and p.hotkey == prefs_mod.Hotkey()
+    path.write_text(json.dumps({"setup_done": True, "hotkey": "⌥⌘R"}))
+    assert prefs_mod.load_prefs(path).setup_done and prefs_mod.load_prefs(path).hotkey == prefs_mod.Hotkey()
 
 
 def test_a_key_the_keychain_refuses_is_asked_for_once_per_launch(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -26,6 +26,7 @@ from voicestream.app import host as host_mod
 from voicestream.app import logs
 from voicestream.app import secrets as keys_mod
 from voicestream.app.host import AppHost, HostError, human_error
+from voicestream.app.prefs import load_prefs
 from voicestream.app.settings import save_changes
 from voicestream.audio import CaptureSetupError
 from voicestream.audio import mic as mic_mod
@@ -831,6 +832,91 @@ async def test_start_in_an_error_state_with_an_assistant_restarts_it(tmp_path: P
     await host.listen_start()
     assert len(built) == 2 and host.assistant is built[1] and host.status == "listening"
     await host.listen_stop()
+
+
+# --------------------------------------------------------------- the keyboard shortcut
+
+
+async def _toggled(host: AppHost, expect: str | None, *settled: str) -> None:
+    """Press the shortcut: it says at once what it does, then the state gets there."""
+    assert await host.listen_toggle() == expect
+    if settled:
+        await _until(lambda: host.status in settled and host.toggle_action() is not None)
+
+
+async def test_the_shortcut_starts_stops_resumes_and_restarts(tmp_path: Path) -> None:
+    built: list[Assistant] = []
+    host = _host(tmp_path, idle=0, factory=_factory(built=built))  # idle 0: a meeting from the start
+    await _toggled(host, "start", "listening")
+    await _until(lambda: host.in_meeting())
+    built[0].current.add_segment(seg("I'll send the deck by Friday.", "mic", t=1.0))
+    # listening in a meeting: a stop, with the meeting wrapped up and its notes written, as Stop does
+    await _toggled(host, "stop", "stopped")
+    assert host.assistant is None and any(e.type == "meeting.ended" for e in host.bus.history)
+    folder = list_sessions(host.cfg.data_path)[-1]
+    meeting, _ = load_meeting(folder)
+    assert meeting.ended_at is not None and (folder / "notes.md").is_file()
+
+    await _toggled(host, "start", "listening")
+    await host.listen_pause()
+    await _toggled(host, "resume", "listening")  # paused: Resume, not a stop
+    assert not host.assistant.paused and len(built) == 2
+
+    host._set_status("error", "something gave up")  # half of it may still run: what Start does then
+    await _toggled(host, "restart", "listening")
+    assert len(built) == 3 and host.assistant is built[2]
+    await host.listen_stop()
+
+
+async def test_the_shortcut_does_nothing_while_starting_stopping_or_quitting(tmp_path: Path) -> None:
+    host = _host(tmp_path)
+    for busy in ("starting", "stopping"):
+        host.status = busy
+        assert host.toggle_action() is None and await host.listen_toggle() is None
+    host.status = "stopped"
+    # two presses in a row: the second comes before the first one's start has changed the state
+    assert await host.listen_toggle() == "start" and await host.listen_toggle() is None
+    await _until(lambda: host.status == "listening" and host.toggle_action() == "stop")
+    await host.shutdown()
+    assert host.toggle_action() is None and await host.listen_toggle() is None and host.status == "stopped"
+
+
+async def test_the_shortcut_after_a_failed_start_tries_again(tmp_path: Path) -> None:
+    def broken(host: AppHost) -> Assistant:
+        raise TranscriptionError("DEEPGRAM_API_KEY is not set", fatal=True)
+
+    host = _host(tmp_path, factory=broken)
+    await _toggled(host, "start", "error")
+    assert host.error.startswith("Speech-to-text with Deepgram needs your Deepgram key")
+    host._factory = _factory()  # fixed meanwhile
+    await _toggled(host, "restart", "listening")
+    await host.listen_stop()
+
+
+async def test_the_shortcut_preference_and_what_the_shell_says(tmp_path: Path) -> None:
+    host = _host(tmp_path)
+    seen: list[dict[str, Any]] = []
+    host.add_state_listener(seen.append)
+    state = host.state()
+    assert state["prefs"]["hotkey"] == {"code": "KeyR", "mods": ["alt", "cmd"], "key": "R"}
+    assert state["prefs"]["hotkey_sound"] is True and state["capabilities"]["hotkey"] is False  # no native shell
+    assert state["hotkey"] == {"status": "pending", "error": None, "recording": False}
+    host.set_hotkey_status("taken", -9878)
+    host.set_hotkey_status("taken", -9878)  # the same answer again: nothing new to tell
+    assert [s["hotkey"]["status"] for s in seen] == ["taken"]
+    # a new shortcut: pending until the shell has registered it — also the same one, to try again
+    host.update_prefs({"hotkey": {"code": "KeyR", "mods": ["alt", "cmd"]}})
+    assert host.state()["hotkey"]["status"] == "pending"
+    host.set_hotkey_status("ok")
+    host.update_prefs({"listen_on_launch": False})  # another preference: the shortcut is left alone
+    assert host.state()["hotkey"]["status"] == "ok"
+    host.record_hotkey(True)
+    assert host.state()["hotkey"]["recording"] is True
+    host.update_prefs({"hotkey": None})  # saving one ends the recording
+    assert host.state()["hotkey"] == {"status": "pending", "error": None, "recording": False}
+    assert host.state()["prefs"]["hotkey"] is None and load_prefs(tmp_path / "app.json").hotkey is None
+    with pytest.raises(ValueError, match="every Mac app has"):
+        host.update_prefs({"hotkey": {"code": "KeyW", "mods": ["cmd"]}})
 
 
 # ----------------------------------------------------------- settings edited by hand, the Keychain

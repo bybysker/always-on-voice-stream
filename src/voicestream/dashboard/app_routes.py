@@ -28,6 +28,7 @@ from ..app import secrets as keys
 from ..app.checks import run_checks
 from ..app.host import HostError
 from ..app.meetings import MeetingBusy, MeetingNotFound, resolve_folder
+from ..app.prefs import Hotkey
 from ..app.settings import SettingsError, save_checked, settings_view
 from ..costs import estimate_daily
 from .server import AgentApproval, ItemEdit, NewItem, _Body, _error, _parse  # noqa: F401 - shared bodies
@@ -76,6 +77,13 @@ class PrefsPatch(_Body):
     start_at_login: bool | None = None
     ui_language: Literal["auto", "en", "fr"] | None = None
     window: dict[str, Any] | None = Field(None)
+    hotkey: Hotkey | None = None
+    """The keyboard shortcut, checked as the page checks it (``null``: turned off)."""
+    hotkey_sound: bool | None = None
+
+
+class HotkeyRecording(_Body):
+    active: bool
 
 
 # --------------------------------------------------------------------------- errors
@@ -155,6 +163,7 @@ class AppApi:
             Route("/api/models/{name}", self.model_remove, methods=["DELETE"]),
             Route("/api/setup/complete", self.setup_complete, methods=["POST"]),
             Route("/api/prefs", self.patch_prefs, methods=["PATCH"]),
+            Route("/api/hotkey/recording", self.hotkey_recording, methods=["POST"]),
             Route("/api/reveal", self.reveal, methods=["POST"]),
             Route("/api/open-settings", self.open_settings, methods=["POST"]),
             Route("/api/permissions/{kind}", self.permission, methods=["POST"]),
@@ -367,6 +376,12 @@ class AppApi:
     async def patch_prefs(self, request: Request) -> JSONResponse:
         body = await _parse(request, PrefsPatch)
         return JSONResponse(self.host.update_prefs(body.model_dump(exclude_unset=True)).model_dump(mode="json"))
+
+    async def hotkey_recording(self, request: Request) -> JSONResponse:
+        """Settings is recording a new keyboard shortcut (or is done): the current one is off meanwhile."""
+        body = await _parse(request, HotkeyRecording)
+        self.host.record_hotkey(body.active)
+        return JSONResponse(self.host.state())
 
     # ------------------------------------------------------------------ desktop
 
