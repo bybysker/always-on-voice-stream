@@ -19,6 +19,7 @@ import email.parser
 import email.policy
 import json
 import os
+import socketserver
 import sys
 import threading
 import time
@@ -124,5 +125,13 @@ class Handler(BaseHTTPRequestHandler):
             os._exit(1)
 
 
-server = ThreadingHTTPServer((arg("--host", "127.0.0.1") or "127.0.0.1", int(arg("--port", "8080") or 8080)), Handler)
+class Server(ThreadingHTTPServer):
+    def server_bind(self) -> None:
+        # HTTPServer.server_bind calls socket.getfqdn(), a reverse DNS lookup that can take half a
+        # minute on macOS CI runners; the port isn't listening until it returns
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = str(self.server_address[0]), int(self.server_address[1])
+
+
+server = Server((arg("--host", "127.0.0.1") or "127.0.0.1", int(arg("--port", "8080") or 8080)), Handler)
 server.serve_forever()
