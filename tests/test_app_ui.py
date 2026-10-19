@@ -722,7 +722,7 @@ def test_meetings_list_detail_and_editing(make_app: Callable[..., UIApp], open_p
 
     # push to the tools, and rewrite the notes (offline here: quick)
     pg.click("#push-meeting")
-    expect(pg.locator(".toast.ok")).to_be_visible()
+    expect(pg.locator(".toast.ok", has_text="Sent to")).to_be_visible()  # the clipboard's toast may still show
     pg.click("#rewrite-notes")
     expect(pg.locator(".toast", has_text="The notes were rewritten")).to_be_visible(timeout=15000)
     pg.click("#tab-notes")
