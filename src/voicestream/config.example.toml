@@ -33,6 +33,7 @@ backend = "openai"     # openai (REST, cheapest cloud) | openai-realtime (stream
 [transcription.whisper_cpp]           # free and private: `voicestream models download large-v3-turbo-q5_0`
 model = "large-v3-turbo-q5_0"         # see `voicestream models` (small = faster, large-v3-turbo = best)
 # allowed_languages = ["fr", "en"]    # a clip "detected" as another language is redone in one of these
+# vad = true                          # Silero voice detection inside whisper.cpp (needs > 4 CPU cores)
 
 [transcription.openai]
 model = "gpt-transcribe"   # $0.0045/min; gpt-4o-mini-transcribe is $0.003 but shuts down 2027-02-26

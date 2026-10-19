@@ -168,7 +168,8 @@ async def test_vocabulary_is_the_only_prompt(whisper_cfg: Config) -> None:
     assert [r["fields"].get("prompt") for r in requests_seen(model)] == ["Promethee, HubSpot, Alex"] * 2
 
 
-async def test_voice_detection_is_used_when_its_model_is_there(whisper_cfg: Config) -> None:
+async def test_voice_detection_is_used_when_its_model_is_there(whisper_cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(wc, "usable_cpus", lambda: 8)  # an M1
     model = install_model(whisper_cfg, script={"replies": [reply("Oui.")]})
     vad = install_model(whisper_cfg, stt_models.VAD_MODEL)
     t = build_transcriber(whisper_cfg, "mic")
@@ -179,6 +180,33 @@ async def test_voice_detection_is_used_when_its_model_is_there(whisper_cfg: Conf
     argv = json.loads(Path(str(model) + ".argv.json").read_text())
     assert argv[argv.index("--vad"):argv.index("--vad") + 3] == ["--vad", "-vm", str(vad)]
     assert requests_seen(model)[0]["fields"]["vad"] == "true"
+
+
+async def test_voice_detection_is_skipped_with_4_cores_or_fewer(
+    whisper_cfg: Config, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """whisper.cpp runs it on 4 threads whatever the machine: on a 3-core Mac each 8-second clip took
+    52 s with it and 11 s without, so the meeting's transcript fell further and further behind."""
+    monkeypatch.setattr(wc, "usable_cpus", lambda: 3)
+    monkeypatch.setattr(wc, "_vad_off_said", False)
+    model = install_model(whisper_cfg, script={"replies": [reply("Oui.")]})
+    install_model(whisper_cfg, stt_models.VAD_MODEL)
+    for source in ("mic", "system"):  # each source and restart acquires the server again
+        t = build_transcriber(whisper_cfg, source)
+        try:
+            assert (await t.transcribe_utterance(utt(), None)).text == "Oui."  # type: ignore[attr-defined]
+        finally:
+            await t.aclose()
+    assert "--vad" not in json.loads(Path(str(model) + ".argv.json").read_text())
+    assert [r["fields"]["vad"] for r in requests_seen(model)] == ["false", "false"]
+    said = [r.getMessage() for r in caplog.records if "voice detection is off" in r.getMessage()]
+    assert said == ["whisper.cpp voice detection is off: it needs more than 4 CPU cores and this computer gives us 3"]
+    status, detail = wc.check(whisper_cfg)  # nothing for you to fix, so not a warning
+    assert status == "ok" and detail.endswith("(voice detection off: needs more than 4 CPU cores)")
+    monkeypatch.setattr(wc, "usable_cpus", lambda: 4)
+    assert not wc.vad_fits()
+    monkeypatch.setattr(wc, "usable_cpus", lambda: 5)
+    assert wc.vad_fits()
 
 
 async def test_a_language_you_dont_speak_is_retried_in_one_you_do(whisper_cfg: Config) -> None:
@@ -280,6 +308,7 @@ async def test_a_server_left_over_by_a_crash_is_stopped(whisper_cfg: Config) -> 
 
 
 async def test_missing_server_or_model_says_how_to_fix_it(whisper_cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(wc, "usable_cpus", lambda: 8)
     t = build_transcriber(whisper_cfg, "mic")
     with pytest.raises(TranscriptionError, match="voicestream models download large-v3-turbo-q5_0") as exc:
         t.server  # type: ignore[attr-defined]  # noqa: B018
@@ -488,7 +517,7 @@ async def test_real_whisper_server_protocol(cfg: Config) -> None:
     try:
         res = await t.transcribe_utterance(utt(3.0), None)  # type: ignore[attr-defined]
         server = t.server  # type: ignore[attr-defined]
-        assert (server.vad_model is not None) == silero.is_file()
+        assert (server.vad_model is not None) == (silero.is_file() and wc.vad_fits())
         async with httpx.AsyncClient() as client:  # nothing answers outside the secret prefix
             assert (await client.get(f"http://127.0.0.1:{server.port}/health")).status_code == 404
             assert (await client.get(f"{server.base_url}/health")).status_code == 200
@@ -502,14 +531,15 @@ SPEECH = os.environ.get("VOICESTREAM_WHISPER_TEST_SPEECH")  # dir with en.wav/en
 
 @pytest.mark.skipif(not (REAL and TEST_MODEL and SPEECH) and not REQUIRED, reason="needs a real model and recorded speech")
 @pytest.mark.parametrize("lang", ["en", "fr"])
-async def test_real_whisper_server_transcribes_speech(cfg: Config, lang: str) -> None:
+async def test_real_whisper_server_transcribes_speech(cfg: Config, lang: str, monkeypatch: pytest.MonkeyPatch) -> None:
     _skip_unless(REAL and TEST_MODEL and SPEECH, "needs VOICESTREAM_WHISPER_SERVER, _TEST_MODEL and _TEST_SPEECH")
     cfg.transcription.backend = "whisper-cpp"
     cfg.transcription.whisper_cpp.binary = str(REAL)
     cfg.transcription.whisper_cpp.model = str(TEST_MODEL)
     cfg.transcription.whisper_cpp.allowed_languages = ["fr", "en"]
     cfg.transcription.whisper_cpp.gpu = GPU
-    if TEST_VAD:  # as the app runs it: Silero voice detection before each utterance
+    if TEST_VAD:  # as the app runs it on a Mac (more than 4 cores): Silero voice detection before each utterance
+        monkeypatch.setattr(wc, "usable_cpus", lambda: 8)  # also on a 3-core runner
         vad = stt_models.model_path(cfg, stt_models.VAD_MODEL)
         vad.parent.mkdir(parents=True, exist_ok=True)
         vad.write_bytes(Path(TEST_VAD).read_bytes())
@@ -569,7 +599,7 @@ def _server_timings(server: wc.WhisperServer) -> list[str]:
     except OSError:
         return ["(no log)"]
     lines = [ln.split("whisper_print_timings:", 1)[1].strip() for ln in text.splitlines() if "whisper_print_timings:" in ln]
-    vad = [ln.split("whisper_vad_detect_speech:", 1)[1].strip() for ln in text.splitlines() if "whisper_vad_detect_speech: vad time" in ln]
+    vad = [ln.split(":", 1)[1].strip() for ln in text.splitlines() if ": vad time =" in ln]  # …_detect_speech_no_reset: vad time
     return lines[-12:] + [f"voice detection, {len(vad)} requests: {v}" for v in vad[-1:]] or \
         ["(no whisper_print_timings lines in its log)"]
 

@@ -130,7 +130,9 @@ class WhisperCppConfig(_Section):
     Example: ``["fr", "en"]``. Empty = accept any language."""
     vad: bool = True
     """Also run whisper.cpp's Silero voice detector on each utterance (skips non-speech that
-    would otherwise come back as invented sentences). Needs the small ``silero-v6.2.0`` model."""
+    would otherwise come back as invented sentences). Needs the small ``silero-v6.2.0`` model,
+    and more than 4 CPU cores (every Apple Silicon Mac): with fewer it is skipped, as it would
+    make each utterance several times slower."""
     no_speech_threshold: float = 0.6
     threads: int = 0
     """CPU threads; 0 = the number of performance cores (up to 8)."""

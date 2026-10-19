@@ -118,6 +118,39 @@ def default_threads() -> int:
     return max(1, min(4, (os.cpu_count() or 2) // 2 or 1))
 
 
+VAD_THREADS = 4
+"""whisper.cpp runs its Silero voice detection on 4 CPU threads, and its server can't change that."""
+
+_vad_off_said = False
+
+
+def usable_cpus() -> int:
+    if hasattr(os, "process_cpu_count"):  # Python 3.13: the cores this process may run on
+        return os.process_cpu_count() or 1
+    if hasattr(os, "sched_getaffinity"):
+        return len(os.sched_getaffinity(0)) or 1
+    return os.cpu_count() or 1
+
+
+def vad_fits() -> bool:
+    """Whether whisper.cpp's voice detection can run here at its normal speed (a few milliseconds).
+
+    Its 4 threads wait for each other at every step of every 32 ms window. With 4 cores or fewer
+    one of them is always waiting for the OS to give it a core back: on a 3-core Mac VM an
+    8-second clip took 52 s with it and 11 s without. Every Apple Silicon Mac has 8 cores or
+    more. Without it, our own voice detection still cuts the audio into utterances.
+    """
+    return usable_cpus() > VAD_THREADS
+
+
+def _say_vad_off() -> None:
+    global _vad_off_said
+    if not _vad_off_said:  # once, not for each source and restart
+        _vad_off_said = True
+        log.warning("whisper.cpp voice detection is off: it needs more than %d CPU cores and this computer "
+                    "gives us %d", VAD_THREADS, usable_cpus())
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -183,7 +216,10 @@ class WhisperServer:
                 fatal=True,
             )
         vad = stt_models.model_path(cfg, stt_models.VAD_MODEL) if wc.vad else None
-        if vad is not None and not stt_models.is_installed(cfg, stt_models.VAD_MODEL):
+        if vad is not None and not vad_fits():
+            _say_vad_off()
+            vad = None
+        elif vad is not None and not stt_models.is_installed(cfg, stt_models.VAD_MODEL):
             log.warning("whisper.cpp voice detection is off: run `voicestream models download %s`", stt_models.VAD_MODEL)
             vad = None
         language = cfg.transcription.language
@@ -524,6 +560,8 @@ def check(cfg: Config) -> tuple[str, str]:
         return "fail", "whisper-server not found: use the Voicestream app, or `brew install whisper-cpp`"
     if not stt_models.is_installed(cfg, wc.model) and not stt_models.model_path(cfg, wc.model).is_file():
         return "fail", f"model {wc.model} not downloaded: `voicestream models download {wc.model}`"
+    if wc.vad and not vad_fits():  # nothing to fix: transcription works without it
+        return "ok", f"{wc.model} · {binary} (voice detection off: needs more than {VAD_THREADS} CPU cores)"
     extra = "" if not wc.vad or stt_models.is_installed(cfg, stt_models.VAD_MODEL) else \
         f" (voice detection off: `voicestream models download {stt_models.VAD_MODEL}`)"
     return ("warn" if extra else "ok"), f"{wc.model} · {binary}{extra}"
