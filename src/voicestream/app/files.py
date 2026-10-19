@@ -9,7 +9,7 @@ import threading
 from collections.abc import Iterator
 from pathlib import Path
 
-from ..storage import private_dir
+from ..storage import private_dir, replace_file
 
 _locks: dict[str, threading.RLock] = {}
 _locks_guard = threading.Lock()
@@ -50,7 +50,7 @@ def write_private(path: Path, text: str) -> None:
             os.fsync(fh.fileno())
         with contextlib.suppress(OSError):  # e.g. a volume without Unix permissions
             os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
+        replace_file(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):
             tmp.unlink()

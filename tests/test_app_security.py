@@ -25,6 +25,7 @@ from test_app_host import _factory, _host, _states, _write_config
 from test_app_meetings import Rec, StubHost, saved  # noqa: F401 - the fixture
 from test_app_routes import BASE, PLANNING, TOKEN
 
+from voicestream import storage
 from voicestream.app import desktop, files
 from voicestream.app import secrets as keys
 from voicestream.app import settings as settings_mod
@@ -166,6 +167,41 @@ def test_concurrent_private_writes_never_mix(tmp_path: Path, monkeypatch: pytest
     assert [p.name for p in tmp_path.iterdir()] == ["x.toml"]  # no temporary file left behind
     if os.name == "posix":  # Windows has no permission bits
         assert oct(path.stat().st_mode & 0o777) == "0o600"
+
+
+def _refuse_twice(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """``os.replace`` as Windows answers while the file is open elsewhere or replaced at that moment."""
+    real, calls = os.replace, []
+
+    def replace(src: Any, dst: Any) -> None:
+        calls.append(str(dst))
+        if len(calls) <= 2:
+            raise PermissionError(13, "Access is denied")
+        real(src, dst)
+
+    monkeypatch.setattr(storage.os, "replace", replace)
+    monkeypatch.setattr(storage.time, "sleep", lambda s: None)
+    return calls
+
+
+def test_a_write_on_windows_waits_for_a_reader_to_let_go(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows a replace fails while the dashboard has notes.md open (or another write replaces the
+    same file), and the meeting's notes or the settings were then never written."""
+    calls = _refuse_twice(monkeypatch)
+    monkeypatch.setattr(storage, "_WINDOWS", True)
+    files.write_private(tmp_path / "x.toml", "a = 1\n")
+    storage.atomic_write(tmp_path / "notes.md", "# Notes\n")
+    assert (tmp_path / "x.toml").read_text() == "a = 1\n" and (tmp_path / "notes.md").read_text() == "# Notes\n"
+    assert len(calls) == 4  # x.toml refused twice then moved; notes.md moved at once
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["notes.md", "x.toml"]
+
+
+def test_elsewhere_a_refused_replace_is_final(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _refuse_twice(monkeypatch)
+    monkeypatch.setattr(storage, "_WINDOWS", False)
+    with pytest.raises(PermissionError):
+        files.write_private(tmp_path / "x.toml", "a = 1\n")
+    assert len(calls) == 1 and list(tmp_path.iterdir()) == []  # and its temporary file is gone
 
 
 def test_write_private_never_follows_a_planted_temporary_file(tmp_path: Path) -> None:

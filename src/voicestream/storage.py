@@ -136,11 +136,29 @@ def private_dir(path: Path) -> Path:
     return path
 
 
+_WINDOWS = os.name == "nt"
+
+
+def replace_file(src: Path, dst: Path) -> None:
+    """``os.replace``, which on Windows fails while someone has ``dst`` open (Python opens files without
+    FILE_SHARE_DELETE: the dashboard reading the notes, say) or is replacing it at the same moment, so
+    there it retries for up to a second. Elsewhere a rename is atomic and a refusal is final."""
+    tries = 20 if _WINDOWS else 1
+    for attempt in range(1, tries + 1):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == tries:
+                raise
+            time.sleep(0.05)
+
+
 def atomic_write(path: Path, data: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(data, encoding="utf-8")
-    os.replace(tmp, path)
+    replace_file(tmp, path)
 
 
 class SessionStore:
