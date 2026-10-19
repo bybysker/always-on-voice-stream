@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -117,7 +118,8 @@ def test_language_table_matches_whisper_cpp() -> None:
 # ------------------------------------------------------------------ the server process
 
 
-async def test_transcribes_through_whisper_server(whisper_cfg: Config) -> None:
+async def test_transcribes_through_whisper_server(whisper_cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(wc, "usable_cpus", lambda: 8)  # voice detection would fit, but its model isn't downloaded
     model = install_model(whisper_cfg, script={"load_s": 0.3, "replies": [reply("On valide le devis.")]})
     t = build_transcriber(whisper_cfg, "mic")
     try:
@@ -136,6 +138,7 @@ async def test_transcribes_through_whisper_server(whisper_cfg: Config) -> None:
     argv = json.loads(Path(str(model) + ".argv.json").read_text())
     assert argv[:2] == ["-m", str(model)] and ["--host", "127.0.0.1"] == argv[2:4]
     assert {"-nlp", "-sns"} <= set(argv) and argv[argv.index("-l") + 1] == "auto"
+    assert "--vad" not in argv  # no Silero model downloaded: whisper-server would fail every request
 
 
 async def test_long_sentences_come_back_whole(whisper_cfg: Config) -> None:
@@ -189,6 +192,7 @@ async def test_voice_detection_is_skipped_with_4_cores_or_fewer(
     52 s with it and 11 s without, so the meeting's transcript fell further and further behind."""
     monkeypatch.setattr(wc, "usable_cpus", lambda: 3)
     monkeypatch.setattr(wc, "_vad_off_said", False)
+    caplog.set_level(logging.INFO, logger="voicestream")
     model = install_model(whisper_cfg, script={"replies": [reply("Oui.")]})
     install_model(whisper_cfg, stt_models.VAD_MODEL)
     for source in ("mic", "system"):  # each source and restart acquires the server again
@@ -199,8 +203,9 @@ async def test_voice_detection_is_skipped_with_4_cores_or_fewer(
             await t.aclose()
     assert "--vad" not in json.loads(Path(str(model) + ".argv.json").read_text())
     assert [r["fields"]["vad"] for r in requests_seen(model)] == ["false", "false"]
-    said = [r.getMessage() for r in caplog.records if "voice detection is off" in r.getMessage()]
-    assert said == ["whisper.cpp voice detection is off: it needs more than 4 CPU cores and this computer gives us 3"]
+    said = [(r.levelno, r.getMessage()) for r in caplog.records if "voice detection is off" in r.getMessage()]
+    # once, and below WARNING: the app shows every voicestream warning as a problem to fix
+    assert said == [(logging.INFO, "whisper.cpp voice detection is off: it needs more than 4 CPU cores and this computer gives us 3")]
     status, detail = wc.check(whisper_cfg)  # nothing for you to fix, so not a warning
     assert status == "ok" and detail.endswith("(voice detection off: needs more than 4 CPU cores)")
     monkeypatch.setattr(wc, "usable_cpus", lambda: 4)

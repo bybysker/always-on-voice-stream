@@ -135,10 +135,11 @@ def usable_cpus() -> int:
 def vad_fits() -> bool:
     """Whether whisper.cpp's voice detection can run here at its normal speed (a few milliseconds).
 
-    Its 4 threads wait for each other at every step of every 32 ms window. With 4 cores or fewer
-    one of them is always waiting for the OS to give it a core back: on a 3-core Mac VM an
-    8-second clip took 52 s with it and 11 s without. Every Apple Silicon Mac has 8 cores or
-    more. Without it, our own voice detection still cuts the audio into utterances.
+    Its 4 threads spin-wait for each other at every step of every 32 ms window, so as soon as one
+    of them has no core of its own (3 cores, or 4 with the video call busy on one) the others wait
+    for the OS to give it one back: on a 3-core Mac VM an 8-second clip took 52 s with it and 11 s
+    without. Every Apple Silicon Mac has 8 cores or more. Without it, our own voice detection
+    still cuts the audio into utterances.
     """
     return usable_cpus() > VAD_THREADS
 
@@ -147,8 +148,9 @@ def _say_vad_off() -> None:
     global _vad_off_said
     if not _vad_off_said:  # once, not for each source and restart
         _vad_off_said = True
-        log.warning("whisper.cpp voice detection is off: it needs more than %d CPU cores and this computer "
-                    "gives us %d", VAD_THREADS, usable_cpus())
+        # information, not a problem for the app's banner: transcription works, nothing to fix
+        log.info("whisper.cpp voice detection is off: it needs more than %d CPU cores and this computer "
+                 "gives us %d", VAD_THREADS, usable_cpus())
 
 
 def _free_port() -> int:
