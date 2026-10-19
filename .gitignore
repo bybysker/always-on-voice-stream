@@ -23,3 +23,5 @@ sessions/
 
 # taste-skill working files (screenshots, direction sheets)
 .taste-skill/
+# Claude Code worktrees (agents working in parallel); never part of the project
+.claude/worktrees/
