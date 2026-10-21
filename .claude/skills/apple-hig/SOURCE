@@ -1,0 +1,2 @@
+apple-hig by Ethan Buntario, MIT licence: https://github.com/ebuntario/apple-hig
+Installed from commit c434b91bf06854e7fc25c59c71f6957077190727 (its setup script and bin/ left out). Update: copy the repository over this folder, without setup and bin.
