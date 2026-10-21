@@ -299,7 +299,9 @@ class AlwaysOnConfig(_Section):
     idle_split_minutes: float = 10.0
     """End the current meeting (summarize + push) after this much silence; the next
     speech starts a new meeting. ``0`` disables auto-splitting. Time the computer spends
-    asleep counts as silence; time on Pause doesn't."""
+    asleep counts as silence; time on Pause doesn't. In the Mac app, only when meetings start
+    automatically: a meeting you start yourself never splits (its own silence limits are app
+    preferences)."""
     short_clip_speech_s: float = 60.0
     """A meeting that started by itself with less speech than this **and** fewer than
     ``short_clip_lines`` lines (a video playing, a word with a colleague, a phone call the mic

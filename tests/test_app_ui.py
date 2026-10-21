@@ -172,7 +172,9 @@ class UIApp:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(stt_models.GGML_MAGIC + b"\0" * 64)
         self.prefs_path = root / "app.json"
-        self.prefs_path.write_text(json.dumps({"setup_done": setup_done, "listen_on_launch": listen_on_launch}), encoding="utf-8")
+        # these screens were drawn for always-on listening: meetings start by themselves here
+        self.prefs_path.write_text(json.dumps({"setup_done": setup_done, "listen_on_launch": listen_on_launch,
+                                               "meeting_start": "automatic"}), encoding="utf-8")
         self.dl_gate = threading.Event()
         self.dl_gate.set()
         self.reminders_checks: list[str] = []

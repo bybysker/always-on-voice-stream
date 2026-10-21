@@ -45,7 +45,7 @@ GLYPHS = {"ctrl": "⌃", "alt": "⌥", "shift": "⇧", "cmd": "⌘"}
 DEFAULT_CODE, DEFAULT_MODS = "KeyR", ("alt", "cmd")  # ⌥⌘R: R for record
 
 TOGGLE = {"stopped": "start", "error": "restart", "listening": "stop", "paused": "resume"}
-"""What a press does in each state (:meth:`voicestream.app.host.AppHost.listen_toggle`); in the
+"""What a press does in each state (:meth:`voicestream.app.host.AppHost.meeting_toggle`); in the
 others (starting, stopping) it does nothing."""
 
 # ------------------------------------------------------------------ the keys

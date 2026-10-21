@@ -28,7 +28,7 @@ from ..app import secrets as keys
 from ..app.checks import run_checks
 from ..app.host import HostError
 from ..app.meetings import MeetingBusy, MeetingNotFound, resolve_folder
-from ..app.prefs import Hotkey, layout_context
+from ..app.prefs import FloatingPosition, Hotkey, MeetingStart, Minutes, layout_context
 from ..app.settings import SettingsError, save_checked, settings_view
 from ..costs import estimate_daily
 from .server import AgentApproval, ItemEdit, NewItem, _Body, _error, _parse  # noqa: F401 - shared bodies
@@ -52,6 +52,10 @@ ASSETS = {
     **{f"/static/fonts/{name}": (f"fonts/{name}", "font/woff2") for name in FONTS},
 }
 HISTORY_DAYS = 30
+MEETING_ACTIONS = ("start", "stop", "toggle", "keep")
+"""``POST /api/meeting/<action>``; ``/api/meeting/end`` is the dashboard's own (:mod:`.server`)."""
+ANSWERS = ("suggestion/accept", "suggestion/dismiss", "notice/dismiss")
+"""``POST /api/<answer>``: the answers to what the window and the floating button ask or tell."""
 
 
 # --------------------------------------------------------------------------- bodies
@@ -89,6 +93,14 @@ class PrefsPatch(_Body):
     hotkey: Hotkey | None = None
     """The keyboard shortcut, checked as the page checks it, by the Mac's keyboard layout (``null``: turned off)."""
     hotkey_sound: bool | None = None
+    meeting_start: MeetingStart | None = None
+    floating_button: bool | None = None
+    floating_position: FloatingPosition | None = None
+    """``null``: the floating button goes back to its default place."""
+    spotlight_launcher: bool | None = None
+    call_suggestions: bool | None = None
+    silence_ask_minutes: Minutes | None = None
+    silence_end_minutes: Minutes | None = None
 
 
 class HotkeyRecording(_Body):
@@ -151,6 +163,8 @@ class AppApi:
             *(Route(path, self.asset, methods=["GET"]) for path in ASSETS),
             Route("/api/app", self.app_state, methods=["GET"]),
             Route("/api/listen/{action}", self.listen, methods=["POST"]),
+            *(Route(f"/api/meeting/{name}", self.meeting_action, methods=["POST"]) for name in MEETING_ACTIONS),
+            *(Route(f"/api/{name}", self.answer, methods=["POST"]) for name in ANSWERS),
             Route("/api/settings", self.get_settings, methods=["GET"]),
             Route("/api/settings", self.patch_settings, methods=["PATCH"]),
             Route("/api/secrets/{name}", self.put_secret, methods=["PUT"]),
@@ -225,6 +239,31 @@ class AppApi:
         else:
             raise HTTPException(404, f"unknown action {action!r}")
         return JSONResponse(host.state())
+
+    async def meeting_action(self, request: Request) -> JSONResponse:
+        """The window's Start and Stop, and Keep for "Still in a meeting?": the host's own meeting actions,
+        the ones the menu bar, the shortcut, the floating button and Spotlight use too. A start answers once
+        listening is up (or failed), a stop at once (the wrap-up goes on, ``app.state`` events tell the
+        rest). The reply is the app's state with ``action``: what was done (``null``: nothing to do)."""
+        name, host = request.url.path.rsplit("/", 1)[-1], self.host
+        if name == "keep":
+            action: str | None = "keep" if await host.meeting_keep() else None
+        else:
+            action = await {"start": host.meeting_start, "stop": host.meeting_stop, "toggle": host.meeting_toggle}[name]()
+        return JSONResponse({**host.state(), "action": action})
+
+    async def answer(self, request: Request) -> JSONResponse:
+        """Start or Not now on "Call detected — start notes?", and OK on a notice. The reply is the app's
+        state with ``action``: what was done (``null``: there was nothing to answer)."""
+        host = self.host
+        name = request.url.path.removeprefix("/api/")
+        if name == "suggestion/accept":
+            action = await host.suggestion_accept()
+        elif name == "suggestion/dismiss":
+            action = "dismiss" if host.suggestion_dismiss() else None
+        else:
+            action = "dismiss" if host.dismiss_notice() else None
+        return JSONResponse({**host.state(), "action": action})
 
     # ---------------------------------------------------------------- settings
 

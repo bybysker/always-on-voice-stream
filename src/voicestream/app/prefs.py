@@ -1,18 +1,26 @@
 """App-only preferences (``~/.voicestream/app.json``): things voicestream.toml has no business holding.
 
-Whether the first-run setup is done, whether to start listening when the app opens, launch at
-login, the UI language, the keyboard shortcut and the window geometry belong to the Mac app, not to
-the assistant: the command line never reads them, and a config file you share or keep in git
-shouldn't carry them.
+Whether the first-run setup is done, how meetings start (when you say so, or whenever someone
+speaks), whether to start listening when the app opens, launch at login, the UI language, the
+keyboard shortcut, the floating button, the Spotlight launcher and the window geometry belong to the
+Mac app, not to the assistant: the command line never reads them, and a config file you share or
+keep in git shouldn't carry them.
+
+The file also keeps the key a ``voicestream://`` link needs to start a recording (see
+:meth:`voicestream.app.host.AppHost.open_url`). It is written 0600 like the rest and left out of
+every dump of the preferences (the page's state, the replies to ``PATCH /api/prefs``, the log): only
+this file and the Spotlight launcher made from it ever hold it.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
+import secrets
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -29,6 +37,20 @@ from . import hotkey as hk
 from .files import write_private
 
 log = logging.getLogger(__name__)
+
+MeetingStart = Literal["manual", "automatic"]
+"""How meetings start: ``manual``, when you start one (the window, the menu bar, the shortcut, the
+floating button, Spotlight), with nothing captured until then; or ``automatic``, always listening, a
+meeting opening on the first speech and closing after a silence (``always_on.idle_split_minutes``)."""
+MAX_SILENCE_MINUTES = 600
+"""The silence thresholds of a meeting started by hand go up to 10 hours."""
+URL_KEY = re.compile(r"[A-Za-z0-9_-]{32,128}")
+Minutes = Annotated[int, Field(ge=0, le=MAX_SILENCE_MINUTES, strict=True)]
+"""Whole minutes, ``0``: never. Strict where the page sends them: ``true`` is not one minute."""
+
+
+def new_url_key() -> str:
+    return secrets.token_urlsafe(32)
 
 
 class Hotkey(BaseModel):
@@ -72,13 +94,26 @@ def layout_context(layout: Mapping[str, str] | None) -> dict[str, Any] | None:
     return {"layout": dict(layout)} if layout else None
 
 
+class FloatingPosition(BaseModel):
+    """Where the floating button was left: its frame's origin in screen points (as AppKit counts them,
+    from the bottom left of the main screen), and the screen it was on, so that the native shell can
+    put it back there, or on the main screen when that one isn't connected any more."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    x: float = Field(ge=-100_000, le=100_000)
+    y: float = Field(ge=-100_000, le=100_000)
+    screen: str | None = Field(None, max_length=200)
+    """The screen's name or id, as the native shell chose to record it (``None``: the main screen)."""
+
+
 class Prefs(BaseModel):
     model_config = ConfigDict(extra="ignore")  # a newer app's keys must not break an older one
 
     setup_done: bool = False
     """The first-run wizard was completed (until then the app opens on it and doesn't listen)."""
     listen_on_launch: bool = True
-    """Start listening as soon as the app opens (once setup is done)."""
+    """Start listening as soon as the app opens (once setup is done), when meetings start automatically."""
     start_at_login: bool = False
     ui_language: Literal["auto", "en", "fr"] = "auto"
     """``auto`` follows the system language."""
@@ -88,6 +123,49 @@ class Prefs(BaseModel):
     """The shortcut that starts and stops listening; ``None``: turned off."""
     hotkey_sound: bool = True
     """A short sound when the shortcut starts or stops listening (you may not be looking)."""
+    meeting_start: MeetingStart = "manual"
+    """How meetings start (:data:`MeetingStart`): ``manual`` also for a file saved before there was a
+    choice, so Voicestream records only when you ask it to. :attr:`listen_on_launch` is for ``automatic``."""
+    floating_button: bool = True
+    """The small always-on-top button that starts, pauses and stops a meeting from any app."""
+    floating_position: FloatingPosition | None = None
+    """Where you last dragged the floating button (``None``: its default place)."""
+    spotlight_launcher: bool = True
+    """Keep a small "Voicestream – New Meeting" app in ~/Applications, so that ⌘Space, "voicestream",
+    Return starts a meeting (the native shell writes it while this is on and removes it when it's off)."""
+    call_suggestions: bool = True
+    """When another app starts using the microphone (a call) and nothing is being recorded, suggest
+    taking notes. Only ever a suggestion: nothing starts by itself."""
+    silence_ask_minutes: int = Field(15, ge=0, le=MAX_SILENCE_MINUTES)
+    """A meeting started by hand with no speech for this long asks "Still in a meeting?" (``0``: never)."""
+    silence_end_minutes: int = Field(60, ge=0, le=MAX_SILENCE_MINUTES)
+    """… and ends by itself after this long without speech, saying why (``0``: never). Time asleep
+    counts, time on Pause doesn't, and answering "Keep" starts both counts over."""
+    url_key: str = Field("", exclude=True, repr=False)
+    """What a ``voicestream://meeting/start`` link must carry (``?key=``) to start a recording, so that
+    another app or a web page can't. Made once (:func:`with_url_key`) and kept in this file only: left
+    out of every dump and repr, :func:`save_prefs` writes it on purpose."""
+
+    @field_validator("meeting_start", "floating_button", "floating_position", "spotlight_launcher", "call_suggestions",
+                     "silence_ask_minutes", "silence_end_minutes", mode="wrap")
+    @classmethod
+    def _saved_or_default(cls, value: Any, handler: ValidatorFunctionWrapHandler, info: ValidationInfo) -> Any:
+        """A saved value this version refuses (a newer app's, a hand edit) is the default again, rather
+        than the whole file being ignored: the setup would start over."""
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            name = str(info.field_name)
+            default = cls.model_fields[name].get_default(call_default_factory=True)
+            log.warning("ignoring the saved %s (%s): back to %r", name, exc.errors()[0]["msg"], default)
+            return default
+
+    @field_validator("url_key", mode="before")
+    @classmethod
+    def _saved_url_key(cls, value: Any) -> str:
+        """Anything but a key :func:`new_url_key` could have made (none yet, a hand edit that shortened
+        it) is no key: a new one is made when one is needed. Never logged."""
+        return value if isinstance(value, str) and URL_KEY.fullmatch(value) else ""
 
     @field_validator("hotkey", mode="wrap")
     @classmethod
@@ -103,7 +181,7 @@ class Prefs(BaseModel):
 
 
 class PrefsUpdate(BaseModel):
-    """What ``PATCH /api/prefs`` may change."""
+    """What ``PATCH /api/prefs`` may change (and the native shell, through the host)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -114,6 +192,18 @@ class PrefsUpdate(BaseModel):
     hotkey: Hotkey | None = None
     """``null`` turns the shortcut off."""
     hotkey_sound: bool | None = None
+    meeting_start: MeetingStart | None = None
+    floating_button: bool | None = None
+    floating_position: FloatingPosition | None = None
+    """``null`` forgets it: the floating button goes back to its default place."""
+    spotlight_launcher: bool | None = None
+    call_suggestions: bool | None = None
+    silence_ask_minutes: Minutes | None = None
+    silence_end_minutes: Minutes | None = None
+
+
+NULLABLE = ("window", "hotkey", "floating_position")
+"""The preferences whose ``null`` means something (none, turned off, forgotten), not "unchanged"."""
 
 
 def prefs_path() -> Path:
@@ -134,7 +224,19 @@ def load_prefs(path: Path | None = None) -> Prefs:
 
 
 def save_prefs(prefs: Prefs, path: Path | None = None) -> None:
-    write_private(path or prefs_path(), prefs.model_dump_json(indent=1) + "\n")
+    data = prefs.model_dump(mode="json")
+    if prefs.url_key:
+        data["url_key"] = prefs.url_key  # left out of every dump: only this file holds it
+    write_private(path or prefs_path(), json.dumps(data, indent=1, ensure_ascii=False) + "\n")
+
+
+def with_url_key(prefs: Prefs, path: Path | None = None) -> Prefs:
+    """``prefs`` with a link key: made and saved the first time one is needed, the same one after."""
+    if prefs.url_key:
+        return prefs
+    prefs = prefs.model_copy(update={"url_key": new_url_key()})
+    save_prefs(prefs, path)
+    return prefs
 
 
 def update_prefs(changes: dict[str, Any], path: Path | None = None, layout: Mapping[str, str] | None = None) -> Prefs:
@@ -142,7 +244,9 @@ def update_prefs(changes: dict[str, Any], path: Path | None = None, layout: Mapp
     keys type on this keyboard, for a shortcut sent without its label (see :class:`Hotkey`)."""
     context = layout_context(layout)
     upd = PrefsUpdate.model_validate(changes, context=context).model_dump(exclude_unset=True)
-    keep = {k: v for k, v in upd.items() if v is not None or k in ("window", "hotkey")}  # null: none, off
-    prefs = Prefs.model_validate(load_prefs(path).model_dump() | keep, context=context)  # again: a Hotkey, not a dict
+    keep = {k: v for k, v in upd.items() if v is not None or k in NULLABLE}  # null: none, off, forgotten
+    saved = load_prefs(path)
+    # validated again (a Hotkey, not a dict); the link key isn't in the dump, so it is carried over
+    prefs = Prefs.model_validate(saved.model_dump() | keep | {"url_key": saved.url_key}, context=context)
     save_prefs(prefs, path)
     return prefs

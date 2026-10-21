@@ -28,9 +28,23 @@ them in the background (:attr:`AppHost.assistants`) while listening can start ag
 The microphone picked in Settings may be a headset that isn't connected: listening goes on with
 the default input (or meeting audio alone) and takes it back when it is (:class:`ChosenMic`).
 
+How meetings start is a preference (``prefs.meeting_start``). ``manual``, the default: nothing is
+captured until you start a meeting; starting one starts listening with the meeting open at once,
+and stopping it (or ending it, or a long silence) wraps it up and lets go of the microphone and
+meeting audio (:attr:`Assistant.manual <voicestream.session.Assistant.manual>`). A meeting left
+running asks "Still in a meeting?" after ``silence_ask_minutes`` without speech (:attr:`AppHost.still_there`,
+answered with :meth:`AppHost.meeting_keep`) and ends by itself after ``silence_end_minutes``, saying why
+(:attr:`AppHost.notice`). ``automatic`` is the always-on listening of ``voicestream run``. Every way of
+starting and stopping — the window, the menu bar, the keyboard shortcut, the floating button, the
+Spotlight launcher, ``voicestream://`` links (:meth:`AppHost.open_url`) — goes through the same
+actions: :meth:`AppHost.meeting_start`, :meth:`AppHost.meeting_stop` and :meth:`AppHost.meeting_toggle`.
+When another app starts using the microphone (a call) and nothing is recorded, the shell calls
+:meth:`AppHost.suggest_meeting`: the window and the floating button offer to start notes
+(:attr:`AppHost.suggestion`), and nothing starts unless you say so.
+
 The native shell talks to the host from its main thread with :meth:`AppHost.run_in_thread`,
 :meth:`AppHost.call` and :meth:`AppHost.add_state_listener`. Its global keyboard shortcut
-(:mod:`.hotkey`) calls :meth:`AppHost.listen_toggle`, and the shell says with
+(:mod:`.hotkey`) calls :meth:`AppHost.meeting_toggle`, and the shell says with
 :meth:`AppHost.set_hotkey_status` whether macOS took the shortcut, and with
 :meth:`AppHost.set_keyboard_layout` what the keys type on the Mac's keyboard. Optional platform glue lives in
 ``voicestream.app.native_hooks`` when the shell provides it (all functions optional):
@@ -50,6 +64,7 @@ import asyncio
 import concurrent.futures
 import contextlib
 import functools
+import hmac
 import importlib
 import itertools
 import logging
@@ -62,6 +77,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable, Coroutine
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import parse_qs, urlsplit
 
 from .. import __version__, stt_models
 from ..audio import CaptureSetupError, Clock
@@ -70,12 +86,12 @@ from ..audio.mic import MicSource, resolve_device
 from ..config import Config, ConfigError, DashboardConfig
 from ..costs import CostMeter
 from ..events import EventBus
-from ..models import AudioFrame, Event
+from ..models import AudioFrame, Event, utcnow
 from . import logs
 from . import secrets as keys
 from .hotkey import TOGGLE
 from .meetings import Meetings
-from .prefs import Prefs, load_prefs, save_prefs, update_prefs
+from .prefs import Prefs, load_prefs, save_prefs, update_prefs, with_url_key
 from .settings import default_config_path, load_app_config
 
 if TYPE_CHECKING:
@@ -111,6 +127,23 @@ NOT_APPLIED = "Your new settings aren't used yet"
 HOTKEY_RECORDING_S = 30.0
 """Settings records a new shortcut with the current one off (or pressing it would toggle listening, not
 reach the page); it is back on after this long even if the page never says it is done."""
+START = {"stopped": "start", "error": "restart", "paused": "resume"}
+"""What starting a meeting does in each state (:meth:`AppHost.meeting_start`): after a problem, a restart
+as Start does then; paused, Resume. In the others nothing: one is recorded, about to be, or ending."""
+STOPPABLE = frozenset({"starting", "listening", "paused", "error"})
+"""The states :meth:`AppHost.meeting_stop` stops (an error: Stop dismisses it, and stops what still runs)."""
+CALL_MEMORY_S = 4 * 3600.0
+"""A call is suggested once: one the shell never said was over (:meth:`AppHost.call_ended`) is
+forgotten after this long, so the same app's next call is suggested again."""
+APP_NAME_MAX = 80
+URL_SCHEME = "voicestream"
+URL_ACTIONS = {"meeting/start": "start", "meeting/stop": "stop", "meeting/toggle": "toggle", "open": "open"}
+"""The ``voicestream://`` links :meth:`AppHost.open_url` follows, and what each does."""
+KEYED_ACTIONS = frozenset({"start", "toggle"})
+"""The links that may start a recording: they need the key (``?key=``), or any web page could."""
+
+MeetingAction = Literal["start", "restart", "resume", "stop", "error"]
+"""What a meeting action did (``error``: a start that failed, the state says why), for the shell's sound."""
 
 _STT_KEYS = {"openai": ("OPENAI_API_KEY", "OpenAI"), "openai-realtime": ("OPENAI_API_KEY", "OpenAI"),
              "deepgram": ("DEEPGRAM_API_KEY", "Deepgram")}  # fmt: skip
@@ -185,6 +218,28 @@ def _restart_portaudio() -> None:
 def _named_device(device: str | int | None) -> bool:
     """A device chosen by name (``"AirPods"``), the kind that comes and goes; not an index or the default."""
     return isinstance(device, str) and bool(device.strip()) and not device.strip().isdigit()
+
+
+def parse_url(url: str) -> tuple[str, str | None] | None:
+    """``voicestream://meeting/start?key=…`` → ``("start", "…")``: the action (:data:`URL_ACTIONS`) and the
+    key it carries (``None``: none, or more than one); ``None`` for a link Voicestream doesn't know."""
+    try:
+        parts = urlsplit(str(url).strip())
+    except ValueError:
+        return None
+    if parts.scheme.lower() != URL_SCHEME:
+        return None
+    action = URL_ACTIONS.get(f"{parts.netloc}{parts.path}".strip("/").lower())
+    if action is None:
+        return None
+    given = parse_qs(parts.query, keep_blank_values=True).get("key", [])
+    return action, given[0] if len(given) == 1 else None
+
+
+def _app_name(name: str | None) -> str | None:
+    """The calling app's name as the shell read it, fit to be shown (no control characters, not too long)."""
+    text = " ".join("".join(c if c.isprintable() else " " for c in str(name or "")).split())
+    return text[:APP_NAME_MAX] or None
 
 
 class ChosenMic(MicSource):
@@ -351,6 +406,9 @@ class AppHost:
         self.capabilities: dict[str, bool] = {
             "native_window": False,  # the native shell sets it
             "hotkey": False,  # likewise: a global shortcut needs the Mac app
+            "floating_button": False,  # … and so do these three: the page shows their settings when they're there
+            "spotlight": False,
+            "call_detection": False,
             "login_item": _login_item_supported(self.native_hooks),
             "keychain": keys.store_name() == "keychain",
         }
@@ -364,7 +422,21 @@ class AppHost:
         empty elsewhere. A shortcut recorded with ⌥ held is shown and checked by it (the page can't tell)."""
         self._hotkey_recording: asyncio.TimerHandle | None = None
         self._toggling: asyncio.Task[None] | None = None
-        """What the last press of the shortcut started, while it is being carried out."""
+        """What the last meeting action (the shortcut, the floating button…) started, while it is being carried out."""
+        self.suggestion: dict[str, Any] | None = None
+        """"Call detected — start notes?" (:meth:`suggest_meeting`): ``{"app", "at"}`` until it is answered,
+        the call ends or a recording starts."""
+        self._suggestion_key: str | None = None
+        self._suggested: dict[str, float] = {}
+        """The calls already suggested (their key → when, on :attr:`wall`): one suggestion per call."""
+        self.still_there: dict[str, Any] | None = None
+        """"Still in a meeting?" (a long silence in a meeting started by hand): ``{"meeting_id",
+        "silent_minutes", "ends_at"}`` until speech, Keep or the end of the meeting."""
+        self.notice: dict[str, Any] | None = None
+        """Something the person should know happened by itself (``kind``: ``ended_after_silence``,
+        ``link_refused``), until dismissed or the next meeting starts."""
+        self.wall: Callable[[], float] = time.time
+        """The clock the calls already suggested are remembered on (tests replace it)."""
         self.status: State = "stopped"
         self.error: str | None = self.config_error
         if self.error:
@@ -488,12 +560,13 @@ class AppHost:
         return cur is not None and not cur.finished
 
     def state(self) -> dict[str, Any]:
-        """``GET /api/app`` and every ``app.state`` event."""
+        """``GET /api/app`` and every ``app.state`` event. Never holds the link key (``prefs.url_key``)."""
         cur = self._assistant.current if self._assistant is not None else None
         meeting = None
         if cur is not None and not cur.finished:
             m = cur.meeting
             meeting = {"id": m.id, "title": m.title, "started_at": m.started_at.isoformat(), "folder": cur.store.dir.name}
+        p = self.prefs
         return {
             "boot": self._boot,
             "rev": next(self._revs),
@@ -509,12 +582,23 @@ class AppHost:
             "restart_pending": self.restart_pending,
             "waiting_for_model": self.awaiting_model,
             "warnings": list(self.warnings),
+            "mode": p.meeting_start,
+            "suggestion": dict(self.suggestion) if self.suggestion is not None else None,
+            "still_there": dict(self.still_there) if self.still_there is not None else None,
+            "notice": dict(self.notice) if self.notice is not None else None,
             "prefs": {
-                "listen_on_launch": self.prefs.listen_on_launch,
-                "start_at_login": self.prefs.start_at_login,
-                "ui_language": self.prefs.ui_language,
-                "hotkey": self.prefs.hotkey.model_dump() if self.prefs.hotkey is not None else None,
-                "hotkey_sound": self.prefs.hotkey_sound,
+                "listen_on_launch": p.listen_on_launch,
+                "start_at_login": p.start_at_login,
+                "ui_language": p.ui_language,
+                "hotkey": p.hotkey.model_dump() if p.hotkey is not None else None,
+                "hotkey_sound": p.hotkey_sound,
+                "meeting_start": p.meeting_start,
+                "floating_button": p.floating_button,
+                "floating_position": p.floating_position.model_dump() if p.floating_position is not None else None,
+                "spotlight_launcher": p.spotlight_launcher,
+                "call_suggestions": p.call_suggestions,
+                "silence_ask_minutes": p.silence_ask_minutes,
+                "silence_end_minutes": p.silence_end_minutes,
             },
             "hotkey": {**self.hotkey, "recording": self._hotkey_recording is not None},
             "keyboard_layout": dict(self.keyboard_layout),
@@ -600,12 +684,56 @@ class AppHost:
                 self._publish_state()
             else:
                 self._set_status("error", human_error(str(ev.data.get("error") or f"{name} stopped")))
-        elif ev.type in ("meeting.started", "assistant.paused", "assistant.resumed"):
+        elif ev.type == "segment":
+            if self.still_there is not None and ev.data.get("meeting_id") == self.still_there.get("meeting_id"):
+                self.still_there = None  # someone spoke: still in the meeting, the question goes away
+                self._publish_state()
+        elif ev.type == "meeting.started":
+            self.notice = None  # what ended the last one is old news
             self._publish_state()
+        elif ev.type in ("assistant.paused", "assistant.resumed"):
+            self._publish_state()
+        elif ev.type == "meeting.still_there":
+            a = self._assistant
+            cur = a.current if a is not None else None
+            if cur is not None and cur.meeting.id == ev.data.get("meeting_id") and not self._stop_requested:
+                self.still_there = {k: ev.data.get(k) for k in ("meeting_id", "silent_minutes", "ends_at")}
+                self._publish_state()
+        elif ev.type == "meeting.kept":
+            if self.still_there is not None:
+                self.still_there = None
+                self._publish_state()
+        elif ev.type == "assistant.ending":
+            self._on_ending(ev)
+        elif ev.type == "meeting.ending":
+            if self.still_there is not None and self.still_there.get("meeting_id") == ev.data.get("meeting_id"):
+                self.still_there = None
+                self._publish_state()
         elif ev.type == "meeting.ended":
+            note = self.notice
+            if note is not None and note.get("meeting_id") == ev.data.get("meeting_id"):
+                where = ev.data.get("dir")  # none when nothing was said: there is no meeting to open
+                note.update(title=ev.data.get("title"), folder=Path(str(where)).name if where else None)
             self._publish_state()
             if self.restart_pending:
                 self.track(asyncio.ensure_future(self._apply_pending()))
+
+    def _on_ending(self, ev: Event) -> None:
+        """A meeting started by hand is ending by itself, and listening with it (End meeting on the page,
+        a long silence…: ``assistant.ending``): a stop like any other, so the state says so at once and the
+        next meeting can start as soon as this one is wrapped up (see :meth:`_stop`)."""
+        a = self._assistant
+        if a is None or not a.manual:
+            return
+        self.still_there = None
+        if ev.data.get("reason") == "silence":
+            self.notice = {"kind": "ended_after_silence", "meeting_id": ev.data.get("meeting_id"),
+                           "minutes": round(a.end_after_s / 60), "at": utcnow().isoformat(), "title": None,
+                           "folder": None}  # fmt: skip
+        if not self._stop_requested and not self._closing:
+            self.track(asyncio.ensure_future(self.listen_stop()))
+        else:
+            self._publish_state()
 
     # --------------------------------------------------------------- listening
 
@@ -694,6 +822,7 @@ class AppHost:
         await self.refresh_config()  # edited by hand since?
         if self._assistant is not None or self._closing:
             return
+        self._withdraw_suggestion()  # a recording is starting: the call suggested is (about to be) taken down
         problem = self._checked_preflight()
         if problem and self._wait_for_model(problem, "listening starts by itself"):
             self._start_when_ready = True
@@ -711,6 +840,7 @@ class AppHost:
             log.warning("could not start listening: %s", exc)
             self._set_status("error", human_error(exc))
             return
+        self._apply_mode(assistant)
         self._assistant = assistant
         self._stop_requested = False
         self._last_source_error = None
@@ -728,6 +858,14 @@ class AppHost:
             waiter.cancel()
         if self._assistant is assistant and not task.done() and self.status == "starting":
             self._set_status("paused" if assistant.paused else "listening")
+
+    def _apply_mode(self, a: Assistant) -> None:
+        """How meetings start (``prefs.meeting_start``), for an assistant about to run or already running:
+        manual, it records one meeting, opened at once, with the silence thresholds of the preferences."""
+        p = self.prefs
+        a.manual = p.meeting_start == "manual"
+        a.ask_after_s = p.silence_ask_minutes * 60.0
+        a.end_after_s = p.silence_end_minutes * 60.0
 
     async def _run(self, assistant: Assistant) -> None:
         failure: BaseException | None = None
@@ -860,25 +998,31 @@ class AppHost:
                 return
         await self.listen_start(paused=paused)
 
-    def toggle_action(self) -> str | None:
-        """What a press of the keyboard shortcut does now (:data:`.hotkey.TOGGLE`), or ``None``: nothing
-        while listening starts or stops, while the previous press is still being carried out (the gap
-        before the state says so), or once the app is quitting."""
-        if self._closing or (self._toggling is not None and not self._toggling.done()):
+    # ---------------------------------------------------------------- meetings
+
+    def meeting_action(self, what: Literal["start", "stop", "toggle"] = "toggle") -> MeetingAction | None:
+        """What :meth:`meeting_start`, :meth:`meeting_stop` or :meth:`meeting_toggle` would do now, or
+        ``None``: nothing to do, or nothing while listening starts or stops, while the previous action is
+        still being carried out (the gap before the state says so) and once the app is quitting. A stop
+        is never held back by a start under way: Stop must always be able to end a recording."""
+        if self._closing:
             return None
-        return TOGGLE.get(self.status)
+        if what == "stop":
+            return "stop" if self.status in STOPPABLE else None
+        if self._toggling is not None and not self._toggling.done():
+            return None
+        return (TOGGLE if what == "toggle" else START).get(self.status)  # type: ignore[return-value]
 
-    async def listen_toggle(self) -> str | None:
-        """The keyboard shortcut: start when stopped; after a problem, restart as Start does then; stop
-        when listening — the meeting in progress is wrapped up and its notes written, as with Stop, but
-        nobody is asked first (you pressed it on purpose, maybe in another app); resume when paused.
+    def toggle_action(self) -> str | None:
+        """What a press of the keyboard shortcut does now (:data:`.hotkey.TOGGLE`): :meth:`meeting_action`."""
+        return self.meeting_action("toggle")
 
-        Returns what it did (:meth:`toggle_action`), for the shell's sound. A stop at once: wrapping a
-        meeting up can take a while, and goes on in the background. A start, restart or resume once it
-        is carried out (a start returns once listening is up, or after :data:`START_WAIT_S`), or
-        ``"error"`` when it failed — a missing key, a permission, a microphone that gave up: those
-        become state ``error`` rather than an exception, and the sound must not say it worked."""
-        action = self.toggle_action()
+    async def _carry_out(self, action: MeetingAction | None) -> MeetingAction | None:
+        """Do what a meeting action decided. A stop returns at once: wrapping a meeting up can take a while,
+        and goes on in the background. A start, restart or resume once it is carried out (a start returns
+        once listening is up, or after :data:`START_WAIT_S`), or ``"error"`` when it failed — a missing key,
+        a permission, a microphone that gave up: those become state ``error`` rather than an exception, and
+        the shell's sound must not say it worked."""
         if action is None:
             return None
         run = {"start": self.listen_start, "restart": self.listen_restart, "stop": self.listen_stop,
@@ -886,9 +1030,174 @@ class AppHost:
         task = self._toggling = asyncio.ensure_future(run())
         self.track(task)
         if action == "stop":
+            await asyncio.sleep(0)  # its first step: the state says "stopping" by the time this returns
             return action
         await asyncio.wait({task})  # the work isn't cancelled if this is
         return "error" if self.status == "error" else action
+
+    async def meeting_start(self) -> MeetingAction | None:
+        """Start a meeting: every Start button (the window, the menu bar, the floating button, the Spotlight
+        launcher, a link) comes here. Manual: listening starts with the meeting open at once. Automatic:
+        listening starts and the meeting opens on the first speech, as always. After a problem, a restart
+        as Start does then; paused, Resume. Returns what it did (:meth:`_carry_out`), ``None`` for nothing."""
+        return await self._carry_out(self.meeting_action("start"))
+
+    async def meeting_stop(self) -> MeetingAction | None:
+        """Stop: the meeting in progress is wrapped up (summary, notes, pushes) and the microphone and
+        meeting audio are let go. Returns ``"stop"`` at once (the wrap-up goes on in the background), or
+        ``None`` when nothing is recorded."""
+        return await self._carry_out(self.meeting_action("stop"))
+
+    async def meeting_toggle(self) -> MeetingAction | None:
+        """The keyboard shortcut (and ``voicestream://meeting/toggle``): start when stopped; after a
+        problem, restart as Start does then; stop when listening — the meeting in progress is wrapped up
+        and its notes written, as with Stop, but nobody is asked first (you pressed it on purpose, maybe
+        in another app); resume when paused. Returns what it did, as :meth:`meeting_start` does."""
+        return await self._carry_out(self.meeting_action("toggle"))
+
+    async def listen_toggle(self) -> MeetingAction | None:
+        """The shortcut's earlier name: :meth:`meeting_toggle`."""
+        return await self.meeting_toggle()
+
+    async def meeting_keep(self) -> bool:
+        """The answer "Keep" to "Still in a meeting?" (:attr:`still_there`): the meeting goes on and its
+        silence counts start over. Returns whether a meeting was there to keep."""
+        a = self._assistant
+        # only a meeting started by hand is asked: always-on meetings end on a silence by design
+        kept = a is not None and a.manual and not self._stop_requested and a.keep_meeting()
+        if self.still_there is not None:
+            self.still_there = None
+            self._publish_state()
+        return kept
+
+    async def end_meeting(self) -> MeetingAction | Literal["end"] | None:
+        """The menu bar's "End meeting now". A meeting started by hand: the same as :meth:`meeting_stop`
+        (listening ends with it). Automatic: the meeting ends (summary, notes, pushes) in the background
+        and listening goes on, the next speech starting the next one (``"end"``). ``None``: no meeting."""
+        a = self._assistant
+        if a is None or self._stop_requested or self._closing or not self.in_meeting():
+            return None
+        if a.manual:
+            return await self.meeting_stop()
+        task = asyncio.ensure_future(a.end_meeting("manual"))
+        a.track(task)  # so a stop waits for it
+        return "end"
+
+    # ------------------------------------------------------------- suggestions
+
+    def suggest_meeting(self, app_name: str | None = None, call_id: str | None = None) -> bool:
+        """(On the loop.) The native shell: another app started using the microphone — a call, most likely
+        (``app_name``: which one, if it could tell). Unless something is recorded already, the setup isn't
+        done or suggestions are off (``prefs.call_suggestions``), the window and the floating button
+        suggest taking notes (:attr:`suggestion`); never more than once for the same call: ``call_id``
+        when the shell can tell calls apart, else the app's name, until :meth:`call_ended` (or after
+        :data:`CALL_MEMORY_S`). It never starts anything. Returns whether it is suggested."""
+        if self._closing or not self.prefs.call_suggestions or not self.prefs.setup_done:
+            return False
+        if self.status in ("starting", "listening", "paused"):
+            return False  # recording already, or about to
+        name = _app_name(app_name)
+        key = self._call_key(call_id, name)
+        now = self.wall()
+        self._suggested = {k: t for k, t in self._suggested.items() if now - t < CALL_MEMORY_S}
+        if key in self._suggested:
+            return False
+        self._suggested[key] = now
+        self._suggestion_key = key
+        self.suggestion = {"app": name, "at": utcnow().isoformat()}
+        log.info("a call seems to have started%s: suggesting to take notes", f" ({name})" if name else "")
+        self._publish_state()
+        return True
+
+    @staticmethod
+    def _call_key(call_id: str | None, name: str | None) -> str:
+        return (str(call_id or "").strip()[:200] or (name or "").lower()) or "?"
+
+    def call_ended(self, app_name: str | None = None, call_id: str | None = None) -> None:
+        """(On the loop.) The native shell: that app stopped using the microphone (with neither, every app
+        did). Its suggestion, if still shown, is taken down, and its next call may be suggested again."""
+        if app_name is None and call_id is None:
+            self._suggested.clear()
+            gone = self.suggestion is not None
+        else:
+            key = self._call_key(call_id, _app_name(app_name))
+            self._suggested.pop(key, None)
+            gone = self.suggestion is not None and self._suggestion_key == key
+        if gone:
+            self._withdraw_suggestion()
+            self._publish_state()
+
+    def _withdraw_suggestion(self) -> bool:
+        had = self.suggestion is not None
+        self.suggestion, self._suggestion_key = None, None
+        return had
+
+    async def suggestion_accept(self) -> MeetingAction | None:
+        """"Start" on the suggestion: :meth:`meeting_start` (also when it was taken down meanwhile: starting
+        is what was asked)."""
+        self._withdraw_suggestion()
+        action = await self.meeting_start()
+        if action is None:
+            self._publish_state()  # nothing started (one is recorded already): the suggestion still goes away
+        return action
+
+    def suggestion_dismiss(self) -> bool:
+        """(On the loop.) "Not now": the suggestion goes away; this call isn't suggested again."""
+        if not self._withdraw_suggestion():
+            return False
+        self._publish_state()
+        return True
+
+    def dismiss_notice(self) -> bool:
+        """(On the loop.) The page or the floating button showed :attr:`notice`: it goes away."""
+        if self.notice is None:
+            return False
+        self.notice = None
+        self._publish_state()
+        return True
+
+    def request_focus(self, target: Literal["start"] = "start") -> None:
+        """(On the loop.) The native shell showed the window because you opened Voicestream again (from
+        Spotlight, the Dock…): the page puts the keyboard focus on the Start control (event ``app.focus``)."""
+        self.bus.publish("app.focus", target=target)
+
+    # ------------------------------------------------------------------- links
+
+    def launcher_url(self) -> str:
+        """(On the loop.) The link the Spotlight launcher opens to start a meeting, with the key that lets
+        it (made and saved the first time). For the native shell only: never logged, never in the state."""
+        self.prefs = with_url_key(self.prefs, self.prefs_path)
+        return f"{URL_SCHEME}://meeting/start?key={self.prefs.url_key}"
+
+    def _key_ok(self, given: str | None) -> bool:
+        expected = self.prefs.url_key
+        if not expected or not given:
+            return False
+        return hmac.compare_digest(given.encode("utf-8"), expected.encode("utf-8"))  # in constant time
+
+    async def open_url(self, url: str) -> str:
+        """A ``voicestream://`` link the native shell was asked to open (the Spotlight launcher, a Shortcut,
+        a link clicked somewhere). ``meeting/start`` and ``meeting/toggle`` must carry the key (``?key=``,
+        see :meth:`launcher_url`): any app or web page can open a link, and must not be able to start a
+        recording. ``meeting/stop`` and ``open`` need none: they can't record anything.
+
+        Returns the outcome: what the meeting action did (``start``, ``restart``, ``resume``, ``stop``,
+        ``error``), ``nothing`` (nothing to do), ``open`` (the shell shows the window), ``refused`` (no key,
+        or not this one: :attr:`notice` says so) or ``unknown`` (not a link Voicestream knows)."""
+        parsed = parse_url(url)
+        if parsed is None:
+            log.info("ignored a voicestream link this version doesn't know")
+            return "unknown"
+        action, given = parsed
+        if action == "open":
+            return "open"
+        if action in KEYED_ACTIONS and not self._key_ok(given):
+            log.info("ignored a link that asked to start recording without Voicestream's key")
+            self.notice = {"kind": "link_refused", "at": utcnow().isoformat()}
+            self._publish_state()
+            return "refused"
+        run = {"start": self.meeting_start, "stop": self.meeting_stop, "toggle": self.meeting_toggle}[action]
+        return await run() or "nothing"
 
     async def _apply_pending(self) -> None:
         await asyncio.sleep(0)  # after the rest of the meeting.ended listeners
@@ -921,10 +1230,16 @@ class AppHost:
         if self._assistant is None or self._stop_requested or self._closing:
             # not listening — or you pressed Stop and it is wrapping up: the next start reads the new
             # settings anyway, and restarting here would turn the microphone back on after your Stop
-            if not self._closing and (self._start_when_ready or (self.status == "error" and not self.config_error)):
+            failed = self.status == "error" and not self.config_error
+            if not self._closing and (self._start_when_ready or (failed and self.prefs.meeting_start == "automatic")):
                 # the fix for the failed start may be this very change (or the model waited for changed): try again
                 coro = self.listen_start()
             else:
+                if failed and self._assistant is None and not self._closing:
+                    # meetings start by hand: none starts by itself, but this change may be the fix the
+                    # problem shown needs, so it is checked again (Start says the rest)
+                    problem = self._checked_preflight()
+                    self.status, self.error = ("error", problem) if problem else ("stopped", None)
                 self._publish_state()
                 return {"restarting": False, "restart_pending": False}
         elif self._unusable_settings() is not None:
@@ -944,7 +1259,9 @@ class AppHost:
     # ------------------------------------------------------------------- prefs
 
     def update_prefs(self, changes: dict[str, Any]) -> Prefs:
-        """Validate and save preference changes; launch-at-login goes through the native shell."""
+        """Validate and save preference changes (the page's ``PATCH /api/prefs``, the native shell: the
+        floating button's place…); launch-at-login goes through the native shell. A new way of starting
+        meetings applies to the listening in progress at once (:meth:`_apply_mode`)."""
         if "start_at_login" in changes and changes["start_at_login"] is not None:
             hook = getattr(self.native_hooks, "set_start_at_login", None)
             if hook is not None:
@@ -952,12 +1269,25 @@ class AppHost:
                     hook(bool(changes["start_at_login"]))
                 except Exception as exc:  # noqa: BLE001 - e.g. needs approval in System Settings
                     raise HostError(f"could not change launch at login: {exc}") from None
+        mode = self.prefs.meeting_start
         self.prefs = update_prefs(changes, self.prefs_path, layout=self.keyboard_layout)
         if "hotkey" in changes:
             # the shell registers it when it sees this state (the same one again: it tries again, as
             # one macOS refused may be free now), then says whether macOS took it
             self.hotkey = {"status": "pending", "error": None}
             self._end_hotkey_recording()
+        if not self.prefs.call_suggestions:
+            self._withdraw_suggestion()
+        a = self._assistant
+        if a is not None and not self._stop_requested:
+            # the new way (and silence thresholds) apply to the meeting in progress too: to manual, it
+            # becomes the one this listening records; to automatic, listening goes on after it
+            self._apply_mode(a)
+            if self.prefs.meeting_start != mode and a.manual and not self.in_meeting():
+                # nothing may be captured without a meeting started by hand: always-on listening stops
+                self.track(asyncio.ensure_future(self.listen_stop()))
+        if self.prefs.meeting_start != "manual":
+            self.still_there = None
         self._publish_state()
         return self.prefs
 
@@ -1144,7 +1474,9 @@ class AppHost:
                 watch(lambda: loop.call_soon_threadsafe(self.audio_devices_changed))
             except Exception as exc:  # noqa: BLE001 - the periodic look still finds the microphone
                 log.debug("no audio device notifications: %s", exc)
-        if self.prefs.setup_done and self.prefs.listen_on_launch and not self.config_error:
+        p = self.prefs
+        # manual: nothing is captured until you start a meeting, whatever listen_on_launch says
+        if p.setup_done and p.meeting_start == "automatic" and p.listen_on_launch and not self.config_error:
             await self.listen_start()
         else:
             self._publish_state()

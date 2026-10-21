@@ -389,7 +389,9 @@ def test_setup_and_prefs(client: TestClient, host: AppHost) -> None:
     assert body["ui_language"] == "fr" and body["listen_on_launch"] is False
     assert client.get("/api/app").json()["prefs"] == {
         "listen_on_launch": False, "start_at_login": False, "ui_language": "fr",
-        "hotkey": {"code": "KeyR", "mods": ["alt", "cmd"], "key": "R"}, "hotkey_sound": True}  # fmt: skip
+        "hotkey": {"code": "KeyR", "mods": ["alt", "cmd"], "key": "R"}, "hotkey_sound": True,
+        "meeting_start": "manual", "floating_button": True, "floating_position": None, "spotlight_launcher": True,
+        "call_suggestions": True, "silence_ask_minutes": 15, "silence_end_minutes": 60}  # fmt: skip
     for bad in ({"ui_language": "de"}, {"setup_done": False}, {"listen_on_launch": "maybe"}):
         assert client.patch("/api/prefs", json=bad).status_code == 400
 

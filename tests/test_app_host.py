@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import logging
 import os
 import sys
@@ -111,8 +112,20 @@ def _factory(sources: Callable[[], list[AudioSource]] | None = None, built: list
     return make
 
 
-def _host(tmp_path: Path, idle: float = 10, factory: Callable[[AppHost], Assistant] | None = None, **kw: Any) -> AppHost:
-    return AppHost(_write_config(tmp_path, idle), process_setup=False, prefs_path=tmp_path / "app.json",
+def _prefs(tmp_path: Path, mode: str | None, **prefs: Any) -> Path:
+    """The app's preferences file for a test: meetings start ``mode`` (``None``: the default, manual).
+    Written once: a second host in the same test (the app opened again) reads what the first one saved."""
+    path = tmp_path / "app.json"
+    if not path.exists() and (mode is not None or prefs):
+        path.write_text(json.dumps({**({"meeting_start": mode} if mode else {}), **prefs}), encoding="utf-8")
+    return path
+
+
+def _host(tmp_path: Path, idle: float = 10, factory: Callable[[AppHost], Assistant] | None = None,
+          mode: str | None = "automatic", **kw: Any) -> AppHost:
+    """A host on fake capture. Meetings start automatically unless ``mode`` says otherwise: most tests
+    here were written for always-on listening, which stays as it was; manual mode has its own tests."""
+    return AppHost(_write_config(tmp_path, idle), process_setup=False, prefs_path=_prefs(tmp_path, mode),
                    assistant_factory=factory or _factory(), **kw)
 
 
