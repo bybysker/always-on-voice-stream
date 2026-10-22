@@ -13,7 +13,10 @@ is written while the setting is on, rewritten when the key, the app's place or t
 changes, and removed when the setting is turned off. Everything here is a function of the folder
 it is given (tests use a temporary one); only :func:`applications_dir` names the real one. The
 bundle is written by the app itself, so it carries no quarantine and Gatekeeper has nothing to
-ask; it is not signed, and needs not be: its executable is a script ``/bin/sh`` runs.
+ask; it is not signed, and needs not be: its executable is a script ``/bin/sh`` runs. Its Info.plist
+says it runs as arm64 (``LSArchitecturePriority``): a bundle with no binary in it is otherwise taken for
+an Intel app on Apple Silicon, and a Mac without Rosetta asks to install it instead of starting a meeting.
+If that ever proves not enough, the fix is a tiny ad-hoc-signed arm64 executable that runs the script.
 
 A launcher is recognised by its Info.plist (:data:`LAUNCHER_ID` and :data:`MARK`), never by its
 name alone: a folder of the same name that isn't ours is left as it is.
@@ -108,6 +111,10 @@ def info_plist(name: str, version: str, *, icon: bool) -> dict[str, Any]:
         "CFBundleShortVersionString": version,
         "CFBundleVersion": version,
         "LSUIElement": True,  # no Dock icon, no menu bar of its own: it opens a link and is gone
+        # its executable is a script, no arm64 binary: without this, an Apple Silicon Mac without Rosetta takes it
+        # for an Intel app and asks to install Rosetta. Launch Services caches that verdict for the bundle id, so
+        # it must be there from the first launcher written (one launched without it needs another LAUNCHER_ID)
+        "LSArchitecturePriority": ["arm64"],
         "LSMinimumSystemVersion": MIN_MACOS,
         "NSHumanReadableCopyright": "Voicestream — MIT licence",
         MARK: FORMAT,
@@ -248,6 +255,7 @@ def check(bundle: Path, run: Callable[..., Any] = subprocess.run) -> dict[str, A
         "plist": bool(info) and info.get("CFBundlePackageType") == "APPL",
         "ours": is_ours(bundle),
         "background_only": info.get("LSUIElement") is True,
+        "native": info.get("LSArchitecturePriority") == ["arm64"],  # not taken for an Intel app (Rosetta)
         "executable": exe.is_file() and os.access(exe, os.X_OK),
         "script": text.startswith("#!/bin/sh\n") and "/usr/bin/open -g" in text and LINK_PREFIX in text,
         "private": os.name != "posix" or (exe.is_file() and exe.stat().st_mode & 0o077 == 0),

@@ -58,7 +58,10 @@ class FakeHost:
         self.start_fails = False  # a press's start goes to the error state
 
     # --- the contract
-    def run_in_thread(self) -> str:
+    auto_listen: bool | None = None  # what run_in_thread was asked: listen at launch, or leave it to the shell
+
+    def run_in_thread(self, *, auto_listen: bool = True) -> str:
+        self.auto_listen = auto_listen
         if self.fail is not None:
             raise self.fail
         self.thread.start()
@@ -105,6 +108,10 @@ class FakeHost:
 
     async def listen_start(self) -> None:
         self.calls.append(("listen_start", None))
+
+    async def listen_on_launch(self) -> bool:
+        self.calls.append(("listen_on_launch", None))
+        return False
 
     async def listen_pause(self) -> None:
         self.calls.append(("listen_pause", None))
@@ -492,6 +499,9 @@ def test_state_line_in_both_languages() -> None:
     assert native.state_line(_state("stopped", mode="manual"), "en", NOW) == "No meeting in progress"
     assert native.state_line(_state("stopped", mode="manual"), "fr", NOW) == "Aucune réunion en cours"
     assert native.state_line(_state("stopping", mode="manual"), "en", NOW) == "Saving the meeting…"
+    # « Enregistrement » is the app's French for Recording: just after Stop it would read as still recording
+    assert native.state_line(_state("stopping", mode="manual"), "fr", NOW) == "Finalisation de la réunion…"
+    assert native.state_line(_state("listening"), "fr", NOW, quitting=True) == "Fermeture — finalisation de la réunion…"
     assert native.state_line(_state("listening", minutes=3, mode="manual"), "en", NOW) == "Meeting in progress · 3 min"
     assert native.state_line({"state": "stopped"}, "en", NOW) == "No meeting in progress"  # manual: the default
 
@@ -549,9 +559,14 @@ def test_menu_model() -> None:
         assert paused["listen"].modifiers == hotkey.APPKIT_MODIFIERS["cmd"]  # NSMenuItem's default, with no key
     listening = _menu(_state("listening", minutes=4, **shortcut))
     assert listening["pause"].shortcut == "" and listening["listen"].shortcut == "r"  # listening: a press stops
-    for st in ("stopped", "error", "starting", "stopping", "listening"):
+    for st in ("stopped", "error", "listening"):
         assert native.shortcut_entry(_state(st)) == "listen"
     assert native.shortcut_entry(_state("paused")) == "pause"
+    # starting or wrapping up, a press stops nothing: next to Stop, the shortcut would say it does
+    for st in ("starting", "stopping"):
+        assert native.shortcut_entry(_state(st)) is None
+        entries = _menu(_state(st, **shortcut))
+        assert entries["listen"].shortcut == "" and entries["pause"].shortcut == ""
 
 
 def test_menu_model_when_meetings_start_by_hand() -> None:
@@ -675,6 +690,27 @@ def test_closing_the_window_hides_it_and_the_dock_icon(host: FakeHost, appkit: R
     assert shell.window.native.names()[-1] == "makeKeyAndOrderFront_"
     shell.quitting = True
     assert shell._on_closing() is None  # pywebview's own quit (no delegate of ours) needs it to really close
+
+
+def test_reopening_the_window_already_showing_leaves_the_page_as_it_is(host: FakeHost, appkit: Recorder) -> None:
+    """A Dock click back into a window already on screen (or Open Voicestream from a menu or the floating button)
+    only brings it forward: sending the page to Live would drop a to-do being edited there. Closed, hidden with the
+    app or minimised, it comes back on Live with its Start control focused. The main window itself is looked at:
+    the floating panel is a visible window too, so the delegate's has_visible says nothing of it."""
+    host.thread.start()
+    shell = _shell(host)
+    shell.window = types.SimpleNamespace(native=Recorder(isVisible=True, isMiniaturized=False))
+    shell.reopened()
+    shell.on_menu("open")
+    shell.on_floating("open")
+    assert shell.window.native.names().count("makeKeyAndOrderFront_") == 3  # brought forward each time
+    time.sleep(0.1)
+    assert ("request_focus", "start") not in host.calls
+    for window in (Recorder(isVisible=False, isMiniaturized=False), Recorder(isVisible=True, isMiniaturized=True)):
+        host.calls.clear()
+        shell.window = types.SimpleNamespace(native=window)
+        shell.reopened()
+        assert _wait(lambda: host.calls == [("request_focus", "start")])
 
 
 def test_closing_the_window_while_our_delegate_wraps_up_a_quit_only_hides_it(
@@ -877,6 +913,102 @@ def test_app_delegate_is_a_subclass_with_the_runtime_encodings(host: FakeHost, p
     assert _wait(lambda: ("request_focus", "start") in host.calls)
 
 
+class FakeMenuItem:
+    """NSMenuItem: what was set on it (``setFoo_(v)`` keeps ``foo``), and the getters the shell reads."""
+
+    def __init__(self, title: str = "", action: Any = None, key: str = "", separator: bool = False) -> None:
+        self.values: dict[str, Any] = {"title": title, "action": action, "keyEquivalent": key}
+        self.separator = separator
+
+    @classmethod
+    def alloc(cls) -> Any:
+        return types.SimpleNamespace(initWithTitle_action_keyEquivalent_=lambda t, a, k: cls(t, a, k))
+
+    @classmethod
+    def separatorItem(cls) -> Any:
+        return cls(separator=True)
+
+    def title(self) -> str:
+        return self.values["title"]
+
+    def representedObject(self) -> Any:
+        return self.values.get("representedObject")
+
+    def isSeparatorItem(self) -> bool:
+        return self.separator
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("set") and name.endswith("_") and name.count("_") == 1:
+            key = name[3].lower() + name[4:-1]
+            return lambda value: self.values.__setitem__(key, value)
+        raise AttributeError(name)
+
+
+class FakeMenu(FakeMenuItem):
+    """NSMenu: its items, in order."""
+
+    def __init__(self, title: str = "") -> None:
+        super().__init__(title)
+        self.items: list[Any] = []
+
+    @classmethod
+    def alloc(cls) -> Any:
+        return types.SimpleNamespace(initWithTitle_=lambda t: cls(t))
+
+    def addItem_(self, item: Any) -> None:
+        self.items.append(item)
+
+    def itemArray(self) -> list[Any]:
+        return list(self.items)
+
+    def indexOfItem_(self, item: Any) -> int:
+        return self.items.index(item) if item in self.items else -1
+
+
+def test_the_meeting_menu_is_in_the_menu_bar_and_follows_the_state(host: FakeHost, pyobjc: Any, appkit: Recorder,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real _create_meeting_menu and render() on stand-ins for NSMenu/NSMenuItem: the menu is added to the app's
+    menu bar with the Meeting entries (not the status item's), and render() keeps them enabled, hidden and with the
+    shortcut as meeting_menu_model says — _new_menu sets none of that, so without it every item stays enabled,
+    End Meeting Now shows in manual mode and the shortcut stays where it was first put."""
+    main = FakeMenu("Main")
+    appkit.returns["mainMenu"] = main
+    monkeypatch.setitem(sys.modules, "AppKit", types.SimpleNamespace(NSApplication=sys.modules["AppKit"].NSApplication,
+                                                                    NSMenu=FakeMenu, NSMenuItem=FakeMenuItem))
+    host.thread.start()
+    shell = _shell(host)
+    hk = {"prefs": {"ui_language": "auto", "floating_button": True,
+                    "hotkey": {"code": "KeyR", "mods": ["alt", "cmd"], "key": "R"}},
+          "hotkey": {"status": "ok"}, "setup_done": True, "capabilities": {"floating_button": True}}
+    shell.state = _state("stopped", mode="manual", **hk)
+    shell._create_meeting_menu()
+    (holder,) = main.items
+    menu = holder.values["submenu"]
+    assert holder.title() == menu.title() == "Meeting" and menu.values["autoenablesItems"] is False
+    keys = [e.key for e in native.meeting_menu_model(shell.state, "en")]
+    assert [i.representedObject() if not i.separator else "sep_m" for i in menu.items] == keys
+    entries = {i.representedObject(): i.values for i in menu.items if not i.separator}
+    shell.state = _state("listening", minutes=1, mode="manual", **hk)
+    shell.render()  # no status item here: the Meeting menu is still updated
+    assert entries["m_stop"]["enabled"] is True and entries["m_start"]["enabled"] is False
+    assert entries["m_end"]["hidden"] is True and entries["m_pause"]["hidden"] is False  # manual: End would be Stop
+    assert (entries["m_stop"]["keyEquivalent"], entries["m_start"]["keyEquivalent"]) == ("r", "")  # a press stops
+    shell.state = _state("paused", minutes=1, mode="manual", **hk)
+    shell.render()
+    assert entries["m_pause"]["title"] == "Resume Meeting" and entries["m_pause"]["keyEquivalent"] == "r"
+    shell.lang = "fr"  # changed in Settings
+    shell.render()
+    assert holder.title() == menu.title() == "Réunion" and entries["m_stop"]["title"] == "Arrêter la réunion"
+    # what the self-test reads of it
+    info = shell._meeting_menu_info()
+    assert info == {"created": True, "in_menu_bar": True, "title": "Réunion",
+                    "entries": [k for k in keys if not k.startswith("sep")]}
+    shell._target.menuAction_(types.SimpleNamespace(representedObject=lambda: "m_stop"))  # a click on it
+    assert _wait(lambda: ("meeting_stop", None) in host.calls)
+    main.items.clear()  # pywebview built the menu bar again without it
+    assert shell._meeting_menu_info()["in_menu_bar"] is False
+
+
 def test_the_delegate_is_in_place_before_the_window_opens(host: FakeHost, pyobjc: Any) -> None:
     host.thread.start()
     shell = native.MacShell(host, f"http://127.0.0.1:1/app?token={TOKEN}")
@@ -887,7 +1019,9 @@ def test_the_delegate_is_in_place_before_the_window_opens(host: FakeHost, pyobjc
     ((name, (target, selector, notification, _obj)),) = pyobjc.center.calls
     assert (name, selector, notification, target.shell) == ("addObserver_selector_name_object_", "appWillTerminate:",
                                                           "NSApplicationWillTerminateNotification", shell)
-    assert host.calls == [("shutdown", False)]  # the run loop stopped without AppKit ending the process
+    # asked to listen as it launched (no link launched it), then stopped: the run loop ended without AppKit ending
+    # the process
+    assert _wait(lambda: host.calls == [("listen_on_launch", None), ("shutdown", False)])
 
 
 def test_a_failed_delegate_install_is_reported_and_quitting_still_works(
@@ -1101,11 +1235,17 @@ def test_a_press_toggles_listening_and_plays_a_sound(host: FakeHost, appkit: Rec
         shell.on_hotkey()  # from Carbon's handler, on the main thread: only posts to the host
         assert _wait(lambda s=sound, n=before: len(played) == n + 1 and played[-1] == s)
     assert [c for c in host.calls if c[0] == "meeting_toggle"] == [("meeting_toggle", None)] * 4
-    host._state["state"] = "starting"  # nothing to do: no sound either
+    host._state["state"] = "starting"  # a start is under way: nothing to do, no sound either
     shell.on_hotkey()
     assert _wait(lambda: len([c for c in host.calls if c[0] == "meeting_toggle"]) == 5)
     time.sleep(0.1)
     assert len(played) == 4
+    # the last meeting is being wrapped up and the host could start nothing (it says None): a press meant to
+    # start the next one is not lost in silence — the failure sound, so you know to press again
+    host._state["state"] = "stopping"
+    shell.on_hotkey()
+    assert _wait(lambda: len(played) == 5 and played[-1] == "Basso")
+    del played[-1]
     host._state["state"] = "stopped"
     shell.state = _hk_state("stopped", status="ok", sound=False)  # turned off in Settings
     shell.on_hotkey()
@@ -1161,6 +1301,12 @@ def test_the_selftest_presses_the_shortcut_without_listening(host: FakeHost, app
     info = shell._hotkey_info()
     assert info["menu"]["entry"] == "pause" and info["in_menu"] is True
     pause.returns["keyEquivalent"] = ""  # still next to Stop listening instead
+    listen.returns["keyEquivalent"] = "r"
+    assert shell._hotkey_info()["in_menu"] is False
+    listen.returns["keyEquivalent"] = ""
+    # starting, a press does nothing: the menu must show the shortcut nowhere
+    shell.state = _hk_state("starting", status="ok")
+    assert shell._hotkey_info()["in_menu"] is True
     listen.returns["keyEquivalent"] = "r"
     assert shell._hotkey_info()["in_menu"] is False
     listen.returns["keyEquivalent"] = ""
@@ -1451,6 +1597,7 @@ def test_app_location_problems(monkeypatch: pytest.MonkeyPatch, mac: None, tmp_p
 def test_menu_bar_starts_from_a_fresh_state(host: FakeHost, monkeypatch: pytest.MonkeyPatch) -> None:
     """Listening may start while the window opens: the menu bar reads the state again when it appears,
     and a failure to create the icon never takes the window down."""
+    host.thread.start()  # it also asks the host to listen at launch
     shell = _shell(host)
     shell.state = _state("stopped")
     host._state = _state("listening", minutes=1)
@@ -1463,6 +1610,7 @@ def test_menu_bar_starts_from_a_fresh_state(host: FakeHost, monkeypatch: pytest.
     monkeypatch.setattr(shell, "apply_state", lambda st: applied.append(st["state"]))
     shell._start_menu_bar()
     assert applied == ["listening"]
+    assert _wait(lambda: ("listen_on_launch", None) in host.calls)  # done before the host's loop is stopped
 
 
 def test_half_installed_native_mode_falls_back_to_the_browser(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1578,6 +1726,42 @@ def test_the_floating_button_follows_the_state(host: FakeHost, appkit: Recorder,
     assert "⌥⌘R" not in shell._panel_model().buttons[0].tooltip
 
 
+def test_a_hidden_floating_button_appears_for_a_question_then_goes(host: FakeHost, appkit: Recorder,
+                                                                   panels: list[FakeFloatingPanel]) -> None:
+    """Hidden (the setting off) and the window closed, a call suggestion or "Still in a meeting?" would be shown
+    nowhere: the floating button shows it alone, then goes once it is answered or withdrawn — or hidden again."""
+    host.thread.start()
+
+    def st(*args: Any, on: bool = False, **kw: Any) -> dict[str, Any]:
+        return _manual(*args, capabilities={"floating_button": True}, prefs={"floating_button": on}, **kw)
+
+    shell = _shell(host)
+    shell._launched = True
+    shell.apply_state(st())
+    assert panels == []  # hidden, nothing to ask
+    zoom = st(suggestion={"app": "Zoom", "at": "t1"})
+    shell.apply_state(zoom)
+    (panel,) = panels
+    assert panel.updates[-1][0] == "suggestion"
+    shell.apply_state(st())  # answered, dismissed or the call ended
+    assert panel.updates[-1][0] is None
+    shell.apply_state(zoom)
+    shell.on_floating("hide")  # its menu's Hide Floating Button, the setting already off: gone for this one
+    assert panel.updates[-1][0] is None
+    assert _wait(lambda: ("update_prefs", {"floating_button": False}) in host.calls)
+    shell.apply_state(zoom)
+    assert panel.updates[-1][0] is None
+    shell.apply_state(st(suggestion={"app": "Microsoft Teams", "at": "t2"}))  # the next call is asked about
+    assert panel.updates[-1][0] == "suggestion"
+    # shown by the setting, hidden from the menu bar while a nudge is up: gone, not kept up by the nudge
+    nudge = {"meeting_id": "m1", "silent_minutes": 15, "ends_at": "t3"}
+    shell.apply_state(st("listening", minutes=20, on=True, still_there=nudge))
+    assert panel.updates[-1][0] == "still_there"
+    shell.on_menu("m_floating")
+    shell.apply_state(st("listening", minutes=20, still_there=nudge))
+    assert panel.updates[-1][0] is None
+
+
 def test_floating_button_clicks_go_through_the_host_actions(host: FakeHost, appkit: Recorder) -> None:
     host.thread.start()
     shell = _shell(host)
@@ -1644,11 +1828,23 @@ def test_links_reach_the_host_and_say_what_they_did(host: FakeHost, appkit: Reco
     shell.open_url("voicestream://open")
     assert _wait(lambda: ("request_focus", "start") in host.calls)
     host.url_outcome = "nothing"
-    shell.open_url("voicestream://meeting/toggle?key=x")
+    shell.open_url("voicestream://meeting/stop")  # nothing to stop: nothing to say
+    host._state["state"] = "listening"
+    shell.open_url(link)  # a meeting is recorded already: no start was missed
+    host._state["state"] = "starting"
+    shell.open_url(f"voicestream://meeting/toggle?key={host.url_key}")  # one is starting
     shell.on_url_event(Descriptor(None))  # an event without a link: given to the host as nothing
     assert _wait(lambda: host.calls[-1] == ("open_url", ""))
     time.sleep(0.1)
     assert len(sounds) == 3
+    # a start that did nothing where nothing is recorded — the last meeting being wrapped up, the app quitting —:
+    # the failure sound, as the README says, not silence that passes for a meeting being recorded
+    for state, url in (("stopping", link), ("stopped", f"voicestream://meeting/toggle?key={host.url_key}"),
+                       ("error", link)):
+        host._state["state"] = state
+        before = len(sounds)
+        shell.open_url(url)
+        assert _wait(lambda n=before: len(sounds) == n + 1 and sounds[-1] == "Basso"), state
 
 
 def test_the_selftest_link_is_only_asked_about(host: FakeHost, appkit: Recorder) -> None:
@@ -1783,13 +1979,16 @@ def test_calls_are_watched_only_while_nothing_is_recorded(host: FakeHost, appkit
     assert w.starts == [False] and _wait(lambda: ("call_ended", (None, None)) in host.calls)  # the host forgets old calls
     shell._sync_calls()
     assert w.starts == [False]  # once
-    for current in ("starting", "listening", "paused", "stopping"):
+    for current in ("starting", "listening", "paused"):
         shell.state = st(current, minutes=1)
         shell._sync_calls()
         assert not w.running
+    shell.state = st("stopping")  # Stop: watched again while the meeting is wrapped up
+    shell._sync_calls()
+    assert w.running and w.starts == [False, True]  # after a recording: the call recorded isn't new
     shell.state = st()
     shell._sync_calls()
-    assert w.starts == [False, True]  # after a recording: the call recorded isn't new
+    assert w.starts == [False, True]  # the same watch goes on once it is wrapped up
     shell.state = st(prefs={"call_suggestions": False})
     shell._sync_calls()
     assert not w.running
@@ -1813,6 +2012,94 @@ def test_calls_are_watched_only_while_nothing_is_recorded(host: FakeHost, appkit
     w.on_start(calls.Call("zoom", "Zoom", "us.zoom.xos", 501))
     time.sleep(0.1)
     assert len(host.calls) == 2
+
+
+class FakeClock:
+    now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class SteppedWatcher(calls.CallWatcher):
+    """The real watcher, its thread replaced by the looks the test takes, on a fake clock."""
+
+    def start(self, *, baseline: bool) -> None:
+        if self.running:
+            return
+        self.reset(baseline=baseline)
+        self._stop = threading.Event()
+        self._thread = threading.current_thread()  # "alive": running until stopped
+
+    def looks(self, seconds: float) -> None:
+        end = self.clock() + seconds
+        while self.clock() < end:
+            if self.running:
+                self.step(self._stop)
+            self.clock.now += 2.0  # type: ignore[attr-defined]
+
+
+def test_a_call_that_starts_while_the_last_meeting_is_wrapped_up_is_suggested(
+        host: FakeHost, appkit: Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Back-to-back calls: Stop on meeting A, and B begins during A's wrap-up (tens of seconds, minutes with an agent
+    at work). The calls under way are taken as known when Stop is pressed — the one just recorded is not new —, not
+    when the wrap-up ends, which swallowed B; and not when the recording started either, or a call joined after
+    pressing Start would be suggested the moment you stop."""
+    def st(*args: Any, **kw: Any) -> dict[str, Any]:
+        return _manual(*args, capabilities={"call_detection": True}, **kw)
+
+    class FakeProbe:
+        running, caps = False, ()
+
+        def device_running(self) -> bool:
+            return self.running
+
+        def captures(self) -> tuple[calls.Capture, ...]:
+            return self.caps
+
+    probe = FakeProbe()
+    made: list[SteppedWatcher] = []
+
+    def make(on_start: Any, on_end: Any) -> SteppedWatcher:
+        made.append(SteppedWatcher(on_start=on_start, on_end=on_end, probe=probe, clock=FakeClock()))
+        return made[-1]
+
+    monkeypatch.setattr(native.calls, "CallWatcher", make)
+    host.thread.start()
+    shell = _shell(host)
+    shell._launched = True
+    zoom, teams = calls.Capture(501, "us.zoom.xos"), calls.Capture(777, "com.microsoft.teams2")
+
+    def suggested() -> list[Any]:
+        time.sleep(0.05)
+        return [args for name, args in host.calls if name == "suggest_meeting"]
+
+    for current in ("stopped", "starting", "listening"):
+        shell.apply_state(st(current, minutes=1 if current == "listening" else None))
+    (w,) = made
+    probe.running, probe.caps = True, (zoom,)  # meeting A, recorded
+    w.looks(600)
+    shell.apply_state(st("stopping"))  # Stop: A is wrapped up
+    w.looks(4)
+    probe.caps = ()  # A's call is over
+    w.looks(10)
+    probe.caps = (teams,)  # B begins during the wrap-up
+    w.looks(10)
+    shell.apply_state(st("stopped"))
+    w.looks(120)
+    assert suggested() == [("Microsoft Teams", "microsoft teams")]  # B, once; never A
+
+    # a call still under way when Stop is pressed is the one just recorded: never suggested, through the wrap-up or after
+    host.calls.clear()
+    probe.caps = (zoom,)
+    for current in ("starting", "listening"):
+        shell.apply_state(st(current, minutes=1 if current == "listening" else None))
+    w.looks(60)
+    shell.apply_state(st("stopping"))
+    w.looks(30)
+    shell.apply_state(st("stopped"))
+    w.looks(120)
+    assert suggested() == [] and len(made) == 1
 
 
 def test_calls_are_named_with_what_macos_says(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1943,3 +2230,27 @@ def test_the_native_capabilities(host: FakeHost, monkeypatch: pytest.MonkeyPatch
     caps = host.capabilities
     assert caps["native_window"] and caps["floating_button"] and caps["call_detection"]
     assert caps["spotlight"] is False  # the link needs the packaged app's Info.plist
+    # the shell says when to listen at launch: once it knows no link launched the app (see the test below)
+    assert host.auto_listen is False
+
+
+def test_listening_at_launch_waits_to_know_whether_a_link_launched_the_app(host: FakeHost, appkit: Recorder,
+                                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    """Automatic meetings with "Start listening when Voicestream opens": a voicestream:// link from any web page can
+    launch the app (Safari asks once, Slack or Notes don't), and listening must not start before the link is even
+    looked at — a keyless link may never start a recording. The shell asks the host to listen once the app has
+    launched (any link that launched it arrived by then), and only if none did; at login, or from the Dock, it
+    still listens (the host's listen_on_launch checks the settings)."""
+    host.thread.start()
+    monkeypatch.setattr(native.MacShell, "apply_state", lambda self, st: None)
+    shell = _shell(host)
+    shell._start_menu_bar()  # NSApp is running: no link came
+    assert _wait(lambda: ("listen_on_launch", None) in host.calls)
+    host.calls.clear()
+    linked = _shell(host)
+    host.url_outcome = "refused"
+    linked.open_url("voicestream://meeting/start")  # the link that launched it, delivered as the app finished launching
+    linked._start_menu_bar()
+    assert _wait(lambda: ("open_url", "voicestream://meeting/start") in host.calls)
+    time.sleep(0.1)
+    assert ("listen_on_launch", None) not in host.calls

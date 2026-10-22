@@ -8,20 +8,24 @@ ends the shell says so (:meth:`~voicestream.app.host.AppHost.call_ended`).
 How a call is seen, from Core Audio (``CoreAudio.framework``, through ``ctypes``; reading either
 needs no permission):
 
-* the default input device's ``kAudioDevicePropertyDeviceIsRunningSomewhere``: some process on the
-  Mac is running it. The default device is read again at each look, so switching to AirPods is
-  followed. It is the cheap question, asked every :data:`POLL_S`;
-* only while that device runs, the HAL's process objects (``kAudioHardwarePropertyProcessObjectList``,
-  macOS 14): which processes capture (``kAudioProcessPropertyIsRunningInput``), with their pid and
-  bundle id. That leaves Voicestream's own capture out (its pid) and names the app: Zoom, Microsoft
-  Teams, FaceTime, a browser (a Meet call)… It is read when the device starts running and then at
+* each input device's ``kAudioDevicePropertyDeviceIsRunningSomewhere``: some process on the Mac is
+  running it. Every device with input streams, not only the default: a meeting app may capture from
+  a headset picked in it while the Mac's default input stays the built-in microphone. The devices
+  are listed again at each look, so plugging in AirPods is followed. It is the cheap question, asked
+  every :data:`POLL_S`;
+* only while one of them runs, the HAL's process objects (``kAudioHardwarePropertyProcessObjectList``,
+  macOS 14): which processes capture (``kAudioProcessPropertyIsRunningInput``, from any input), with
+  their pid and bundle id. That leaves Voicestream's own capture out (its pid) and names the app: Zoom,
+  Microsoft Teams, FaceTime, a browser (a Meet call)… It is read when a device starts running and then at
   most every :data:`ATTRIBUTE_S`: each process read makes ``coreaudiod`` run privacy checks for the
   caller, and a poll of every process every second was measured making a dozen of them a second.
 
 A poll rather than a property listener: a listener is called on one of Core Audio's own threads,
 and other apps found that ``kAudioProcessPropertyIsRunningInput`` sends no notification anyway. The
 poll runs on a thread of its own (a Core Audio call can stall while ``coreaudiod`` restarts, which
-must not freeze the menu bar), and only while Voicestream records nothing and suggestions are on.
+must not freeze the menu bar), holding no lock while it asks Core Audio (starting the watcher again,
+on the main thread, never waits for a look under way), and only while Voicestream records nothing and
+suggestions are on.
 
 What counts as a call (:class:`CallWatcher`): an app people hold calls in that keeps capturing for
 :data:`START_AFTER_S` (a quick microphone check is not a call), any other app for
@@ -52,7 +56,7 @@ from . import hotkey
 log = logging.getLogger(__name__)
 
 POLL_S = 2.0
-"""How often the default input device is asked whether it runs."""
+"""How often the input devices are asked whether one runs."""
 ATTRIBUTE_S = 10.0
 """While it runs, how often the processes capturing are read again (see the module's docstring)."""
 START_AFTER_S = 3.0
@@ -150,10 +154,19 @@ SYSTEM_OBJECT = 1
 instance of the AudioSystemObject class"."""
 UNKNOWN_OBJECT = 0  # AudioHardwareBase.h kAudioObjectUnknown = 0: "No object will have an ID whose value is 0"
 SCOPE_GLOBAL = _fourcc(b"glob")  # AudioHardwareBase.h kAudioObjectPropertyScopeGlobal = 'glob'
+SCOPE_INPUT = _fourcc(b"inpt")
+"""AudioHardwareBase.h ``kAudioObjectPropertyScopeInput = 'inpt'``: "The AudioObjectPropertyScope for properties that
+apply to the input side of an object"."""
 ELEMENT_MAIN = 0  # AudioHardwareBase.h kAudioObjectPropertyElementMain = 0 (kAudioObjectPropertyElementMaster before 12.0)
 DEFAULT_INPUT = _fourcc(b"dIn ")
 """AudioHardware.h ``kAudioHardwarePropertyDefaultInputDevice = 'dIn '``: "The AudioObjectID of the default input
 AudioDevice"."""
+DEVICES = _fourcc(b"dev#")
+"""AudioHardware.h ``kAudioHardwarePropertyDevices = 'dev#'``: "An array of the AudioObjectIDs that represent all the
+devices currently available to the system"."""
+STREAMS = _fourcc(b"stm#")
+"""AudioHardwareBase.h ``kAudioDevicePropertyStreams = 'stm#'``: "An array of AudioStreamIDs that represent the
+AudioStreams of the AudioDevice" — asked in the input scope, its input streams: none for speakers."""
 RUNNING_SOMEWHERE = _fourcc(b"gone")
 """AudioHardware.h ``kAudioDevicePropertyDeviceIsRunningSomewhere = 'gone'``: "A UInt32 where 1 means that the
 AudioDevice is running in at least one process on the system and 0 means that it isn't running at all"."""
@@ -217,8 +230,8 @@ def _libs() -> tuple[Any, Any]:
     return _LIBS
 
 
-def _address(selector: int) -> PropertyAddress:
-    return PropertyAddress(selector, SCOPE_GLOBAL, ELEMENT_MAIN)
+def _address(selector: int, scope: int = SCOPE_GLOBAL) -> PropertyAddress:
+    return PropertyAddress(selector, scope, ELEMENT_MAIN)
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,7 +244,7 @@ class Capture:
 
 @dataclass(frozen=True, slots=True)
 class MicUse:
-    """One full look at the microphone (:func:`probe`). ``device_running``: the default input runs in some
+    """One full look at the microphone (:func:`probe`). ``device_running``: an input device runs in some
     process, ours included (``None``: no input device, or it couldn't be read); ``others``: the other
     processes capturing (``None``: this macOS can't say which)."""
 
@@ -240,7 +253,7 @@ class MicUse:
 
     @property
     def in_use(self) -> bool:
-        """Another process is capturing (or, where processes can't be told apart, the default input runs)."""
+        """Another process is capturing (or, where processes can't be told apart, an input device runs)."""
         if self.others is not None:
             return bool(self.others)
         return bool(self.device_running)
@@ -286,34 +299,59 @@ class CoreAudioProbe:
         finally:
             self._cf.CFRelease(ref.value)
 
+    def _size(self, obj: int, selector: int, scope: int = SCOPE_GLOBAL) -> int | None:
+        """A property's size in bytes; ``None`` when Core Audio says no."""
+        size = ctypes.c_uint32(0)
+        err = self._ca.AudioObjectGetPropertyDataSize(obj, ctypes.byref(_address(selector, scope)), 0, None,
+                                                      ctypes.byref(size))
+        return int(size.value) if err == NO_ERR else None
+
+    def _ids(self, obj: int, selector: int, scope: int = SCOPE_GLOBAL) -> list[int] | None:
+        """An array of AudioObjectIDs (devices, processes); ``None`` when Core Audio says no."""
+        size = self._size(obj, selector, scope)
+        if size is None:
+            return None
+        count = size // ctypes.sizeof(ctypes.c_uint32)
+        if count == 0:
+            return []
+        ids = (ctypes.c_uint32 * count)()
+        got = ctypes.c_uint32(ctypes.sizeof(ids))
+        if self._ca.AudioObjectGetPropertyData(obj, ctypes.byref(_address(selector, scope)), 0, None, ctypes.byref(got),
+                                               ids) != NO_ERR:
+            return None
+        return list(ids[: got.value // ctypes.sizeof(ctypes.c_uint32)])
+
     def default_input(self) -> int | None:
         """The default input device's AudioObjectID (``None``: there is none)."""
         device = self._u32(SYSTEM_OBJECT, DEFAULT_INPUT)
         return None if device in (None, UNKNOWN_OBJECT) else device
 
-    def device_running(self) -> bool | None:
-        device = self.default_input()
-        if device is None:
+    def input_devices(self) -> list[int] | None:
+        """Every device with input streams — a microphone: built in, USB, Bluetooth, a webcam's —, the default one
+        or not (``None``: the list couldn't be read)."""
+        devices = self._ids(SYSTEM_OBJECT, DEVICES)
+        if devices is None:
             return None
-        flag = self._u32(device, RUNNING_SOMEWHERE)
-        return None if flag is None else bool(flag)
+        return [d for d in devices if (self._size(d, STREAMS, SCOPE_INPUT) or 0) > 0]
+
+    def device_running(self) -> bool | None:
+        """Some input device runs in some process, ours included (``None``: there is none, or it couldn't be read).
+        Any of them, not only the default: a meeting app may capture from a headset picked in it while the Mac's
+        default input stays the built-in microphone. (The flag isn't for input alone: a headset playing music
+        counts too, which only means its processes are read; who captures is still asked of each one.)"""
+        devices = self.input_devices()
+        if not devices:
+            return None
+        flags = [self._u32(d, RUNNING_SOMEWHERE) for d in devices]
+        if all(f is None for f in flags):
+            return None
+        return any(bool(f) for f in flags)
 
     def _process_objects(self) -> list[int] | None:
         """The HAL's process objects; ``None`` before macOS 14, where there are none to read."""
-        ca, addr = self._ca, _address(PROCESS_LIST)
-        if not ca.AudioObjectHasProperty(SYSTEM_OBJECT, ctypes.byref(addr)):
+        if not self._ca.AudioObjectHasProperty(SYSTEM_OBJECT, ctypes.byref(_address(PROCESS_LIST))):
             return None
-        size = ctypes.c_uint32(0)
-        if ca.AudioObjectGetPropertyDataSize(SYSTEM_OBJECT, ctypes.byref(addr), 0, None, ctypes.byref(size)) != NO_ERR:
-            return None
-        count = size.value // ctypes.sizeof(ctypes.c_uint32)
-        if count == 0:
-            return []
-        ids = (ctypes.c_uint32 * count)()
-        size = ctypes.c_uint32(ctypes.sizeof(ids))
-        if ca.AudioObjectGetPropertyData(SYSTEM_OBJECT, ctypes.byref(addr), 0, None, ctypes.byref(size), ids) != NO_ERR:
-            return None
-        return list(ids[: size.value // ctypes.sizeof(ctypes.c_uint32)])
+        return self._ids(SYSTEM_OBJECT, PROCESS_LIST)
 
     def captures(self) -> tuple[Capture, ...] | None:
         """The other processes capturing from any input now (``None``: this macOS can't say)."""
@@ -339,9 +377,10 @@ def probe(own_pid: int | None = None) -> MicUse:
 
 
 def available() -> bool:
-    """Core Audio can be read here (a Mac)."""
+    """Core Audio can be read here (a Mac): it loads. Nothing is asked of it — this runs on the main thread at
+    launch, where a call into a coreaudiod that is restarting would hold the app up."""
     try:
-        CoreAudioProbe().device_running()
+        _libs()
     except OSError as exc:
         log.debug("no call detection: %s", exc)
         return False
@@ -382,7 +421,7 @@ class _Seen:
 
 def calls_in(captures: tuple[Capture, ...] | None, device_running: bool) -> dict[str, Call]:
     """The calls a look shows, by key: one per app (its helpers capture too), what is never a call left
-    out (:func:`is_background`). Without process information, the default input running is one call ("mic")."""
+    out (:func:`is_background`). Without process information, an input device running is one call ("mic")."""
     if captures is None:
         return {"mic": Call("mic")} if device_running else {}
     out: dict[str, Call] = {}
@@ -428,17 +467,16 @@ class CallWatcher:
             self._was_running = self._device_was_idle = False
             self._baseline = baseline
 
-    def _look(self, now: float) -> dict[str, Call]:
-        """What captures now: the device flag at each look, the processes only when it runs (see the module)."""
-        assert self.probe is not None
-        running = bool(self.probe.device_running())
+    def _look(self, now: float, running: bool, read: bool, captures: tuple[Capture, ...] | None) -> dict[str, Call]:
+        """What captures now, from what Core Audio just said (under the lock): the device flag at each look, the
+        processes only when it runs (``read``: they were read, see the module)."""
         if not running:
             self._device_was_idle = True
             self._was_running = False
             self._captures, self._read_at = (), None
             return {}
-        if not self._was_running or self._read_at is None or now - self._read_at >= ATTRIBUTE_S:
-            self._captures, self._read_at = self.probe.captures(), now
+        if read:
+            self._captures, self._read_at = captures, now
         self._was_running = True
         if self._captures is None and not self._device_was_idle:
             # no process information: the flag counts our own capture too, which may linger a moment after a
@@ -446,15 +484,27 @@ class CallWatcher:
             return {}
         return calls_in(self._captures, running)
 
-    def step(self) -> None:
-        """One look: announce the calls that have lasted long enough, end those gone for :data:`END_AFTER_S`."""
+    def step(self, stop: threading.Event | None = None) -> None:
+        """One look: announce the calls that have lasted long enough, end those gone for :data:`END_AFTER_S`.
+
+        Core Audio is asked with no lock held: a call into it can hang for seconds (coreaudiod restarting, a
+        Bluetooth headset switching profile), and :meth:`reset`, on the main thread when the watcher starts again,
+        must never wait for that. ``stop``: the run this look is part of; stopped meanwhile, the look changes and
+        says nothing (a new run may have started, with its own baseline)."""
         if self.probe is None:
             self.probe = CoreAudioProbe()
         now = self.clock()
+        with self._lock:
+            was_running, read_at = self._was_running, self._read_at
+        running = bool(self.probe.device_running())
+        read = running and (not was_running or read_at is None or now - read_at >= ATTRIBUTE_S)
+        captures = self.probe.captures() if read else None
         starts: list[Call] = []
         ends: list[Call] = []
         with self._lock:
-            current = self._look(now)
+            if stop is not None and stop.is_set():
+                return
+            current = self._look(now, running, read, captures)
             baseline, self._baseline = self._baseline, False
             for key, call in current.items():
                 seen = self._seen.get(key)
@@ -476,6 +526,8 @@ class CallWatcher:
                 elif now - seen.gone_since >= END_AFTER_S:
                     del self._seen[key]
                     ends.append(seen.call)
+        if stop is not None and stop.is_set():
+            return
         for call in starts:
             self.on_start(call)
         for call in ends:
@@ -505,7 +557,7 @@ class CallWatcher:
     def _loop(self, stop: threading.Event) -> None:
         while not stop.is_set():
             try:
-                self.step()
+                self.step(stop)
                 self.errors = 0
             except Exception:  # Core Audio away a moment (coreaudiod restarting): try again later
                 self.errors += 1

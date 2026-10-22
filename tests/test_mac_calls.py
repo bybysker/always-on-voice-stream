@@ -7,6 +7,7 @@ the packaged app's ``--selftest`` (its mic-in-use probe must answer).
 from __future__ import annotations
 
 import ctypes
+import itertools
 import sys
 import threading
 import time
@@ -217,6 +218,69 @@ def test_the_thread_backs_off_and_stops() -> None:
     assert probe.reads <= reads + 1  # a look under way may finish, no more
 
 
+def _stuck_once() -> tuple[FakeProbe, threading.Event, threading.Event]:
+    """A probe whose first look at the device hangs until released, as Core Audio does while coreaudiod restarts
+    or a Bluetooth headset switches profile — and then says what was true when it was asked: nothing ran."""
+    entered, release = threading.Event(), threading.Event()
+    looks = itertools.count()
+
+    class Stuck(FakeProbe):
+        def device_running(self) -> bool | None:
+            if next(looks) == 0:
+                entered.set()
+                release.wait(5)
+                return False
+            return self.running
+
+    probe = Stuck()
+    probe.running, probe.caps = True, (ZOOM,)
+    return probe, entered, release
+
+
+def test_restarting_never_waits_for_a_look_stuck_in_core_audio() -> None:
+    """The shell stops the watcher when a start begins and starts it again, on the main thread, when the state goes
+    back to stopped or error: that must not wait for the old run's look, stuck in Core Audio — the menu bar, the
+    floating button and the window would freeze for as long."""
+    probe, entered, release = _stuck_once()
+    w = calls.CallWatcher(on_start=lambda c: None, on_end=lambda c: None, probe=probe, poll_s=0.01)
+    w.start(baseline=False)
+    try:
+        assert entered.wait(5)
+        w.stop()  # "starting": the look under way goes on, on its own thread
+        threading.Timer(1.5, release.set).start()
+        t0 = time.monotonic()
+        w.start(baseline=True)  # "error" (the start failed fast): started again at once
+        took = time.monotonic() - t0
+    finally:
+        release.set()
+        w.stop()
+    assert took < 0.5
+
+
+def test_a_stopped_runs_late_look_changes_nothing() -> None:
+    """That old look, once Core Audio answers, must not use up the new run's baseline nor fill in its calls: the call
+    just recorded would be suggested as a new one."""
+    probe, entered, release = _stuck_once()
+    seen: list[tuple[str, Call]] = []
+    clock = Clock()
+    w = calls.CallWatcher(on_start=lambda c: seen.append(("start", c)), on_end=lambda c: seen.append(("end", c)),
+                          probe=probe, clock=clock)
+    w.reset(baseline=False)
+    old = threading.Event()
+    look = threading.Thread(target=w.step, args=(old,), daemon=True)
+    look.start()
+    assert entered.wait(5)
+    old.set()  # that run was stopped …
+    w.reset(baseline=True)  # … and a new one started: Voicestream just stopped recording this very call
+    release.set()
+    look.join(5)
+    new = threading.Event()
+    for _ in range(30):
+        w.step(new)
+        clock.now += 2
+    assert seen == []
+
+
 def test_the_thread_announces_from_its_own_thread() -> None:
     probe = FakeProbe()
     probe.running, probe.caps = True, (ZOOM,)
@@ -243,6 +307,85 @@ def test_off_macos_there_is_no_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls.available() is False
     with pytest.raises(OSError):
         calls.probe()
+
+
+class FakeCoreAudio:
+    """Core Audio's three calls (AudioHardware.h), answered from a table: object id → {(selector, scope): value},
+    a value an int (a UInt32 property) or a list of ids (an array property)."""
+
+    def __init__(self, objects: dict[int, dict[tuple[int, int], Any]]) -> None:
+        self.objects = objects
+
+    def _value(self, obj: int, address: Any) -> Any:
+        addr = address._obj  # ctypes.byref(PropertyAddress)
+        return self.objects.get(obj, {}).get((addr.mSelector, addr.mScope))
+
+    def AudioObjectHasProperty(self, obj: int, address: Any) -> int:
+        return int(self._value(obj, address) is not None)
+
+    def AudioObjectGetPropertyDataSize(self, obj: int, address: Any, qsize: int, qdata: Any, size: Any) -> int:
+        value = self._value(obj, address)
+        if value is None:
+            return int.from_bytes(b"who?", "big")  # kAudioHardwareUnknownPropertyError
+        size._obj.value = 4 * (len(value) if isinstance(value, list) else 1)
+        return calls.NO_ERR
+
+    def AudioObjectGetPropertyData(self, obj: int, address: Any, qsize: int, qdata: Any, size: Any, out: Any) -> int:
+        value = self._value(obj, address)
+        if value is None:
+            return int.from_bytes(b"who?", "big")
+        if isinstance(value, list):
+            for i, v in enumerate(value):
+                out[i] = v
+            size._obj.value = 4 * len(value)
+        else:
+            out._obj.value = value
+        return calls.NO_ERR
+
+
+def test_a_meeting_app_capturing_from_a_microphone_it_chose_is_noticed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The system's default input stays the built-in microphone; Teams captures from the headset picked in Teams.
+    Asking only the default device whether it runs, the call was never seen (its processes never read)."""
+    builtin, headset, speakers = 40, 41, 42
+    glob, inpt = calls.SCOPE_GLOBAL, calls.SCOPE_INPUT
+    objects: dict[int, dict[tuple[int, int], Any]] = {
+        calls.SYSTEM_OBJECT: {(calls.DEFAULT_INPUT, glob): builtin, (calls.DEVICES, glob): [builtin, headset, speakers]},
+        builtin: {(calls.STREAMS, inpt): [70], (calls.RUNNING_SOMEWHERE, glob): 0},
+        headset: {(calls.STREAMS, inpt): [71], (calls.RUNNING_SOMEWHERE, glob): 1},
+        speakers: {(calls.STREAMS, inpt): [], (calls.RUNNING_SOMEWHERE, glob): 1},  # output only
+    }
+    monkeypatch.setattr(calls, "_LIBS", (FakeCoreAudio(objects), None))
+    probe = calls.CoreAudioProbe(own_pid=1)
+    assert probe.default_input() == builtin and probe.device_running() is True
+    objects[headset][(calls.RUNNING_SOMEWHERE, glob)] = 0
+    assert probe.device_running() is False  # the speakers play music: no microphone runs
+    objects[calls.SYSTEM_OBJECT][(calls.DEVICES, glob)] = [speakers]
+    assert probe.device_running() is None  # no microphone at all
+    objects[calls.SYSTEM_OBJECT][(calls.DEVICES, glob)] = [builtin]
+    del objects[builtin][(calls.RUNNING_SOMEWHERE, glob)]
+    assert probe.device_running() is None  # couldn't be read
+    # who captures, from any input: the process objects (macOS 14), ours left out
+    assert probe.captures() is None  # before macOS 14: no process objects
+    objects[calls.SYSTEM_OBJECT][(calls.PROCESS_LIST, glob)] = [100, 101, 102]
+    objects[100] = {(calls.PROCESS_RUNNING_INPUT, glob): 1, (calls.PROCESS_PID, glob): 4242}
+    objects[101] = {(calls.PROCESS_RUNNING_INPUT, glob): 0, (calls.PROCESS_PID, glob): 4243}  # plays only
+    objects[102] = {(calls.PROCESS_RUNNING_INPUT, glob): 1, (calls.PROCESS_PID, glob): 1}  # Voicestream itself
+    assert probe.captures() == (Capture(4242, None),)  # no bundle id given: named by its pid later
+    objects[calls.SYSTEM_OBJECT][(calls.PROCESS_LIST, glob)] = []
+    assert probe.captures() == ()
+    assert (calls.DEVICES, calls.STREAMS, calls.SCOPE_INPUT) == (0x64657623, 0x73746D23, 0x696E7074)  # 'dev#' 'stm#' 'inpt'
+
+
+def test_launch_asks_core_audio_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """native.run reads available() on the main thread before the window shows: loading Core Audio says it is a Mac
+    where calls can be watched; a call into it there could stall the launch while coreaudiod restarts."""
+    monkeypatch.setattr(calls, "_libs", lambda: (object(), object()))
+
+    def asked(self: Any) -> bool | None:
+        raise AssertionError("Core Audio was called at launch")
+
+    monkeypatch.setattr(calls.CoreAudioProbe, "device_running", asked)
+    assert calls.available() is True
 
 
 def test_describe_keeps_pids_out() -> None:

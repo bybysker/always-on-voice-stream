@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from voicestream.app import floating
+from voicestream.app import floating, hotkey
 from voicestream.app.floating import PanelModel, Screen
 
 NOW = datetime(2026, 10, 22, 10, 0, tzinfo=UTC)
@@ -37,7 +37,10 @@ def _keys(model: PanelModel) -> list[str]:
 
 def test_idle_shows_start_meeting() -> None:
     m = floating.panel_model(_st(), "en", NOW)
-    assert m.kind == "idle" and _keys(m) == ["start"] and not m.text and not m.symbol
+    assert m.kind == "idle" and _keys(m) == ["start"] and not m.text
+    # a mark to drag it by: otherwise only an 8-point rim moves it, and grabbing the button starts a meeting
+    assert (m.symbol, m.tint, m.symbol_label) == ("waveform", "secondary", "")  # decorative: VoiceOver skips it
+    assert floating.panel_model(_st(mode="automatic"), "en", NOW).symbol == "waveform"
     start = m.buttons[0]
     assert (start.title, start.symbol, start.tint, start.icon_only) == ("Start meeting", "record.circle", "red", False)
     assert start.tooltip == "Start a meeting: Voicestream records until you stop it"
@@ -75,6 +78,17 @@ def test_starting_stopping_and_problems() -> None:
     assert err.tooltip == "Microphone permission is off: System Settings"  # one line
 
 
+def test_french_says_recording_only_while_it_records() -> None:
+    """« Enregistrement » is the app's French word for Recording (the dot's VoiceOver label, the window's state):
+    after Stop, the wrap-up is said as the window says it, or « Enregistrement des notes… » reads as still recording."""
+    assert floating.panel_model(_st("listening", **_meeting(1)), "fr", NOW).symbol_label == "Enregistrement"
+    stopping = floating.panel_model(_st("stopping"), "fr", NOW)
+    assert stopping.text == "Rédaction des notes…"
+    for key, text in floating.STRINGS["fr"].items():
+        if key not in ("recording", "problem", "link_refused"):  # Recording, Couldn't record, a link that tried to
+            assert "nregistrement" not in text, (key, text)
+
+
 def test_call_suggestion_nudge_and_notices() -> None:
     sug = floating.panel_model(_st(suggestion={"app": "Zoom", "at": "x"}), "en", NOW)
     assert sug.kind == "suggestion" and sug.text == "Call detected — start notes?" and sug.tooltip == "Zoom is using the microphone"
@@ -83,7 +97,9 @@ def test_call_suggestion_nudge_and_notices() -> None:
     assert floating.panel_model(_st(suggestion={"app": None}), "en", NOW).tooltip == ""
     fr = floating.panel_model(_st(suggestion={"app": "Microsoft Teams"}), "fr", NOW)
     assert (fr.text, fr.tooltip, [b.title for b in fr.buttons]) == (
-        "Appel détecté — prendre des notes ?", "Microsoft Teams utilise le micro", ["Démarrer", "Plus tard"])
+        "Appel détecté — prendre des notes ?", "Microsoft Teams utilise le micro", ["Démarrer", "Pas maintenant"])
+    # the window's word for the same dismiss (sug.dismiss): this call is never suggested again, so not "later"
+    assert floating.STRINGS["fr"]["not_now"] == "Pas maintenant"
     still = floating.panel_model(_st("listening", **_meeting(20), still_there={"meeting_id": "m1", "silent_minutes": 15}),
                                  "en", NOW)
     assert still.kind == "still_there" and still.text == "Still in a meeting?" and _keys(still) == ["keep", "end"]
@@ -92,12 +108,73 @@ def test_call_suggestion_nudge_and_notices() -> None:
     auto = _st("listening", mode="automatic", **_meeting(20), still_there={"meeting_id": "m1", "silent_minutes": 15})
     assert floating.panel_model(auto, "en", NOW).kind == "recording"
     ended = floating.panel_model(_st(notice={"kind": "ended_after_silence", "minutes": 60}), "en", NOW)
-    assert ended.text == "Meeting ended after 60 min of silence" and _keys(ended) == ["ok"]
+    assert ended.text == "Meeting ended after 60 min of silence" and _keys(ended) == ["start", "ok"]
     refused = floating.panel_model(_st(notice={"kind": "link_refused"}), "fr", NOW)
-    assert refused.text.startswith("Un lien a tenté") and _keys(refused) == ["ok"]
+    assert refused.text == "Un lien voulait enregistrer — ignoré" and _keys(refused) == ["start", "ok"]
     assert floating.panel_model(_st(notice={"kind": "something new"}), "en", NOW).kind == "idle"
     # while recording, the recording is what shows
     assert floating.panel_model(_st("listening", **_meeting(1), suggestion={"app": "Zoom"}), "en", NOW).kind == "recording"
+
+
+def test_a_notice_keeps_start_meeting_one_click_away() -> None:
+    """A notice stays until OK, for hours after a forgotten meeting ended in the night: the floating button,
+    whose job is to start a meeting, keeps its Start next to it (starting clears the notice, host-side)."""
+    for mode in ("manual", "automatic"):
+        idle = floating.panel_model(_st(mode=mode), "en", NOW, shortcut="⌥⌘R").buttons[0]
+        for notice in ({"kind": "ended_after_silence", "minutes": 60}, {"kind": "link_refused"}):
+            m = floating.panel_model(_st(mode=mode, notice=notice), "en", NOW, shortcut="⌥⌘R")
+            assert m.kind == "notice" and m.buttons[0] == idle and m.buttons[1].key == "ok"
+            assert not any(b.prominent for b in m.buttons)  # neither is the one to press
+
+
+def test_a_meeting_that_ended_by_itself_says_its_notes_are_being_written() -> None:
+    """The host's notice says ``pending`` from the moment the meeting ends until its notes are written (a
+    summary takes tens of seconds): "its notes are saved" would be said of notes not there yet."""
+    writing = {"kind": "ended_after_silence", "minutes": 60, "pending": True, "title": None, "folder": None}
+    m = floating.panel_model(_st(notice=writing), "en", NOW)
+    assert m.text == "Meeting ended: its notes are being written…" and m.announce == m.text
+    assert m.tooltip == "It ended after 60 min of silence. Its notes are being written."
+    assert m.symbol == "square.and.arrow.down" and _keys(m) == ["start", "ok"]
+    fr = floating.panel_model(_st(notice=writing), "fr", NOW)
+    assert fr.text == "Réunion terminée : rédaction des notes…" and "60 min" in fr.tooltip
+    done = floating.panel_model(_st(notice={**writing, "pending": False, "folder": "2026-10-22_0900-sync"}), "en", NOW)
+    assert (done.text, done.tooltip, done.symbol) == ("Meeting ended after 60 min of silence",
+                                                     "Its notes are saved: Voicestream → Meetings", "checkmark.circle")
+    empty = floating.panel_model(_st(notice={**writing, "pending": False}), "en", NOW)  # nothing was said
+    assert empty.text == done.text and empty.tooltip == "Nothing had been said, so there are no notes"
+    assert floating.panel_model(_st(notice={**writing, "pending": False}), "fr", NOW).tooltip == (
+        "Rien n'avait été dit, il n'y a donc pas de notes")
+    # a notice without the field (as the samples build it) is a finished one, as before
+    legacy = floating.panel_model(_st(notice={"kind": "ended_after_silence", "minutes": 60}), "en", NOW)
+    assert (legacy.text, legacy.tooltip) == (done.text, done.tooltip)
+
+
+def test_paused_shows_resume_even_with_a_nudge_up() -> None:
+    """Paused, nothing is recorded and paused time isn't silence: Resume must be there, not Keep / End."""
+    nudge = {"meeting_id": "m1", "silent_minutes": 16}
+    paused = floating.panel_model(_st("paused", **_meeting(20), still_there=nudge), "en", NOW)
+    assert paused.kind == "paused" and _keys(paused) == ["resume", "stop"]
+    assert floating.panel_model(_st("listening", **_meeting(20), still_there=nudge), "en", NOW).kind == "still_there"
+
+
+def test_the_shortcut_is_named_only_next_to_what_a_press_does() -> None:
+    """hotkey.TOGGLE: a press stops while recording, resumes while paused and does nothing while starting —
+    a Stop tooltip naming it while paused would send you to resume a meeting you meant to end."""
+    sc = "⌥⌘R"
+    rec = floating.panel_model(_st("listening", **_meeting(2)), "en", NOW, shortcut=sc)
+    assert rec.buttons[1].key == "stop" and rec.buttons[1].tooltip.endswith("(⌥⌘R)")
+    tips = {b.key: b.tooltip for b in floating.panel_model(_st("paused", **_meeting(2)), "en", NOW, shortcut=sc).buttons}
+    assert tips["resume"] == "Resume (⌥⌘R)" and sc not in tips["stop"] and tips["stop"].startswith("Stop: the notes")
+    starting = floating.panel_model(_st("starting"), "en", NOW, shortcut=sc)
+    assert _keys(starting) == ["stop"] and sc not in starting.buttons[0].tooltip
+    does = {"start": ("start", "restart"), "accept": ("start", "restart"), "retry": ("restart",),
+            "resume": ("resume",), "stop": ("stop",)}
+    for lang in ("en", "fr"):
+        for name, st in floating.sample_states().items():
+            press = hotkey.TOGGLE.get(st.get("state") or "stopped")
+            for b in floating.panel_model(st, lang, NOW, shortcut=sc).buttons:
+                if sc in b.tooltip:
+                    assert press in does[b.key], (name, b.key, press)
 
 
 def test_both_languages_say_everything() -> None:
@@ -108,7 +185,8 @@ def test_both_languages_say_everything() -> None:
             for b in m.buttons:
                 assert b.title and b.label, (lang, name, b)
                 assert len(b.title) <= 24, b.title  # a compact panel: short verbs
-            assert len(m.text) <= 60, m.text
+            # one line of at most TEXT_MAX_WIDTH (300 pt) at 13 pt, cut at its end otherwise: about 45 characters
+            assert len(m.text) <= 45, m.text
     assert sorted(set(floating.kinds(floating.sample_states().values()))) == sorted(
         {"idle", "recording", "paused", "listening", "starting", "stopping", "suggestion", "still_there", "notice", "error"})
 
@@ -121,6 +199,42 @@ def test_when_it_shows() -> None:
     assert not floating.wanted({**on, "setup_done": False})  # the window (the setup) is all there is until then
     assert not floating.wanted({**on, "capabilities": {}})  # the browser: no native panel
     assert floating.wanted({**on, "prefs": {}})  # on by default
+
+
+def test_hidden_it_still_asks_what_nothing_else_would_show() -> None:
+    """Hidden (the setting off) with the window closed, a call suggestion, "Still in a meeting?" and a meeting
+    that ended by itself would be shown nowhere: the floating button appears for them, with that look only."""
+    off = {"prefs": {"floating_button": False}, "capabilities": {"floating_button": True}}
+
+    def st(state: str = "stopped", **extra: Any) -> dict[str, Any]:
+        return {**_st(state, **extra), **off}
+
+    assert not floating.wanted(st()) and not floating.wanted(st("listening", **_meeting(3)))  # nothing to ask
+    sug = st(suggestion={"app": "Zoom", "at": "t1"})
+    assert floating.wanted(sug) and floating.panel_model(sug, "en", NOW).kind == "suggestion"
+    nudge = {"meeting_id": "m1", "silent_minutes": 15, "ends_at": "t2"}
+    still = st("listening", **_meeting(20), still_there=nudge)
+    assert floating.wanted(still) and floating.panel_model(still, "en", NOW).kind == "still_there"
+    assert not floating.wanted({**still, "state": "paused"})  # paused: nothing to keep or end (Resume is for later)
+    assert not floating.wanted({**still, "mode": "automatic"})  # automatic meetings are never asked
+    ended = st("stopping", notice={"kind": "ended_after_silence", "minutes": 60, "pending": True, "at": "t3",
+                                   "meeting_id": "m1"})
+    m = floating.panel_model(ended, "fr", NOW)
+    assert floating.wanted(ended) and m.kind == "notice" and m.text == "Réunion terminée : rédaction des notes…"
+    assert floating.panel_model({**ended, "prefs": {}}, "en", NOW).kind == "stopping"  # shown anyway: as before
+    assert floating.wanted({**ended, "state": "stopped"})
+    assert not floating.wanted({**ended, "state": "starting"})  # the next meeting is under way
+    assert not floating.wanted(st(notice={"kind": "link_refused", "at": "t4"}))  # the failure sound said that one
+    # hidden from its own menu while one is up: not for that one again, but for the next
+    key = floating.question_key(sug)
+    assert key and floating.question_key(st()) is None and floating.question_key(still) != key
+    assert not floating.wanted(sug, hidden_for=key)
+    assert floating.wanted(st(suggestion={"app": "Teams", "at": "t5"}), hidden_for=key)
+    assert floating.wanted({**sug, "prefs": {}}, hidden_for=key)  # on: always shown
+    asked_again = st("listening", **_meeting(70), still_there={**nudge, "ends_at": "t6"})  # asked again after a pause
+    assert floating.wanted(asked_again, hidden_for=floating.question_key(still))
+    assert not floating.wanted({**sug, "setup_done": False}) and not floating.wanted(sug, quitting=True)
+    assert not floating.wanted({**sug, "capabilities": {}})
 
 
 # ------------------------------------------------------------------ placement
@@ -412,6 +526,10 @@ def test_the_panel_never_takes_the_focus_and_floats_on_every_space(appkit: Any) 
     for b in p._buttons:
         assert b.acceptsFirstMouse_(None) is True  # the first click acts: the panel is never key
     assert p._views["text"].mouseDownCanMoveWindow() is True  # dragged by its labels too
+    # … and by its symbol (an NSImageView is a control: it wouldn't move the window by itself), shown when idle
+    icon = p._views["icon"]
+    assert icon.mouseDownCanMoveWindow() is True and icon.values["hidden"] is False
+    assert icon.values["image"] is p._images[("waveform", "", 15.0)] and icon.values["accessibilityElement"] is False
 
 
 def test_the_panel_follows_the_state(appkit: Any) -> None:

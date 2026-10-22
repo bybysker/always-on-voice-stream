@@ -16,7 +16,8 @@ delegate from the class attribute ``webview.platforms.cocoa.BrowserView.AppDeleg
 first window, so a subclass put there before ``webview.start()`` adds what that delegate lacks.
 
 * ``applicationShouldHandleReopen:hasVisibleWindows:``: clicking the Dock icon, or opening the
-  app again from Finder or Spotlight, shows the hidden window, its Start control focused.
+  app again from Finder or Spotlight, shows the hidden window, its Start control focused (a window
+  already showing is only brought forward, the page left as it is).
 * ``applicationShouldTerminate:``: pywebview's own runs the window's ``closing`` handlers, and
   ours hides the window instead of closing it, so the app could never quit. Ours asks first
   while listening, then stops the host gracefully (``NSTerminateLater``, capped), then quits.
@@ -45,10 +46,13 @@ and every way of starting and stopping goes through the host's meeting actions
 
 * the floating button (:mod:`.floating`): a small non-activating panel above every app, on every
   Space, that follows the host's state (Start meeting; the time, Pause, Stop; a call suggestion;
-  "Still in a meeting?") and can be hidden from its own menu;
+  "Still in a meeting?") and can be hidden from its own menu — hidden, it still comes up for a call
+  suggestion or "Still in a meeting?", which nothing else would show with the window closed;
 * ``voicestream://`` links (the Info.plist's CFBundleURLTypes): Launch Services sends them as a "get
   URL" Apple event, whose handler (registered before the run loop starts, for the link that launches
-  the app) hands them to the host's ``open_url``, which checks the key of the ones that may record;
+  the app) hands them to the host's ``open_url``, which checks the key of the ones that may record.
+  Listening at launch (automatic meetings) waits until the app has launched, and is skipped when a
+  link launched it: any web page can open one;
 * the Spotlight launcher (:mod:`.spotlight`), "Voicestream – New Meeting" in ~/Applications, written
   while its setting is on, which opens the keyed ``meeting/start`` link;
 * call suggestions (:mod:`.calls`): while nothing is recorded, a thread looks at whether another app
@@ -126,8 +130,11 @@ SETTINGS_PAGE = "#/settings/general"
 
 SOUNDS = {"start": "Tink", "restart": "Tink", "resume": "Tink", "stop": "Pop", "error": "Basso"}
 """What the keyboard shortcut plays (macOS's own sounds, /System/Library/Sounds) for what it did;
-``error``: listening could not start (the menu bar says why)."""
+``error``: listening could not start (the menu bar says why), or a start did nothing (:func:`start_missed`)."""
 HOTKEY_ANSWER_S = 5.0  # the self-test's wait for the host's answer to a press
+ASKS_A_START = frozenset({"stopped", "error", "stopping"})
+"""Where a press of the shortcut (or a toggle link) asks for a start: nothing is recorded — stopped, after a problem,
+or the last meeting being wrapped up (the host starts the next one once it is)."""
 
 LISTENING_STATES = frozenset({"starting", "listening", "paused"})
 SYMBOLS = {
@@ -182,9 +189,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "idle": "Aucune réunion en cours",
         "starting": "Démarrage…",
         "stopping": "Arrêt…",
-        "saving": "Enregistrement de la réunion…",
+        # the window's words: « Enregistrement » is the app's French for Recording, wrong just after Stop
+        "saving": "Finalisation de la réunion…",
         "error": "Problème : {error}",
-        "quitting": "Fermeture — enregistrement de la réunion…",
+        "quitting": "Fermeture — finalisation de la réunion…",
         "open": "Ouvrir Voicestream",
         "pause": "Mettre en pause",
         "resume": "Reprendre l'écoute",
@@ -317,11 +325,15 @@ def listen_shortcut(state: dict[str, Any]) -> tuple[str, int]:
     return hotkey.key_equivalent(str(hk["code"]), str(hk.get("key") or "")), hotkey.appkit_mask(hk.get("mods") or ())
 
 
-def shortcut_entry(state: dict[str, Any]) -> str:
+def shortcut_entry(state: dict[str, Any]) -> str | None:
     """The menu entry the keyboard shortcut is shown next to: the one that does what a press does now
     (:data:`.hotkey.TOGGLE`) — "Resume listening" while paused (a press resumes: next to "Stop
-    listening" it would be read as a stop), else Start/Stop listening."""
-    return "pause" if hotkey.TOGGLE.get(str(state.get("state") or "stopped")) == "resume" else "listen"
+    listening" it would be read as a stop), Start/Stop listening when a press starts or stops, and none
+    while listening starts or a meeting is wrapped up (a press stops nothing then)."""
+    press = hotkey.TOGGLE.get(str(state.get("state") or "stopped"))
+    if press is None:
+        return None
+    return "pause" if press == "resume" else "listen"
 
 
 def _floating_entry(key: str, state: dict[str, Any], lang: str, *, quitting: bool) -> MenuEntry:
@@ -346,7 +358,8 @@ def menu_model(state: dict[str, Any], lang: str, login: str, *, now: datetime | 
     login_on = login in ("enabled", "requires_approval")
     key, mods = listen_shortcut(state)
     shortcut: dict[str, Any] = {"shortcut": key, "modifiers": mods}
-    on_pause, on_listen = (shortcut, {}) if shortcut_entry(state) == "pause" else ({}, shortcut)
+    entry = shortcut_entry(state)
+    on_pause, on_listen = (shortcut if entry == "pause" else {}), (shortcut if entry == "listen" else {})
     start, stop = (s["start_meeting"], s["stop_meeting"]) if manual else (s["start"], s["stop"])
     resume = s["resume_meeting"] if manual else s["resume"]
     floating_item = _floating_entry("floating", state, lang, quitting=quitting)
@@ -395,6 +408,14 @@ def meeting_menu_model(state: dict[str, Any], lang: str, *, quitting: bool = Fal
         MenuEntry("sep_m"),
         _floating_entry("m_floating", state, lang, quitting=quitting),
     ]
+
+
+def start_missed(asked: str | None, before: str, did: str | None) -> bool:
+    """A start that did nothing (``did``: the host's ``None``, or a link's ``"nothing"``) while nothing was being
+    recorded (``before``: the host's state when it was asked): said with the failure sound, not silence, which
+    would pass for a meeting being recorded. ``asked``: start, toggle or stop. While a start is under way or a
+    meeting records, nothing was missed."""
+    return did in (None, "nothing") and asked in ("start", "toggle") and before in ASKS_A_START
 
 
 def needs_quit_confirmation(state: dict[str, Any]) -> bool:
@@ -604,7 +625,9 @@ def run(host: launcher.Host, *, selftest: float | None = None, report_path: Path
         caps["spotlight"] = native_hooks.bundle_path() is not None
         caps["call_detection"] = calls.available()
     try:
-        url = host.run_in_thread()
+        # not listening at launch yet: a voicestream:// link from any web page can launch the app, and must not
+        # have started a recording before it is looked at — the shell asks once it knows (_start_menu_bar)
+        url = host.run_in_thread(auto_listen=False)
     except Exception as exc:  # noqa: BLE001
         log.exception("the app failed to start")
         if selftest is not None:
@@ -693,6 +716,7 @@ class MacShell:
         self._main_entries: dict[str, Any] = {}
         self._floating: floating.FloatingPanel | None = None
         self._floating_test: str | None = None  # the self-test shows this sample on it, whatever the state says
+        self._floating_hidden: str | None = None  # the question it was hidden for (floating.question_key)
         self._watcher: calls.CallWatcher | None = None
         self._recorded = False  # something was recorded since the call watcher last started
         self._spotlight: tuple[Any, ...] | None = None  # what the Spotlight launcher was last made for
@@ -804,6 +828,16 @@ class MacShell:
         self._launched = True  # the keyboard shortcut is registered by the apply_state below
         # read again: listening may have started before the state listener was added
         self.apply_state(launcher.safe_state(self.host))
+        # NSApp is running, so finishLaunching has delivered the Apple event that launched the app, if any. A link
+        # did: it decides (a keyed meeting/start starts a meeting, anything else only opens the app) and listening
+        # never starts by itself. Otherwise (Finder, the Dock, a login item) as the settings say.
+        if self._urls == 0:
+            self._post(self._listen_on_launch())
+
+    async def _listen_on_launch(self) -> None:
+        listen = getattr(self.host, "listen_on_launch", None)
+        if listen is not None:
+            await listen()
 
     def _language(self) -> str:
         prefs = self.state.get("prefs") or {}
@@ -1099,12 +1133,23 @@ class MacShell:
     async def _toggle(self) -> None:
         """On the host's loop. A stop is said at once (its wrap-up takes a while); a start, restart or
         resume once the host knows how it went — ``error`` when it failed, with its own sound: the
-        "it worked" one must not play for a start that went to the error state."""
+        "it worked" one must not play for a start that went to the error state. A press meant as a start that did
+        nothing (:func:`start_missed`) has the failure sound too: lost in silence, it passes for a recording."""
         from PyObjCTools import AppHelper
 
+        before = self._host_status()
         action = await self.host.meeting_toggle()
-        if action is not None:
-            AppHelper.callAfter(_guard, lambda: self._feedback(action))
+        said = "error" if start_missed("toggle", before, action) else action
+        if said is not None:
+            AppHelper.callAfter(_guard, lambda: self._feedback(said))
+
+    def _host_status(self) -> str:
+        """On the host's loop: its state now (what a press or a link meant depends on it)."""
+        try:
+            return str((self.host.state() or {}).get("state") or "stopped")
+        except Exception:  # then nothing is said of a start that did nothing, as before
+            log.debug("could not read the host's state", exc_info=True)
+            return ""
 
     async def _ask_toggle(self) -> str | None:
         ask = getattr(self.host, "toggle_action", None)
@@ -1141,8 +1186,10 @@ class MacShell:
         elif key in ("end_meeting", "m_end"):
             self._post(self._end_meeting())
         elif key in ("floating", "m_floating"):
-            on = bool((self.state.get("prefs") or {}).get("floating_button", True))
-            self._post(self._on_loop("update_prefs", {"floating_button": not on}))
+            if floating.shown_by_setting(self.state):
+                self._hide_floating()
+            else:
+                self._post(self._on_loop("update_prefs", {"floating_button": True}))
         elif key == "login":
             self._toggle_login()
         elif key == "quit":
@@ -1150,9 +1197,15 @@ class MacShell:
 
     def reopened(self) -> None:
         """Main thread: Voicestream was opened again (the Dock, Finder, Spotlight, Open Voicestream): the window,
-        with the keyboard focus on its Start control (the host tells the page)."""
+        with the keyboard focus on its Start control (the host tells the page) — unless it was showing already:
+        a Dock click back into it only brings it forward, as it is (the page would leave what you were doing,
+        a to-do half edited, for Live). The main window itself is asked, not the delegate's has_visible: the
+        floating panel is a visible window too."""
+        native = self.window.native if self.window is not None else None
+        was_shown = native is not None and bool(native.isVisible()) and not bool(native.isMiniaturized())
         self.show_window()
-        self._post(self._on_loop("request_focus", "start"))
+        if not was_shown:
+            self._post(self._on_loop("request_focus", "start"))
 
     async def _on_loop(self, name: str, *args: Any) -> Any:
         """Call one of the host's plain methods on its loop, as they ask (``suggestion_dismiss``, ``update_prefs``…);
@@ -1170,10 +1223,13 @@ class MacShell:
         return floating.panel_model(state, self.lang, now, shortcut=shortcut)
 
     def _sync_floating(self) -> None:
-        """Main thread, at each host state: show the floating button as the state says (or hide it)."""
+        """Main thread, at each host state: show the floating button as the state says (or hide it). Hidden by the
+        setting, it still shows a call suggestion or "Still in a meeting?" (:func:`.floating.wanted`): with the
+        window closed nothing else would."""
         if not self._launched:
             return
-        want = self._floating_test is not None or floating.wanted(self.state, quitting=self.quitting)
+        want = self._floating_test is not None or floating.wanted(self.state, quitting=self.quitting,
+                                                                  hidden_for=self._floating_hidden)
         if not want and self._floating is None:
             return
         if self._floating is None:
@@ -1209,7 +1265,15 @@ class MacShell:
         elif key == "settings":
             self.show_settings()
         elif key == "hide":
-            self._post(self._on_loop("update_prefs", {"floating_button": False}))
+            self._hide_floating()
+
+    def _hide_floating(self) -> None:
+        """Main thread: Hide Floating Button (its own menu, the menu bar's). The setting goes off, and the question
+        up now (if any) won't show it again: it would keep it up — or, the setting off already, it was up for that
+        question alone and nothing would change."""
+        self._floating_hidden = floating.question_key(self.state)
+        self._post(self._on_loop("update_prefs", {"floating_button": False}))
+        self._sync_floating()
 
     def _floating_moved(self, position: dict[str, Any]) -> None:
         """Main thread: you dragged the floating button somewhere: remembered for the next launch."""
@@ -1233,16 +1297,18 @@ class MacShell:
 
     def _sync_calls(self) -> None:
         """Main thread, at each host state: look for calls only while nothing is recorded, suggestions are on and
-        the setup is done (the host suggests nothing otherwise anyway)."""
+        the setup is done (the host suggests nothing otherwise anyway) — from the moment Stop is pressed: the calls
+        under way then are the one just recorded, and a call that begins while the meeting is wrapped up (seconds,
+        minutes with an agent at work) is a new one. Taken at the end of the wrap-up, that baseline swallowed it."""
         if not self._launched:
             return
         current = str(self.state.get("state") or "stopped")
         prefs = self.state.get("prefs") or {}
         caps = self.state.get("capabilities") or {}
-        if current in ("starting", "listening", "paused", "stopping"):
+        if current in ("starting", "listening", "paused"):
             self._recorded = True
         want = (not self.quitting and bool(caps.get("call_detection")) and bool(prefs.get("call_suggestions", True))
-                and bool(self.state.get("setup_done")) and current in ("stopped", "error"))
+                and bool(self.state.get("setup_done")) and current in ("stopped", "error", "stopping"))
         if want and (self._watcher is None or not self._watcher.running):
             if self._watcher is None:
                 self._watcher = calls.CallWatcher(on_start=self._call_seen, on_end=self._call_gone)
@@ -1333,14 +1399,21 @@ class MacShell:
     async def _follow(self, url: str) -> None:
         from PyObjCTools import AppHelper
 
+        from .host import parse_url
+
         follow = getattr(self.host, "open_url", None)
-        outcome = await follow(url) if follow is not None else "unknown"
-        AppHelper.callAfter(_guard, lambda: self._url_done(str(outcome)))
+        before = self._host_status()
+        outcome = str(await follow(url) if follow is not None else "unknown")
+        parsed = parse_url(url)
+        if parsed is not None and start_missed(parsed[0], before, outcome):
+            outcome = "error"  # the launcher's start did nothing: not silence
+        AppHelper.callAfter(_guard, lambda: self._url_done(outcome))
 
     def _url_done(self, outcome: str) -> None:
         """Main thread: what a link did. The meeting actions sound as the shortcut's do (a link from Spotlight
-        leaves you in the app you were in, so the sound and the floating button are the feedback); a link
-        refused for its key sounds as a failure (the floating button and the window say why)."""
+        leaves you in the app you were in, so the sound and the floating button are the feedback), a start that
+        did nothing too (``error``); a link refused for its key sounds as a failure (the floating button and the
+        window say why)."""
         if outcome == "open":
             self.reopened()
         elif outcome in SOUNDS:
@@ -1541,6 +1614,9 @@ class MacShell:
             checks.update(launcher.http_checks(report["http"]))
             report["status_item"] = item = self._on_main(self._status_item_info) or {}
             checks["status_item"] = bool(item.get("created") and item.get("image"))
+            report["meeting_menu"] = meeting = self._on_main(self._meeting_menu_info) or {}
+            checks["meeting_menu"] = bool(meeting.get("in_menu_bar")) and meeting.get("entries") == [
+                e.key for e in meeting_menu_model(self.state, self.lang) if not e.separator]
             report["delegate"] = patches = self._on_main(self._delegate_info) or {}
             patches["install_error"] = self.delegate_error
             checks["app_delegate_patched"] = bool(patches.get("patched") and patches.get("reopen")
@@ -1629,6 +1705,19 @@ class MacShell:
                      if not mi.isSeparatorItem() and not mi.isHidden()],
         }
 
+    def _meeting_menu_info(self) -> dict[str, Any]:
+        """Main thread: the Meeting menu is in the app's menu bar (after pywebview's own: building it again for a
+        window with menus of its own would drop it), with its entries."""
+        main = _app().mainMenu()
+        holder, menu = self._main_menu or (None, None)
+        return {
+            "created": holder is not None,
+            "in_menu_bar": bool(main is not None and holder is not None and int(main.indexOfItem_(holder)) >= 0),
+            "title": str(holder.title()) if holder is not None else None,
+            "entries": [str(mi.representedObject()) for mi in (menu.itemArray() if menu is not None else [])
+                        if not mi.isSeparatorItem()],
+        }
+
     def _delegate_info(self) -> dict[str, Any]:
         delegate = _app().delegate()
         if delegate is None:
@@ -1707,10 +1796,17 @@ class MacShell:
     def _hotkey_info(self) -> dict[str, Any]:
         hk = self._hotkeys
         entry = shortcut_entry(self.state)
-        item = self._entries.get(entry)
+        item = self._entries.get(entry) if entry is not None else None
         key, mods = listen_shortcut(self.state)
         shown = (str(item.keyEquivalent()), int(item.keyEquivalentModifierMask())) if item is not None else None
         wanted = (self.state.get("prefs") or {}).get("hotkey") is not None
+        if entry is None:  # a press does nothing now (starting, wrapping up): the menu shows it nowhere
+            in_menu = all(not str(self._entries[k].keyEquivalent()) for k in ("listen", "pause") if k in self._entries)
+        else:
+            # the menu shows what the host's state says macOS took — and shows something when a shortcut
+            # is set: a status that never reached the host leaves the menu (and Settings) without it
+            in_menu = (shown is not None and shown[0] == key and (not key or shown[1] == mods)
+                       and (bool(key) or not wanted))
         return {
             "registered": hotkey.describe(*hk.registered) if hk is not None and hk.registered else None,
             "register_result": self._hotkey_err,
@@ -1718,10 +1814,7 @@ class MacShell:
             "host_status": (self.state.get("hotkey") or {}).get("status"),
             "wanted": wanted,
             "menu": {"entry": entry, "key": shown[0], "mask": shown[1]} if shown else None,
-            # the menu shows what the host's state says macOS took — and shows something when a shortcut
-            # is set: a status that never reached the host leaves the menu (and Settings) without it
-            "in_menu": (shown is not None and shown[0] == key and (not key or shown[1] == mods)
-                        and (bool(key) or not wanted)),
+            "in_menu": in_menu,
         }
 
     def _layout_info(self) -> dict[str, Any]:

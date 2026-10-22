@@ -3,21 +3,25 @@
 It is an ``NSPanel`` that never takes the focus: borderless and non-activating (clicking it leaves the
 app you are typing in active, with your cursor where it was), at the floating window level, on every
 Space and next to full-screen apps (``canJoinAllSpaces`` + ``fullScreenAuxiliary``), not hidden when
-Voicestream isn't the active app. It is moved by dragging its background; where you leave it is
-remembered (``prefs.floating_position``: the frame's origin and the screen's name) and kept on a
-screen when displays come and go. Its own context menu hides it, opens Voicestream or its Settings.
+Voicestream isn't the active app. It is moved by dragging its background, its symbol or its text;
+where you leave it is remembered (``prefs.floating_position``: the frame's origin and the screen's
+name) and kept on a screen when displays come and go. Its own context menu hides it, opens
+Voicestream or its Settings.
+Hidden, it still appears for a call suggestion, "Still in a meeting?" or a meeting that ended by itself
+(with the window closed nothing else shows them), with that look alone, until it is answered.
 
 What it shows follows the host's state (:func:`panel_model`, pure, tested on Linux), drawn with
 AppKit's own controls: a vibrant HUD background (``NSVisualEffectView``) and semantic colours, so it
 reads in light and dark mode; SF Symbols; push buttons at least 28 points tall (the HIG's minimum
 pointer target on a Mac), each with a VoiceOver label and a tooltip:
 
-* idle: Start meeting (Start listening when meetings start automatically);
+* idle: the app's mark, to drag it by, and Start meeting (Start listening when meetings start automatically);
 * recording: a red dot that breathes (still, with Reduce Motion on), the time since the meeting
   started, Pause / Resume and Stop;
 * a call another app started: "Call detected — start notes?" with Start and Not now;
 * a long silence: "Still in a meeting?" with Keep and End;
-* what happened by itself (a meeting ended after a long silence, a link refused), until OK;
+* what happened by itself (a meeting ended after a long silence, a link refused), until OK, with Start
+  meeting next to it;
 * a problem: what it is (in the tooltip), Show and Try again.
 
 It acts only through the shell (``on_action(key)``), which calls the host's meeting actions: the same
@@ -119,6 +123,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "end": "End",
         "ended_silence": "Meeting ended after {minutes} min of silence",
         "ended_tip": "Its notes are saved: Voicestream → Meetings",
+        "ended_writing": "Meeting ended: its notes are being written…",
+        "ended_writing_tip": "It ended after {minutes} min of silence. Its notes are being written.",
+        "ended_empty_tip": "Nothing had been said, so there are no notes",
         "link_refused": "A link tried to start recording — ignored",
         "link_tip": "Only Voicestream's own launcher can start a meeting from a link",
         "ok": "OK",
@@ -145,20 +152,24 @@ STRINGS: dict[str, dict[str, str]] = {
         "stop_listening": "Arrêter l'écoute",
         "stop_tip": "Arrêter : les notes sont rédigées et le micro est libéré",
         "starting": "Démarrage…",
-        "saving": "Enregistrement des notes…",
+        # not « Enregistrement » (the app's French for Recording): just after Stop, it would read as still recording
+        "saving": "Rédaction des notes…",
         "stopping": "Arrêt…",
         "elapsed": "Durée de la réunion {time}",
         "suggestion": "Appel détecté — prendre des notes ?",
         "suggestion_app": "{app} utilise le micro",
         "suggest_start": "Démarrer",
-        "not_now": "Plus tard",
+        "not_now": "Pas maintenant",  # the window's word; and this call is never suggested again: not "later"
         "still": "Toujours en réunion ?",
         "still_tip": "Personne n'a parlé depuis {minutes} min",
         "keep": "Continuer",
         "end": "Terminer",
         "ended_silence": "Réunion terminée après {minutes} min de silence",
         "ended_tip": "Ses notes sont enregistrées : Voicestream → Réunions",
-        "link_refused": "Un lien a tenté de lancer un enregistrement — ignoré",
+        "ended_writing": "Réunion terminée : rédaction des notes…",
+        "ended_writing_tip": "Elle s'est terminée après {minutes} min de silence. Ses notes sont en cours de rédaction.",
+        "ended_empty_tip": "Rien n'avait été dit, il n'y a donc pas de notes",
+        "link_refused": "Un lien voulait enregistrer — ignoré",  # one line of the panel: « ignoré » must show
         "link_tip": "Seul le lanceur de Voicestream peut démarrer une réunion depuis un lien",
         "ok": "OK",
         "problem": "Enregistrement impossible",
@@ -233,13 +244,48 @@ class PanelModel:
     """Said to VoiceOver when this appears (a suggestion, a nudge, a notice)."""
 
 
-def wanted(state: dict[str, Any], *, quitting: bool = False) -> bool:
-    """The floating button is shown: turned on (``prefs.floating_button``), the setup is done (until then the
-    window is all there is), the shell has one (``capabilities.floating_button``), and not while quitting."""
-    prefs = state.get("prefs") or {}
+def _question(state: dict[str, Any]) -> tuple[str, str] | None:
+    """``(look, key)`` of what must reach you even with the floating button hidden: a call suggestion, "Still in a
+    meeting?" (asked of a meeting started by hand, while it records) or a meeting that ended by itself after a long
+    silence — with the window closed, nothing else shows them. ``key`` stays the same for the same question (a
+    nudge asked again after a pause, a new call: another one). ``None``: none is up."""
+    current = str(state.get("state") or "stopped")
+    still = state.get("still_there")
+    if current == "listening" and still and meeting_mode(state) == "manual":
+        return "still_there", f"still_there:{still.get('meeting_id')}:{still.get('ends_at')}"
+    suggestion = state.get("suggestion")
+    if current in ("stopped", "error") and suggestion:
+        return "suggestion", f"suggestion:{suggestion.get('at')}"
+    notice = state.get("notice") or {}
+    if current in ("stopped", "error", "stopping") and notice.get("kind") == "ended_after_silence":
+        return "notice", f"ended:{notice.get('meeting_id')}:{notice.get('at')}"
+    return None
+
+
+def question_key(state: dict[str, Any]) -> str | None:
+    """Which question the floating button is up for while hidden (see :func:`wanted`), ``None``: none."""
+    asked = _question(state)
+    return asked[1] if asked is not None else None
+
+
+def shown_by_setting(state: dict[str, Any]) -> bool:
+    """The floating button is turned on (``prefs.floating_button``, the default)."""
+    return bool((state.get("prefs") or {}).get("floating_button", True))
+
+
+def wanted(state: dict[str, Any], *, quitting: bool = False, hidden_for: str | None = None) -> bool:
+    """The floating button is shown: the setup is done (until then the window is all there is), the shell has
+    one (``capabilities.floating_button``), not while quitting, and turned on (``prefs.floating_button``) —
+    or, turned off, while a question is up that nothing else would show with the window closed
+    (:func:`question_key`), with that look only, until it is answered or withdrawn. ``hidden_for``: the question
+    it was hidden for from its menu (it isn't shown again for that one)."""
     caps = state.get("capabilities") or {}
-    return (not quitting and bool(prefs.get("floating_button", True)) and bool(state.get("setup_done"))
-            and bool(caps.get("floating_button")))
+    if quitting or not state.get("setup_done") or not caps.get("floating_button"):
+        return False
+    if shown_by_setting(state):
+        return True
+    key = question_key(state)
+    return key is not None and key != hidden_for
 
 
 def _short(text: Any, limit: int = 200) -> str:
@@ -258,16 +304,55 @@ def panel_model(state: dict[str, Any], lang: str, now: datetime | None = None, *
     def tip(text: str) -> str:
         return s["shortcut_tip"].format(tip=text, shortcut=shortcut) if shortcut else text
 
+    title = s["start_meeting"] if manual else s["start_listening"]
+    start = PanelButton("start", title, title, "record.circle" if manual else "mic", tint="red" if manual else "",
+                        tooltip=tip(s["start_tip"] if manual else s["start_tip_auto"]))
+
+    def still_there() -> PanelModel:
+        minutes = int((state.get("still_there") or {}).get("silent_minutes") or 0)
+        return PanelModel("still_there", s["still"], "hourglass", "secondary", tooltip=s["still_tip"].format(minutes=minutes),
+                          buttons=(PanelButton("keep", s["keep"], s["keep"], prominent=True),
+                                   PanelButton("end", s["end"], s["end"])),
+                          announce=s["still"])
+
+    def suggestion() -> PanelModel:
+        app = _short((state.get("suggestion") or {}).get("app"), 80)
+        return PanelModel("suggestion", s["suggestion"], "phone.fill", "green",
+                          tooltip=s["suggestion_app"].format(app=app) if app else "",
+                          buttons=(PanelButton("accept", s["suggest_start"], s["suggest_start"], prominent=True,
+                                               tooltip=tip(s["start_tip"])),
+                                   PanelButton("dismiss", s["not_now"], s["not_now"])),
+                          announce=s["suggestion"])
+
+    # a notice stays until OK (for hours after a meeting forgotten overnight): Start stays one click away next to it
+    after = (start, PanelButton("ok", s["ok"], s["ok"]))
+
+    def ended(notice: dict[str, Any]) -> PanelModel:
+        minutes = int(notice.get("minutes") or 0)
+        # the host says ``pending`` until its notes are written (``is True``: a notice without the field is done)
+        if notice.get("pending") is True:
+            text, symbol = s["ended_writing"], "square.and.arrow.down"
+            tooltip = s["ended_writing_tip"].format(minutes=minutes)
+        else:
+            text, symbol = s["ended_silence"].format(minutes=minutes), "checkmark.circle"
+            # written, and no folder: nothing had been said (only a host that says pending says that much)
+            tooltip = s["ended_empty_tip"] if notice.get("pending") is False and not notice.get("folder") else s["ended_tip"]
+        return PanelModel("notice", text, symbol, "secondary", tooltip=tooltip, buttons=after, announce=text)
+
+    notice = state.get("notice") or {}
+    asked = _question(state)
+    if asked is not None and not shown_by_setting(state):
+        # hidden by the setting and shown for this question alone (see wanted): its look, whatever else goes on
+        return still_there() if asked[0] == "still_there" else suggestion() if asked[0] == "suggestion" else ended(notice)
+
     stop_title = s["stop_meeting"] if manual else s["stop_listening"]
-    stop = PanelButton("stop", stop_title, stop_title, "stop.fill", icon_only=True, tooltip=tip(s["stop_tip"]))
+    # the shortcut is named only where a press stops (hotkey.TOGGLE): paused it resumes, starting it does nothing
+    stop_tip = tip(s["stop_tip"]) if current == "listening" else s["stop_tip"]
+    stop = PanelButton("stop", stop_title, stop_title, "stop.fill", icon_only=True, tooltip=stop_tip)
     if current in ("listening", "paused"):
-        still = state.get("still_there")
-        if still and manual:
-            minutes = int(still.get("silent_minutes") or 0)
-            return PanelModel("still_there", s["still"], "hourglass", "secondary", tooltip=s["still_tip"].format(minutes=minutes),
-                              buttons=(PanelButton("keep", s["keep"], s["keep"], prominent=True),
-                                       PanelButton("end", s["end"], s["end"])),
-                              announce=s["still"])
+        # paused, nothing is recorded (nor counted as silence): Resume shows, not Keep / End
+        if state.get("still_there") and manual and current == "listening":
+            return still_there()
         started = meeting_started(state)
         timer = format_elapsed((now - started).total_seconds()) if started is not None else ""
         timer_label = s["elapsed"].format(time=timer) if timer else ""
@@ -285,31 +370,20 @@ def panel_model(state: dict[str, Any], lang: str, now: datetime | None = None, *
         return PanelModel("starting", s["starting"], "circle.dotted", "secondary", buttons=(stop,))
     if current == "stopping":
         return PanelModel("stopping", s["saving"] if manual else s["stopping"], "square.and.arrow.down", "secondary")
-    suggestion = state.get("suggestion")
-    if suggestion:
-        app = _short(suggestion.get("app"), 80)
-        return PanelModel("suggestion", s["suggestion"], "phone.fill", "green",
-                          tooltip=s["suggestion_app"].format(app=app) if app else "",
-                          buttons=(PanelButton("accept", s["suggest_start"], s["suggest_start"], prominent=True,
-                                               tooltip=tip(s["start_tip"])),
-                                   PanelButton("dismiss", s["not_now"], s["not_now"])),
-                          announce=s["suggestion"])
-    notice = state.get("notice") or {}
-    ok = (PanelButton("ok", s["ok"], s["ok"]),)
+    if state.get("suggestion"):
+        return suggestion()
     if notice.get("kind") == "ended_after_silence":
-        text = s["ended_silence"].format(minutes=int(notice.get("minutes") or 0))
-        return PanelModel("notice", text, "checkmark.circle", "secondary", tooltip=s["ended_tip"], buttons=ok, announce=text)
+        return ended(notice)
     if notice.get("kind") == "link_refused":
-        return PanelModel("notice", s["link_refused"], "hand.raised", "secondary", tooltip=s["link_tip"], buttons=ok,
+        return PanelModel("notice", s["link_refused"], "hand.raised", "secondary", tooltip=s["link_tip"], buttons=after,
                           announce=s["link_refused"])
     if current == "error":
         return PanelModel("error", s["problem"], "exclamationmark.triangle.fill", "yellow", tooltip=_short(state.get("error")),
                           buttons=(PanelButton("show", s["show"], s["show"]),
                                    PanelButton("retry", s["retry"], s["retry"], tooltip=tip(s["retry"]))))
-    title = s["start_meeting"] if manual else s["start_listening"]
-    start = PanelButton("start", title, title, "record.circle" if manual else "mic", tint="red" if manual else "",
-                        tooltip=tip(s["start_tip"] if manual else s["start_tip_auto"]))
-    return PanelModel("idle", buttons=(start,))
+    # the app's mark at the leading edge, something to drag it by (12 + 18 + 8 points): without it only an 8-point
+    # rim around Start moves the panel, and grabbing the button itself starts a meeting
+    return PanelModel("idle", symbol="waveform", buttons=(start,))
 
 
 def sample_states() -> dict[str, dict[str, Any]]:
@@ -328,6 +402,7 @@ def sample_states() -> dict[str, dict[str, Any]]:
         "suggestion": {**base, "suggestion": {"app": "Microsoft Teams", "at": "2026-01-01T09:00:00+00:00"}},
         "still_there": {**base, **meeting, "state": "listening", "still_there": {"meeting_id": "m", "silent_minutes": 15}},
         "notice": {**base, "notice": {"kind": "ended_after_silence", "minutes": 60}},
+        "notice_writing": {**base, "notice": {"kind": "ended_after_silence", "minutes": 60, "pending": True}},
         "link_refused": {**base, "notice": {"kind": "link_refused"}},
         "error": {**base, "state": "error", "error": "Microphone permission is off: System Settings → Privacy & Security"},
     }
@@ -410,7 +485,7 @@ _CLASSES: dict[str, Any] = {}
 def _classes() -> dict[str, Any]:
     if not _CLASSES:
         import objc
-        from AppKit import NSButton, NSTextField
+        from AppKit import NSButton, NSImageView, NSTextField
         from Foundation import NSObject
 
         class VoicestreamPanelButton(NSButton):
@@ -420,6 +495,10 @@ def _classes() -> dict[str, Any]:
 
         class VoicestreamPanelLabel(NSTextField):
             def mouseDownCanMoveWindow(self):  # the panel is dragged by its labels too
+                return True
+
+        class VoicestreamPanelImage(NSImageView):
+            def mouseDownCanMoveWindow(self):  # … and by its symbol: an image view is a control, which wouldn't
                 return True
 
         class VoicestreamPanelTarget(NSObject):
@@ -443,7 +522,8 @@ def _classes() -> dict[str, Any]:
             def savePosition_(self, timer):
                 _guard(self.panel.save_position)
 
-        _CLASSES.update(button=VoicestreamPanelButton, label=VoicestreamPanelLabel, target=VoicestreamPanelTarget)
+        _CLASSES.update(button=VoicestreamPanelButton, label=VoicestreamPanelLabel, image=VoicestreamPanelImage,
+                        target=VoicestreamPanelTarget)
     return _CLASSES
 
 
@@ -548,7 +628,7 @@ class FloatingPanel:
             layer.setCornerCurve_("continuous")
         panel.setContentView_(effect)
 
-        icon = AppKit.NSImageView.alloc().initWithFrame_(((0.0, 0.0), (18.0, 18.0)))
+        icon = cls["image"].alloc().initWithFrame_(((0.0, 0.0), (18.0, 18.0)))
         text = cls["label"].labelWithString_("")
         text.setLineBreakMode_(TRUNCATE_TAIL)
         text.setMaximumNumberOfLines_(1)
