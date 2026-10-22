@@ -140,6 +140,29 @@ def test_call_suggestion_nudge_and_notices() -> None:
     assert floating.panel_model(_st("listening", **_meeting(1), suggestion={"app": "Zoom"}), "en", NOW).kind == "recording"
 
 
+def test_a_call_that_begins_during_the_wrap_up_is_suggested_there() -> None:
+    """The call watcher runs from Stop on, so a call that begins while the last meeting's notes are written is
+    suggested then — and its Start now does something there: it waits for the notes, then records. Shown only
+    once the wrap-up was over (seconds, minutes with an agent at work), the offer came late, and with the window
+    closed and the floating button hidden it was shown nowhere meanwhile."""
+    sug = {"app": "Zoom", "at": "t1"}
+    m = floating.panel_model(_st("stopping", suggestion=sug), "en", NOW, shortcut="⌥⌘R")
+    assert m.kind == "suggestion" and _keys(m) == ["accept", "dismiss"] and m.tooltip == "Zoom is using the microphone"
+    # its Start waits for the notes: said so, and not with the shortcut (a press there is half of a double Stop)
+    assert m.buttons[0].tooltip == "Start the next meeting once these notes are written"
+    assert floating.panel_model(_st("stopping", suggestion=sug), "fr", NOW).buttons[0].tooltip == (
+        "Démarrer la prochaine réunion une fois ces notes rédigées")
+    assert floating.panel_model(_st(suggestion=sug), "en", NOW, shortcut="⌥⌘R").buttons[0].tooltip.endswith("(⌥⌘R)")
+    # Not now: back to the notes being written
+    assert floating.panel_model(_st("stopping"), "en", NOW).kind == "stopping"
+    # a start already waits for the notes: that is what shows (Start there would be the same start)
+    assert floating.panel_model(_st("stopping", suggestion=sug, start_queued=True), "en", NOW).kind == "queued"
+    off = {"prefs": {"floating_button": False}, "capabilities": {"floating_button": True}}
+    hidden = {**_st("stopping", suggestion=sug), **off}
+    assert floating.wanted(hidden) and floating.panel_model(hidden, "en", NOW).kind == "suggestion"
+    assert not floating.wanted({**hidden, "start_queued": True})  # nothing to ask: the menus offer to cancel it
+
+
 def test_a_notice_keeps_start_meeting_one_click_away() -> None:
     """A notice stays until OK, for hours after a forgotten meeting ended in the night: the floating button,
     whose job is to start a meeting, keeps its Start next to it (starting clears the notice, host-side)."""

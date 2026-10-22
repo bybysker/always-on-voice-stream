@@ -1840,6 +1840,54 @@ def test_a_hidden_floating_button_appears_for_a_question_then_goes(host: FakeHos
     assert panel.updates[-1][0] is None
 
 
+async def test_a_call_accepted_during_the_wrap_up_records_once_the_notes_are_written(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, appkit: Recorder, panels: list[FakeFloatingPanel]) -> None:
+    """The floating button and the real host together. Back-to-back calls: Stop, and while the last meeting's
+    notes are written the next call begins (the watcher runs from Stop on). The floating button offers to take
+    notes; Start waits for the wrap-up, then records — neither dropped (as before the host queued starts) nor
+    begun before the last meeting's notes are written."""
+    from helpers import seg
+    from test_app_host import _factory, _host, _prefs, _until
+
+    from voicestream import session as session_mod
+
+    gate = asyncio.Event()
+    summarize = session_mod.summarize
+
+    async def slow(*args: Any, **kw: Any) -> Any:  # a wrap-up that takes a while (an agent at work, a long summary)
+        await gate.wait()
+        return await summarize(*args, **kw)
+
+    monkeypatch.setattr(session_mod, "summarize", slow)
+    built: list[Any] = []
+    _prefs(tmp_path, "manual", setup_done=True)
+    host = _host(tmp_path, factory=_factory(built=built), mode="manual")
+    host.capabilities["floating_button"] = True  # as native.run says
+    await host.start()
+    shell = _shell(host)
+    shell._launched = True
+    try:
+        assert await host.meeting_start() == "start"
+        await built[-1]._route(seg("Thanks all, see you next week.", "mic", t=1.0))
+        assert await host.meeting_stop() == "stop" and host.status == "stopping"
+        assert host.suggest_meeting("zoom.us", "zoom-2")  # the next call, as the watcher sees it begin
+        shell.state = host.state()
+        shell._sync_floating()
+        (panel,) = panels
+        assert panel.model is not None and panel.model.kind == "suggestion"
+        panel.on_action("accept")  # its Start
+        await _until(lambda: host.suggestion is None)
+        await asyncio.sleep(0.2)
+        assert host.status == "stopping" and len(built) == 1  # it waits for the last meeting's notes
+        gate.set()
+        await _until(lambda: host.in_meeting() and len(built) == 2 and built[-1].manual)
+        assert [e.type for e in host.bus.history if e.type in ("meeting.started", "meeting.ended")] == [
+            "meeting.started", "meeting.ended", "meeting.started"]
+    finally:
+        gate.set()
+        await host.shutdown()
+
+
 def test_floating_button_clicks_go_through_the_host_actions(host: FakeHost, appkit: Recorder) -> None:
     host.thread.start()
     shell = _shell(host)

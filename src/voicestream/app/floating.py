@@ -20,7 +20,8 @@ pointer target on a Mac), each with a VoiceOver label and a tooltip:
   started, Pause / Resume and Stop;
 * the last meeting's notes being written, and the next meeting waiting for them (a press of the shortcut, the
   launcher): "Next meeting after the notes…" and Cancel, which takes that start back;
-* a call another app started: "Call detected — start notes?" with Start and Not now;
+* a call another app started: "Call detected — start notes?" with Start and Not now (also while the last
+  meeting's notes are written: Start then waits for them);
 * a long silence: "Still in a meeting?" with Keep and End;
 * what happened by itself (a meeting ended after a long silence, a link refused), until OK, with Start
   meeting next to it;
@@ -139,6 +140,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "suggestion": "Call detected — start notes?",
         "suggestion_app": "{app} is using the microphone",
         "suggest_start": "Start",
+        "suggest_queued_tip": "Start the next meeting once these notes are written",
         "not_now": "Not now",
         "still": "Still in a meeting?",
         "still_tip": "No one has spoken for {minutes} min",
@@ -192,6 +194,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "suggestion": "Appel détecté — prendre des notes ?",
         "suggestion_app": "{app} utilise le micro",
         "suggest_start": "Démarrer",
+        "suggest_queued_tip": "Démarrer la prochaine réunion une fois ces notes rédigées",
         "not_now": "Pas maintenant",  # the window's word; and this call is never suggested again: not "later"
         "still": "Toujours en réunion ?",
         "still_tip": "Personne n'a parlé depuis {minutes} min",
@@ -290,7 +293,8 @@ def _question(state: dict[str, Any]) -> tuple[str, str] | None:
     if current == "listening" and still and meeting_mode(state) == "manual":
         return "still_there", f"still_there:{still.get('meeting_id')}:{still.get('ends_at')}"
     suggestion = state.get("suggestion")
-    if current in ("stopped", "error") and suggestion:
+    # also while the last meeting's notes are written (its Start waits for them), unless a start waits already
+    if current in ("stopped", "error", "stopping") and suggestion and not start_queued(state):
         return "suggestion", f"suggestion:{suggestion.get('at')}"
     notice = state.get("notice") or {}
     if current in ("stopped", "error", "stopping") and notice.get("kind") == "ended_after_silence":
@@ -360,10 +364,13 @@ def panel_model(state: dict[str, Any], lang: str, now: datetime | None = None, *
 
     def suggestion() -> PanelModel:
         app = _short((state.get("suggestion") or {}).get("app"), 80)
+        # during the last meeting's wrap-up, Start waits for its notes; a press of the shortcut there may be the
+        # second half of a double Stop, so it isn't named
+        accept_tip = s["suggest_queued_tip"] if current == "stopping" else tip(s["start_tip"])
         return PanelModel("suggestion", s["suggestion"], "phone.fill", "green",
                           tooltip=s["suggestion_app"].format(app=app) if app else "",
                           buttons=(PanelButton("accept", s["suggest_start"], s["suggest_start"], prominent=True,
-                                               tooltip=tip(s["start_tip"])),
+                                               tooltip=accept_tip),
                                    PanelButton("dismiss", s["not_now"], s["not_now"])),
                           announce=s["suggestion"])
 
@@ -423,7 +430,8 @@ def panel_model(state: dict[str, Any], lang: str, now: datetime | None = None, *
         label, cancel_tip = (s["cancel_next"], s["cancel_next_tip"]) if manual else (s["cancel_listen"], s["cancel_listen_tip"])
         return PanelModel("queued", text, "square.and.arrow.down", "secondary", tooltip=tooltip, announce=text,
                           buttons=(PanelButton("cancel", s["cancel"], label, "xmark", icon_only=True, tooltip=cancel_tip),))
-    if current == "stopping":
+    if current == "stopping" and not state.get("suggestion"):
+        # (a call that begins meanwhile is offered: its Start waits for these notes, then records)
         return PanelModel("stopping", s["saving"] if manual else s["stopping"], "square.and.arrow.down", "secondary")
     if state.get("suggestion"):
         return suggestion()
