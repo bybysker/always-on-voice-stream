@@ -145,13 +145,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "stop_listening": "Arrêter l'écoute",
         "stop_tip": "Arrêter : les notes sont rédigées et le micro est libéré",
         "starting": "Démarrage…",
-        "saving": "Enregistrement des notes…",
+        # not « Enregistrement » (the app's French for Recording): just after Stop, it would read as still recording
+        "saving": "Rédaction des notes…",
         "stopping": "Arrêt…",
         "elapsed": "Durée de la réunion {time}",
         "suggestion": "Appel détecté — prendre des notes ?",
         "suggestion_app": "{app} utilise le micro",
         "suggest_start": "Démarrer",
-        "not_now": "Plus tard",
+        "not_now": "Pas maintenant",  # the window's word; and this call is never suggested again: not "later"
         "still": "Toujours en réunion ?",
         "still_tip": "Personne n'a parlé depuis {minutes} min",
         "keep": "Continuer",

@@ -75,6 +75,17 @@ def test_starting_stopping_and_problems() -> None:
     assert err.tooltip == "Microphone permission is off: System Settings"  # one line
 
 
+def test_french_says_recording_only_while_it_records() -> None:
+    """« Enregistrement » is the app's French word for Recording (the dot's VoiceOver label, the window's state):
+    after Stop, the wrap-up is said as the window says it, or « Enregistrement des notes… » reads as still recording."""
+    assert floating.panel_model(_st("listening", **_meeting(1)), "fr", NOW).symbol_label == "Enregistrement"
+    stopping = floating.panel_model(_st("stopping"), "fr", NOW)
+    assert stopping.text == "Rédaction des notes…"
+    for key, text in floating.STRINGS["fr"].items():
+        if key not in ("recording", "problem", "link_refused"):  # Recording, Couldn't record, a link that tried to
+            assert "nregistrement" not in text, (key, text)
+
+
 def test_call_suggestion_nudge_and_notices() -> None:
     sug = floating.panel_model(_st(suggestion={"app": "Zoom", "at": "x"}), "en", NOW)
     assert sug.kind == "suggestion" and sug.text == "Call detected — start notes?" and sug.tooltip == "Zoom is using the microphone"
@@ -83,7 +94,9 @@ def test_call_suggestion_nudge_and_notices() -> None:
     assert floating.panel_model(_st(suggestion={"app": None}), "en", NOW).tooltip == ""
     fr = floating.panel_model(_st(suggestion={"app": "Microsoft Teams"}), "fr", NOW)
     assert (fr.text, fr.tooltip, [b.title for b in fr.buttons]) == (
-        "Appel détecté — prendre des notes ?", "Microsoft Teams utilise le micro", ["Démarrer", "Plus tard"])
+        "Appel détecté — prendre des notes ?", "Microsoft Teams utilise le micro", ["Démarrer", "Pas maintenant"])
+    # the window's word for the same dismiss (sug.dismiss): this call is never suggested again, so not "later"
+    assert floating.STRINGS["fr"]["not_now"] == "Pas maintenant"
     still = floating.panel_model(_st("listening", **_meeting(20), still_there={"meeting_id": "m1", "silent_minutes": 15}),
                                  "en", NOW)
     assert still.kind == "still_there" and still.text == "Still in a meeting?" and _keys(still) == ["keep", "end"]

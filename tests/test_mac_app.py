@@ -492,6 +492,9 @@ def test_state_line_in_both_languages() -> None:
     assert native.state_line(_state("stopped", mode="manual"), "en", NOW) == "No meeting in progress"
     assert native.state_line(_state("stopped", mode="manual"), "fr", NOW) == "Aucune réunion en cours"
     assert native.state_line(_state("stopping", mode="manual"), "en", NOW) == "Saving the meeting…"
+    # « Enregistrement » is the app's French for Recording: just after Stop it would read as still recording
+    assert native.state_line(_state("stopping", mode="manual"), "fr", NOW) == "Finalisation de la réunion…"
+    assert native.state_line(_state("listening"), "fr", NOW, quitting=True) == "Fermeture — finalisation de la réunion…"
     assert native.state_line(_state("listening", minutes=3, mode="manual"), "en", NOW) == "Meeting in progress · 3 min"
     assert native.state_line({"state": "stopped"}, "en", NOW) == "No meeting in progress"  # manual: the default
 

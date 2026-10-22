@@ -182,9 +182,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "idle": "Aucune réunion en cours",
         "starting": "Démarrage…",
         "stopping": "Arrêt…",
-        "saving": "Enregistrement de la réunion…",
+        # the window's words: « Enregistrement » is the app's French for Recording, wrong just after Stop
+        "saving": "Finalisation de la réunion…",
         "error": "Problème : {error}",
-        "quitting": "Fermeture — enregistrement de la réunion…",
+        "quitting": "Fermeture — finalisation de la réunion…",
         "open": "Ouvrir Voicestream",
         "pause": "Mettre en pause",
         "resume": "Reprendre l'écoute",
