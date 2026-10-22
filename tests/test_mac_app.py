@@ -134,9 +134,15 @@ class FakeHost:
             return "stop" if self._state["state"] in ("starting", "listening", "paused", "error") else None
         return (hotkey.TOGGLE if what == "toggle" else start).get(self._state["state"])
 
+    answer: Any = "as the state says"
+    """What a press answers instead, as AppHost's would in a moment this fake doesn't keep: ``start`` for one
+    joined to a start under way or that waited for the last meeting's wrap-up, ``cancelled`` for one taken back."""
+
     async def meeting_toggle(self) -> str | None:
         """As AppHost's: a start that went to the error state (``start_fails``) is said as ``error``."""
         self.calls.append(("meeting_toggle", None))
+        if self.answer != "as the state says":
+            return self.answer
         action = self.toggle_action()
         return "error" if action in ("start", "restart") and self.start_fails else action
 
@@ -618,6 +624,42 @@ def test_meeting_menu_in_the_menu_bar() -> None:
     assert not any(e.enabled for e in menu(_state("listening", minutes=2), quitting=True).values() if not e.separator)
     fr = {e.key: e for e in native.meeting_menu_model(_state("stopped", mode="manual"), "fr")}
     assert fr["m_start"].title == "Démarrer une réunion" and native.STRINGS["fr"]["meeting_menu"] == "Réunion"
+
+
+def test_the_menus_say_a_start_waits_and_offer_to_cancel_it() -> None:
+    """``start_queued``: a start waits for the last meeting's notes and will record by itself once they are written.
+    Both menus say so where Start/Stop is, as a command that takes it back (a stop: the notes are still written);
+    no shortcut is shown next to it (a press is the same start again, not a cancel)."""
+    shortcut = {"prefs": {"hotkey": {"code": "KeyR", "mods": ["alt", "cmd"], "key": "R"}}, "hotkey": {"status": "ok"}}
+    for state in ("stopping", "stopped"):  # stopped: the moment between the wrap-up's end and the start
+        waits = _state(state, mode="manual", start_queued=True, **shortcut)
+        listen = _menu(waits)["listen"]
+        assert (listen.title, listen.enabled, listen.shortcut) == ("Cancel Next Meeting", True, ""), state
+        assert native.shortcut_entry(waits) is None
+        m = {e.key: e for e in native.meeting_menu_model(waits, "en")}
+        assert (m["m_stop"].title, m["m_stop"].enabled, m["m_stop"].shortcut) == ("Cancel Next Meeting", True, "")
+        assert m["m_start"].title == "Start Meeting" and not m["m_start"].enabled and m["m_start"].shortcut == ""
+        assert not m["m_pause"].enabled
+    fr = _state("stopping", mode="manual", start_queued=True)
+    assert {e.key: e for e in native.menu_model(fr, "fr", "disabled", now=NOW)}["listen"].title == (
+        "Annuler la prochaine réunion")
+    assert {e.key: e for e in native.meeting_menu_model(fr, "fr")}["m_stop"].title == "Annuler la prochaine réunion"
+    auto = _menu(_state("stopping", start_queued=True))["listen"]
+    assert auto.title == "Don't Start Listening" and auto.enabled
+    assert not _menu(_state("stopping", mode="manual", start_queued=True), quitting=True)["listen"].enabled
+    # nothing waits: as before, nothing to do while the notes are written
+    plain = _menu(_state("stopping", mode="manual"))["listen"]
+    assert (plain.title, plain.enabled) == ("Stop Meeting", False)
+
+
+def test_cancel_next_meeting_in_the_menus_is_a_stop(host: FakeHost, appkit: Recorder) -> None:
+    """Even at the moment the wrap-up is over (stopped) and the start not begun: "Start" there would join it."""
+    host.thread.start()
+    shell = _shell(host)
+    for state, key in (("stopping", "listen"), ("stopped", "listen"), ("stopped", "m_stop")):
+        shell.state = _state(state, mode="manual", start_queued=True)
+        shell.on_menu(key)
+    assert _wait(lambda: host.calls == [("meeting_stop", None)] * 3)
 
 
 def test_which_shortcut_the_shell_registers() -> None:
@@ -1240,13 +1282,14 @@ def test_a_press_toggles_listening_and_plays_a_sound(host: FakeHost, appkit: Rec
     assert _wait(lambda: len([c for c in host.calls if c[0] == "meeting_toggle"]) == 5)
     time.sleep(0.1)
     assert len(played) == 4
-    # the last meeting is being wrapped up and the host could start nothing (it says None): a press meant to
-    # start the next one is not lost in silence — the failure sound, so you know to press again
+    # the last meeting is being wrapped up: the host starts the next one once it is, and says so then ("start")
     host._state["state"] = "stopping"
+    host.answer = "start"
     shell.on_hotkey()
-    assert _wait(lambda: len(played) == 5 and played[-1] == "Basso")
+    assert _wait(lambda: len(played) == 5 and played[-1] == "Tink")
     del played[-1]
     host._state["state"] = "stopped"
+    host.answer = "as the state says"
     shell.state = _hk_state("stopped", status="ok", sound=False)  # turned off in Settings
     shell.on_hotkey()
     assert _wait(lambda: len([c for c in host.calls if c[0] == "meeting_toggle"]) == 6)
@@ -1266,6 +1309,103 @@ def test_a_press_toggles_listening_and_plays_a_sound(host: FakeHost, appkit: Rec
     shell.state = _hk_state("listening", status="ok")
     shell.on_hotkey()
     assert _wait(lambda: played[-1] == "Pop")
+
+
+def test_the_host_says_what_a_press_did_and_the_shell_adds_no_guess(
+        host: FakeHost, appkit: Recorder, hotkeys: list[FakeHotKeys], sounds: list[str]) -> None:
+    """The sound is the host's answer, never a guess from the state before the press. A press that joined a start
+    under way (two presses in one turn of the loop, the second before the state says "starting") is followed by a
+    recording: a "failed" sound for it would be false. A start that waited for the last meeting's wrap-up and was
+    taken back — by Stop, Stop now, quitting, a switch to by hand — is "cancelled": that is what you did, and the
+    failure sound at that moment (on top of the Stop) would say something went wrong."""
+    host.thread.start()
+    shell = _shell(host)
+    shell._launched = True
+    shell.state = _hk_state("stopped", status="ok")
+
+    def press(answer: Any, state: str = "stopped") -> None:
+        host._state["state"], host.answer = state, answer
+        before = len([c for c in host.calls if c[0] == "meeting_toggle"])
+        shell.on_hotkey()
+        assert _wait(lambda: len([c for c in host.calls if c[0] == "meeting_toggle"]) == before + 1)
+        time.sleep(0.1)  # what it plays is decided on the main thread (here: at once, see _shell)
+
+    for state in ("stopped", "error", "stopping", "starting"):
+        press(None, state)  # the host had nothing to do (a press joined, the moment before the state said so)
+    press("cancelled", "stopping")
+    assert sounds == []
+    press("start", "stopping")  # the queued start, carried out once the wrap-up was over
+    press("stop", "stopping")  # the second press of a double press on Stop: part of that Stop
+    assert sounds == ["Tink", "Pop"]
+    # only while quitting does a start that did nothing say so: it can't happen, and nothing else would tell
+    shell.quitting = True
+    press(None, "stopping")
+    press("cancelled", "stopping")  # taken back by the quit itself: nothing
+    assert sounds == ["Tink", "Pop", "Basso"]
+    assert native.sound_for("stop", None, quitting=True) is None  # nothing to stop: nothing missed
+    assert native.sound_for("toggle", "something new") is None  # an answer this shell doesn't know: no sound
+
+
+async def test_two_presses_on_the_real_host_say_no_failure_for_a_recording(tmp_path: Path, appkit: Recorder,
+                                                                         sounds: list[str]) -> None:
+    """The real host, stopped: two presses of the shortcut in one turn of its loop (the second before the state says
+    "starting"). The second joins the first's start, and a recording follows: no failure sound, whatever the host
+    answers that second press (``start``, or nothing to do)."""
+    from test_app_host import _factory, _host, _prefs
+
+    built: list[Any] = []
+    _prefs(tmp_path, "manual", setup_done=True)
+    host = _host(tmp_path, factory=_factory(built=built), mode="manual")
+    await host.start()
+    shell = _shell(host)
+    shell.state = host.state()
+    try:
+        await asyncio.gather(shell._toggle(), shell._toggle())
+        assert host.status == "listening" and host.in_meeting() and len(built) == 1
+        assert sounds and set(sounds) == {"Tink"}
+    finally:
+        await host.shutdown()
+
+
+async def test_a_launcher_start_taken_back_on_the_real_host_says_nothing(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, appkit: Recorder, sounds: list[str]) -> None:
+    """The real host: Stop, then the Spotlight launcher's start while the notes are written (it waits for them),
+    then Stop again, which takes that start back. At that moment the launcher's start is answered as taken back:
+    no failure sound on top of the Stop, and nothing records."""
+    from helpers import seg
+    from test_app_host import _factory, _host, _prefs, _until
+
+    from voicestream import session as session_mod
+
+    gate = asyncio.Event()
+    summarize = session_mod.summarize
+
+    async def slow(*args: Any, **kw: Any) -> Any:
+        await gate.wait()
+        return await summarize(*args, **kw)
+
+    monkeypatch.setattr(session_mod, "summarize", slow)
+    built: list[Any] = []
+    _prefs(tmp_path, "manual", setup_done=True)
+    host = _host(tmp_path, factory=_factory(built=built), mode="manual")
+    await host.start()
+    shell = _shell(host)
+    shell.state = host.state()
+    try:
+        assert await host.meeting_start() == "start"
+        await built[-1]._route(seg("Let's stop here.", "mic", t=1.0))
+        assert await host.meeting_stop() == "stop" and host.status == "stopping"
+        shell.open_url(host.launcher_url())  # Spotlight → Voicestream – New Meeting: waits for the notes
+        await asyncio.sleep(0.2)
+        assert host.status == "stopping" and len(built) == 1
+        assert await host.meeting_stop() == "stop"  # Cancel Next Meeting
+        gate.set()
+        await _until(lambda: host.status == "stopped")
+        await asyncio.sleep(0.2)
+        assert sounds == [] and len(built) == 1 and not host.in_meeting()
+    finally:
+        gate.set()
+        await host.shutdown()
 
 
 def test_the_selftest_presses_the_shortcut_without_listening(host: FakeHost, appkit: Recorder,
@@ -1762,6 +1902,54 @@ def test_a_hidden_floating_button_appears_for_a_question_then_goes(host: FakeHos
     assert panel.updates[-1][0] is None
 
 
+async def test_a_call_accepted_during_the_wrap_up_records_once_the_notes_are_written(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, appkit: Recorder, panels: list[FakeFloatingPanel]) -> None:
+    """The floating button and the real host together. Back-to-back calls: Stop, and while the last meeting's
+    notes are written the next call begins (the watcher runs from Stop on). The floating button offers to take
+    notes; Start waits for the wrap-up, then records — neither dropped (as before the host queued starts) nor
+    begun before the last meeting's notes are written."""
+    from helpers import seg
+    from test_app_host import _factory, _host, _prefs, _until
+
+    from voicestream import session as session_mod
+
+    gate = asyncio.Event()
+    summarize = session_mod.summarize
+
+    async def slow(*args: Any, **kw: Any) -> Any:  # a wrap-up that takes a while (an agent at work, a long summary)
+        await gate.wait()
+        return await summarize(*args, **kw)
+
+    monkeypatch.setattr(session_mod, "summarize", slow)
+    built: list[Any] = []
+    _prefs(tmp_path, "manual", setup_done=True)
+    host = _host(tmp_path, factory=_factory(built=built), mode="manual")
+    host.capabilities["floating_button"] = True  # as native.run says
+    await host.start()
+    shell = _shell(host)
+    shell._launched = True
+    try:
+        assert await host.meeting_start() == "start"
+        await built[-1]._route(seg("Thanks all, see you next week.", "mic", t=1.0))
+        assert await host.meeting_stop() == "stop" and host.status == "stopping"
+        assert host.suggest_meeting("zoom.us", "zoom-2")  # the next call, as the watcher sees it begin
+        shell.state = host.state()
+        shell._sync_floating()
+        (panel,) = panels
+        assert panel.model is not None and panel.model.kind == "suggestion"
+        panel.on_action("accept")  # its Start
+        await _until(lambda: host.suggestion is None)
+        await asyncio.sleep(0.2)
+        assert host.status == "stopping" and len(built) == 1  # it waits for the last meeting's notes
+        gate.set()
+        await _until(lambda: host.in_meeting() and len(built) == 2 and built[-1].manual)
+        assert [e.type for e in host.bus.history if e.type in ("meeting.started", "meeting.ended")] == [
+            "meeting.started", "meeting.ended", "meeting.started"]
+    finally:
+        gate.set()
+        await host.shutdown()
+
+
 def test_floating_button_clicks_go_through_the_host_actions(host: FakeHost, appkit: Recorder) -> None:
     host.thread.start()
     shell = _shell(host)
@@ -1790,6 +1978,9 @@ def test_floating_button_clicks_go_through_the_host_actions(host: FakeHost, appk
     shell.on_floating("settings")
     assert _wait(lambda: ran == ['location.hash = "#/settings/general"'])  # from another thread: run_js waits on this one
     shell.on_floating("nothing such")  # ignored
+    host.calls.clear()
+    shell.on_floating("cancel")  # the next meeting waits for these notes: Cancel takes it back, as Stop does
+    assert _wait(lambda: host.calls == [("meeting_stop", None)])
 
 
 class Descriptor:
@@ -1837,14 +2028,27 @@ def test_links_reach_the_host_and_say_what_they_did(host: FakeHost, appkit: Reco
     assert _wait(lambda: host.calls[-1] == ("open_url", ""))
     time.sleep(0.1)
     assert len(sounds) == 3
-    # a start that did nothing where nothing is recorded — the last meeting being wrapped up, the app quitting —:
-    # the failure sound, as the README says, not silence that passes for a meeting being recorded
-    for state, url in (("stopping", link), ("stopped", f"voicestream://meeting/toggle?key={host.url_key}"),
-                       ("error", link)):
-        host._state["state"] = state
-        before = len(sounds)
+    # what the host answers is what is said, not a guess from its state: during the last meeting's wrap-up the
+    # launcher's start waits for it and says "start" then, or "cancelled" when Stop took it back (nothing to say)
+    toggle = f"voicestream://meeting/toggle?key={host.url_key}"
+    for state, url, outcome in (("stopping", link, "nothing"), ("stopped", toggle, "nothing"), ("error", link, "nothing"),
+                                ("stopping", link, "cancelled"), ("stopping", toggle, "cancelled")):
+        host._state["state"], host.url_outcome = state, outcome
         shell.open_url(url)
-        assert _wait(lambda n=before: len(sounds) == n + 1 and sounds[-1] == "Basso"), state
+        assert _wait(lambda u=url: host.calls[-1] == ("open_url", u))
+    time.sleep(0.1)
+    assert len(sounds) == 3
+    host._state["state"], host.url_outcome = "stopping", "start"
+    shell.open_url(link)
+    assert _wait(lambda: len(sounds) == 4 and sounds[-1] == "Tink")
+    # quitting, a start that did nothing can't happen any more: the failure sound, as the README says (not a stop)
+    shell.quitting = True
+    host.url_outcome = "nothing"
+    for url in ("voicestream://meeting/stop", link, toggle):
+        shell.open_url(url)
+    assert _wait(lambda: sounds[4:] == ["Basso", "Basso"])
+    time.sleep(0.1)
+    assert len(sounds) == 6
 
 
 def test_the_selftest_link_is_only_asked_about(host: FakeHost, appkit: Recorder) -> None:
@@ -2211,6 +2415,8 @@ def test_the_selftest_checks_the_floating_button(host: FakeHost, appkit: Recorde
     assert set(out["states"]) == set(floating.sample_states())
     assert out["states"]["suggestion"] == {"drawn": True, "kind": "suggestion", "size": [200, 44], "buttons": 2,
                                            "expected_buttons": 2, "min_button_height": 28.0, "labelled": True}
+    # the next meeting waiting for the notes, with its Cancel: drawn and checked as every other look
+    assert (out["states"]["start_queued"]["kind"], out["states"]["start_queued"]["expected_buttons"]) == ("queued", 1)
     assert panels[0].updates[-1][0] is None and shell._floating_test is None  # hidden again after the test
 
     def short(self: Any) -> dict[str, Any]:

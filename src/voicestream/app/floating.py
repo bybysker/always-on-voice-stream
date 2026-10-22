@@ -18,7 +18,10 @@ pointer target on a Mac), each with a VoiceOver label and a tooltip:
 * idle: the app's mark, to drag it by, and Start meeting (Start listening when meetings start automatically);
 * recording: a red dot that breathes (still, with Reduce Motion on), the time since the meeting
   started, Pause / Resume and Stop;
-* a call another app started: "Call detected — start notes?" with Start and Not now;
+* the last meeting's notes being written, and the next meeting waiting for them (a press of the shortcut, the
+  launcher): "Next meeting after the notes…" and Cancel, which takes that start back;
+* a call another app started: "Call detected — start notes?" with Start and Not now (also while the last
+  meeting's notes are written: Start then waits for them);
 * a long silence: "Still in a meeting?" with Keep and End;
 * what happened by itself (a meeting ended after a long silence, a link refused), until OK, with Start
   meeting next to it;
@@ -26,7 +29,9 @@ pointer target on a Mac), each with a VoiceOver label and a tooltip:
 
 It acts only through the shell (``on_action(key)``), which calls the host's meeting actions: the same
 ones as the window, the menu bar and the keyboard shortcut. A suggestion or a nudge appearing is also
-said to VoiceOver (it appears without the focus, so it would go unheard otherwise).
+said to VoiceOver (it appears without the focus, so it would go unheard otherwise). Its buttons act on
+the first click (it is never key), except, for a moment (:data:`CLICK_GUARD_S`), those of a look that
+came up by itself, under a pointer that may be clicking something else.
 
 AppKit on the main thread only. Every AppKit import is inside a function, so the module imports on
 Linux. The AppKit values used are spelled out below, from the macOS SDK headers quoted by name
@@ -39,6 +44,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -91,6 +97,15 @@ TOP_GAP = 96.0
 """By default it sits at the right, this far below the menu bar: notification banners show at the very top."""
 SAVE_AFTER_S = 0.6
 """A drag ends, then the place is saved (once, not at every point of the drag)."""
+CLICK_GUARD_S = 0.8
+"""New buttons of a look that comes up by itself ignore clicks this long (as browsers hold back the buttons of a
+permission prompt): the panel is never key, so its buttons act on the first click, and a click meant for the app
+underneath — or for the button that was there a moment ago — would start a recording, end a meeting or cancel
+the next one. Longer than a double click, shorter than reading the words and moving to a button."""
+GUARDED_LOOKS = frozenset({"suggestion", "still_there", "notice", "queued"})
+"""The looks that come up without being asked for (a call, a long silence, a meeting that ended by itself, a start
+that waits for the last meeting's notes): their buttons are held back for :data:`CLICK_GUARD_S`. The others follow
+a click of yours (Start, Pause, Stop) and keep acting on the first click."""
 MENU_KEYS = ("hide", "sep", "open", "settings")
 
 STRINGS: dict[str, dict[str, str]] = {
@@ -112,10 +127,20 @@ STRINGS: dict[str, dict[str, str]] = {
         "starting": "Starting…",
         "saving": "Saving notes…",
         "stopping": "Stopping…",
+        "queued": "Next meeting after the notes…",
+        "queued_tip": "The next meeting starts once these notes are written",
+        "queued_auto": "Listening again in a moment…",
+        "queued_auto_tip": "Listening starts again once stopping is done",
+        "cancel": "Cancel",
+        "cancel_next": "Cancel next meeting",
+        "cancel_next_tip": "Cancel the next meeting: these notes are still written",
+        "cancel_listen": "Don't start listening",
+        "cancel_listen_tip": "Don't start listening again: stay stopped",
         "elapsed": "Meeting time {time}",
         "suggestion": "Call detected — start notes?",
         "suggestion_app": "{app} is using the microphone",
         "suggest_start": "Start",
+        "suggest_queued_tip": "Start the next meeting once these notes are written",
         "not_now": "Not now",
         "still": "Still in a meeting?",
         "still_tip": "No one has spoken for {minutes} min",
@@ -126,6 +151,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ended_writing": "Meeting ended: its notes are being written…",
         "ended_writing_tip": "It ended after {minutes} min of silence. Its notes are being written.",
         "ended_empty_tip": "Nothing had been said, so there are no notes",
+        "ended_unfinished_tip": "It ended after {minutes} min without speech",
         "link_refused": "A link tried to start recording — ignored",
         "link_tip": "Only Voicestream's own launcher can start a meeting from a link",
         "ok": "OK",
@@ -155,10 +181,20 @@ STRINGS: dict[str, dict[str, str]] = {
         # not « Enregistrement » (the app's French for Recording): just after Stop, it would read as still recording
         "saving": "Rédaction des notes…",
         "stopping": "Arrêt…",
+        "queued": "Prochaine réunion après les notes…",
+        "queued_tip": "La prochaine réunion démarre une fois ces notes rédigées",
+        "queued_auto": "L'écoute reprend dans un instant…",
+        "queued_auto_tip": "L'écoute reprend une fois l'arrêt terminé",
+        "cancel": "Annuler",
+        "cancel_next": "Annuler la prochaine réunion",
+        "cancel_next_tip": "Annuler la prochaine réunion : ces notes sont rédigées quand même",
+        "cancel_listen": "Ne pas reprendre l'écoute",
+        "cancel_listen_tip": "Ne pas reprendre l'écoute : rester arrêté",
         "elapsed": "Durée de la réunion {time}",
         "suggestion": "Appel détecté — prendre des notes ?",
         "suggestion_app": "{app} utilise le micro",
         "suggest_start": "Démarrer",
+        "suggest_queued_tip": "Démarrer la prochaine réunion une fois ces notes rédigées",
         "not_now": "Pas maintenant",  # the window's word; and this call is never suggested again: not "later"
         "still": "Toujours en réunion ?",
         "still_tip": "Personne n'a parlé depuis {minutes} min",
@@ -169,6 +205,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ended_writing": "Réunion terminée : rédaction des notes…",
         "ended_writing_tip": "Elle s'est terminée après {minutes} min de silence. Ses notes sont en cours de rédaction.",
         "ended_empty_tip": "Rien n'avait été dit, il n'y a donc pas de notes",
+        "ended_unfinished_tip": "Elle s'est terminée après {minutes} min sans parole",
         "link_refused": "Un lien voulait enregistrer — ignoré",  # one line of the panel: « ignoré » must show
         "link_tip": "Seul le lanceur de Voicestream peut démarrer une réunion depuis un lien",
         "ok": "OK",
@@ -214,7 +251,8 @@ def meeting_mode(state: dict[str, Any]) -> str:
 @dataclass(frozen=True, slots=True)
 class PanelButton:
     key: str
-    """What a click does, for the shell: start, pause, resume, stop, accept, dismiss, keep, end, ok, show, retry."""
+    """What a click does, for the shell: start, pause, resume, stop, accept, dismiss, keep, end, ok, show, retry, cancel
+    (a stop: the start waiting for the last meeting's wrap-up is taken back)."""
     title: str
     label: str
     """What VoiceOver says (the title, or what an icon-only button does)."""
@@ -229,7 +267,8 @@ class PanelButton:
 @dataclass(frozen=True, slots=True)
 class PanelModel:
     kind: str
-    """idle, recording, paused, listening, starting, stopping, suggestion, still_there, notice, error."""
+    """idle, recording, paused, listening, starting, stopping, queued (stopping, a start waiting for it), suggestion,
+    still_there, notice, error."""
     text: str = ""
     symbol: str = ""
     tint: str = "secondary"
@@ -254,12 +293,20 @@ def _question(state: dict[str, Any]) -> tuple[str, str] | None:
     if current == "listening" and still and meeting_mode(state) == "manual":
         return "still_there", f"still_there:{still.get('meeting_id')}:{still.get('ends_at')}"
     suggestion = state.get("suggestion")
-    if current in ("stopped", "error") and suggestion:
+    # also while the last meeting's notes are written (its Start waits for them), unless a start waits already
+    if current in ("stopped", "error", "stopping") and suggestion and not start_queued(state):
         return "suggestion", f"suggestion:{suggestion.get('at')}"
     notice = state.get("notice") or {}
     if current in ("stopped", "error", "stopping") and notice.get("kind") == "ended_after_silence":
         return "notice", f"ended:{notice.get('meeting_id')}:{notice.get('at')}"
     return None
+
+
+def start_queued(state: dict[str, Any]) -> bool:
+    """A start waits for the last meeting's wrap-up (the host's ``start_queued``) and will record by itself once it
+    is over: said, with a way to take it back. Also the moment the wrap-up is over and the start not begun (the
+    state already says stopped); never while something is recorded."""
+    return bool(state.get("start_queued")) and str(state.get("state") or "stopped") in ("stopping", "stopped", "error")
 
 
 def question_key(state: dict[str, Any]) -> str | None:
@@ -317,10 +364,13 @@ def panel_model(state: dict[str, Any], lang: str, now: datetime | None = None, *
 
     def suggestion() -> PanelModel:
         app = _short((state.get("suggestion") or {}).get("app"), 80)
+        # during the last meeting's wrap-up, Start waits for its notes; a press of the shortcut there may be the
+        # second half of a double Stop, so it isn't named
+        accept_tip = s["suggest_queued_tip"] if current == "stopping" else tip(s["start_tip"])
         return PanelModel("suggestion", s["suggestion"], "phone.fill", "green",
                           tooltip=s["suggestion_app"].format(app=app) if app else "",
                           buttons=(PanelButton("accept", s["suggest_start"], s["suggest_start"], prominent=True,
-                                               tooltip=tip(s["start_tip"])),
+                                               tooltip=accept_tip),
                                    PanelButton("dismiss", s["not_now"], s["not_now"])),
                           announce=s["suggestion"])
 
@@ -333,6 +383,11 @@ def panel_model(state: dict[str, Any], lang: str, now: datetime | None = None, *
         if notice.get("pending") is True:
             text, symbol = s["ended_writing"], "square.and.arrow.down"
             tooltip = s["ended_writing_tip"].format(minutes=minutes)
+        elif notice.get("unfinished") is True:
+            # settled without its meeting.ended (the wrap-up failed, or Stop now or a quit cut it short): whether
+            # anything was said, or saved, isn't known — only how it ended (no tick: it may not have gone well)
+            text, symbol = s["ended_silence"].format(minutes=minutes), "stop.circle"
+            tooltip = s["ended_unfinished_tip"].format(minutes=minutes)
         else:
             text, symbol = s["ended_silence"].format(minutes=minutes), "checkmark.circle"
             # written, and no folder: nothing had been said (only a host that says pending says that much)
@@ -368,7 +423,15 @@ def panel_model(state: dict[str, Any], lang: str, now: datetime | None = None, *
                           timer_label=timer_label, buttons=(pause, stop))
     if current == "starting":
         return PanelModel("starting", s["starting"], "circle.dotted", "secondary", buttons=(stop,))
-    if current == "stopping":
+    if start_queued(state):
+        # it would record by itself minutes from now: said, with Cancel (a stop, which takes a waiting start back;
+        # the notes are still written). Not the shortcut in its tooltip: a press is the same start again
+        text, tooltip = (s["queued"], s["queued_tip"]) if manual else (s["queued_auto"], s["queued_auto_tip"])
+        label, cancel_tip = (s["cancel_next"], s["cancel_next_tip"]) if manual else (s["cancel_listen"], s["cancel_listen_tip"])
+        return PanelModel("queued", text, "square.and.arrow.down", "secondary", tooltip=tooltip, announce=text,
+                          buttons=(PanelButton("cancel", s["cancel"], label, "xmark", icon_only=True, tooltip=cancel_tip),))
+    if current == "stopping" and not state.get("suggestion"):
+        # (a call that begins meanwhile is offered: its Start waits for these notes, then records)
         return PanelModel("stopping", s["saving"] if manual else s["stopping"], "square.and.arrow.down", "secondary")
     if state.get("suggestion"):
         return suggestion()
@@ -399,10 +462,13 @@ def sample_states() -> dict[str, dict[str, Any]]:
         "listening": {**base, "mode": "automatic", "state": "listening"},
         "starting": {**base, "state": "starting"},
         "stopping": {**base, "state": "stopping"},
+        "start_queued": {**base, "state": "stopping", "start_queued": True},
         "suggestion": {**base, "suggestion": {"app": "Microsoft Teams", "at": "2026-01-01T09:00:00+00:00"}},
         "still_there": {**base, **meeting, "state": "listening", "still_there": {"meeting_id": "m", "silent_minutes": 15}},
         "notice": {**base, "notice": {"kind": "ended_after_silence", "minutes": 60}},
         "notice_writing": {**base, "notice": {"kind": "ended_after_silence", "minutes": 60, "pending": True}},
+        "notice_unfinished": {**base, "notice": {"kind": "ended_after_silence", "minutes": 60, "pending": False,
+                                                 "unfinished": True}},
         "link_refused": {**base, "notice": {"kind": "link_refused"}},
         "error": {**base, "state": "error", "error": "Microphone permission is off: System Settings → Privacy & Security"},
     }
@@ -490,8 +556,13 @@ def _classes() -> dict[str, Any]:
 
         class VoicestreamPanelButton(NSButton):
             # no typedSelector on these overrides: PyObjC keeps the encodings of the methods they override
-            def acceptsFirstMouse_(self, event):  # the first click acts: the panel is never key
-                return True
+            def acceptsFirstMouse_(self, event):  # the first click acts: the panel is never key …
+                panel = getattr(self, "panel", None)
+                try:  # … except on buttons that just came up by themselves (CLICK_GUARD_S): not even pressed
+                    return panel is None or bool(panel.accepts_clicks())
+                except Exception:  # never into AppKit; the action is held back all the same (clicked)
+                    log.exception("floating button: could not tell whether a click may act")
+                    return True
 
         class VoicestreamPanelLabel(NSTextField):
             def mouseDownCanMoveWindow(self):  # the panel is dragged by its labels too
@@ -587,6 +658,9 @@ class FloatingPanel:
     _observer: bool = False
     _animating: bool = False
     _images: dict[tuple[str, str, float], Any] = field(default_factory=dict)
+    clock: Callable[[], float] = field(default=time.monotonic, repr=False)
+    _armed_at: float = 0.0
+    """When the buttons on show may act (:data:`CLICK_GUARD_S` after new ones of a :data:`GUARDED_LOOKS` look)."""
 
     # ------------------------------------------------------------ building
 
@@ -646,6 +720,7 @@ class FloatingPanel:
             b.setButtonType_(BUTTON_MOMENTARY_PUSH_IN)
             with contextlib.suppress(Exception):
                 b.setControlSize_(CONTROL_LARGE)
+            b.panel = self  # for acceptsFirstMouse_
             b.setTarget_(target)
             b.setAction_("panelAction:")
             b.setTag_(i)
@@ -731,6 +806,10 @@ class FloatingPanel:
             self._build()
         self._context_menu()
         appears = self.model is None or self.model.kind != model.kind
+        keys = [b.key for b in model.buttons]
+        if first or not self.panel.isVisible() or self.model is None or [b.key for b in self.model.buttons] != keys:
+            # new buttons, maybe right where a click is on its way: held back a moment if they came up by themselves
+            self._armed_at = self.clock() + CLICK_GUARD_S if model.kind in GUARDED_LOOKS else 0.0
         self._render(model)
         size = self._fitting_size()
         if first or not self.panel.isVisible():
@@ -842,7 +921,14 @@ class FloatingPanel:
 
     # ------------------------------------------------------------ events
 
+    def accepts_clicks(self) -> bool:
+        """The buttons on show may act (not in the :data:`CLICK_GUARD_S` after new ones came up by themselves)."""
+        return self.clock() >= self._armed_at
+
     def clicked(self, index: int) -> None:
+        if not self.accepts_clicks():  # AppKit may deliver the click anyway: the action is what must not happen
+            log.debug("floating button: a click as its buttons came up, ignored")
+            return
         if 0 <= index < len(self._keys):
             self.on_action(self._keys[index])
 

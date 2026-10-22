@@ -78,6 +78,30 @@ def test_starting_stopping_and_problems() -> None:
     assert err.tooltip == "Microphone permission is off: System Settings"  # one line
 
 
+def test_a_start_waiting_for_the_wrap_up_shows_and_can_be_cancelled() -> None:
+    """``start_queued``: a start (a press of the shortcut, the launcher, a call accepted) waits for the last
+    meeting's notes, and records by itself once they are written. Nothing said so: "Saving notes…" alone, no button.
+    Now it says the next meeting comes after the notes, with Cancel (a stop: the start is taken back, the notes
+    are still written)."""
+    queued = floating.panel_model(_st("stopping", start_queued=True), "en", NOW, shortcut="⌥⌘R")
+    assert queued.kind == "queued" and queued.text == "Next meeting after the notes…" and queued.announce == queued.text
+    assert queued.tooltip == "The next meeting starts once these notes are written"
+    (cancel,) = queued.buttons
+    assert (cancel.key, cancel.symbol, cancel.icon_only, cancel.prominent) == ("cancel", "xmark", True, False)
+    assert cancel.label == "Cancel next meeting" and "notes are still written" in cancel.tooltip
+    assert "⌥⌘R" not in cancel.tooltip  # a press doesn't cancel it: it is the same start again
+    fr = floating.panel_model(_st("stopping", start_queued=True), "fr", NOW)
+    assert (fr.text, fr.buttons[0].label) == ("Prochaine réunion après les notes…", "Annuler la prochaine réunion")
+    auto = floating.panel_model(_st("stopping", mode="automatic", start_queued=True), "en", NOW)
+    assert auto.kind == "queued" and "listening" in auto.text.lower() and auto.buttons[0].key == "cancel"
+    # the moment the wrap-up is over and the start not begun yet, it still waits
+    assert floating.panel_model(_st("stopped", start_queued=True), "en", NOW).kind == "queued"
+    assert floating.panel_model(_st("stopping"), "en", NOW).kind == "stopping"  # nothing waits: as before
+    assert floating.panel_model(_st("starting", start_queued=True), "en", NOW).kind == "starting"
+    assert floating.start_queued(_st("stopping", start_queued=True))
+    assert not floating.start_queued(_st("listening", start_queued=True)) and not floating.start_queued(_st("stopping"))
+
+
 def test_french_says_recording_only_while_it_records() -> None:
     """« Enregistrement » is the app's French word for Recording (the dot's VoiceOver label, the window's state):
     after Stop, the wrap-up is said as the window says it, or « Enregistrement des notes… » reads as still recording."""
@@ -116,6 +140,29 @@ def test_call_suggestion_nudge_and_notices() -> None:
     assert floating.panel_model(_st("listening", **_meeting(1), suggestion={"app": "Zoom"}), "en", NOW).kind == "recording"
 
 
+def test_a_call_that_begins_during_the_wrap_up_is_suggested_there() -> None:
+    """The call watcher runs from Stop on, so a call that begins while the last meeting's notes are written is
+    suggested then — and its Start now does something there: it waits for the notes, then records. Shown only
+    once the wrap-up was over (seconds, minutes with an agent at work), the offer came late, and with the window
+    closed and the floating button hidden it was shown nowhere meanwhile."""
+    sug = {"app": "Zoom", "at": "t1"}
+    m = floating.panel_model(_st("stopping", suggestion=sug), "en", NOW, shortcut="⌥⌘R")
+    assert m.kind == "suggestion" and _keys(m) == ["accept", "dismiss"] and m.tooltip == "Zoom is using the microphone"
+    # its Start waits for the notes: said so, and not with the shortcut (a press there is half of a double Stop)
+    assert m.buttons[0].tooltip == "Start the next meeting once these notes are written"
+    assert floating.panel_model(_st("stopping", suggestion=sug), "fr", NOW).buttons[0].tooltip == (
+        "Démarrer la prochaine réunion une fois ces notes rédigées")
+    assert floating.panel_model(_st(suggestion=sug), "en", NOW, shortcut="⌥⌘R").buttons[0].tooltip.endswith("(⌥⌘R)")
+    # Not now: back to the notes being written
+    assert floating.panel_model(_st("stopping"), "en", NOW).kind == "stopping"
+    # a start already waits for the notes: that is what shows (Start there would be the same start)
+    assert floating.panel_model(_st("stopping", suggestion=sug, start_queued=True), "en", NOW).kind == "queued"
+    off = {"prefs": {"floating_button": False}, "capabilities": {"floating_button": True}}
+    hidden = {**_st("stopping", suggestion=sug), **off}
+    assert floating.wanted(hidden) and floating.panel_model(hidden, "en", NOW).kind == "suggestion"
+    assert not floating.wanted({**hidden, "start_queued": True})  # nothing to ask: the menus offer to cancel it
+
+
 def test_a_notice_keeps_start_meeting_one_click_away() -> None:
     """A notice stays until OK, for hours after a forgotten meeting ended in the night: the floating button,
     whose job is to start a meeting, keeps its Start next to it (starting clears the notice, host-side)."""
@@ -147,6 +194,30 @@ def test_a_meeting_that_ended_by_itself_says_its_notes_are_being_written() -> No
     # a notice without the field (as the samples build it) is a finished one, as before
     legacy = floating.panel_model(_st(notice={"kind": "ended_after_silence", "minutes": 60}), "en", NOW)
     assert (legacy.text, legacy.tooltip) == (done.text, done.tooltip)
+
+
+def test_a_wrap_up_that_did_not_finish_claims_nothing_about_the_notes() -> None:
+    """``unfinished``: the host settled the notice without its meeting.ended (the wrap-up failed or was cut short,
+    by Stop now or a quit), so there is no folder — for a meeting that may well have had speech. Neither "nothing
+    had been said" nor "its notes are saved" is known: only that it ended after so long without speech."""
+    cut = {"kind": "ended_after_silence", "minutes": 60, "pending": False, "unfinished": True, "title": None,
+           "folder": None}
+    for lang in ("en", "fr"):
+        m = floating.panel_model(_st(notice=cut), lang, NOW)
+        s = floating.STRINGS[lang]
+        assert m.kind == "notice" and _keys(m) == ["start", "ok"] and m.announce == m.text
+        assert m.text == s["ended_silence"].format(minutes=60)
+        assert m.tooltip not in (s["ended_empty_tip"], s["ended_tip"]) and "60 min" in m.tooltip
+        assert m.tooltip == s["ended_unfinished_tip"].format(minutes=60)
+        assert m.symbol != "checkmark.circle"  # a tick would say it all went well
+    assert floating.panel_model(_st(notice=cut), "en", NOW).tooltip == "It ended after 60 min without speech"
+    assert floating.panel_model(_st(notice=cut), "fr", NOW).tooltip == "Elle s'est terminée après 60 min sans parole"
+    # hidden by the setting, it still comes up for it (a meeting that ended by itself), with that wording
+    hidden = {**_st(notice={**cut, "at": "t", "meeting_id": "m1"}), "prefs": {"floating_button": False},
+              "capabilities": {"floating_button": True}}
+    assert floating.wanted(hidden) and floating.panel_model(hidden, "en", NOW).tooltip.startswith("It ended after 60")
+    # pending wins: still being written is still being written
+    assert floating.panel_model(_st(notice={**cut, "pending": True}), "en", NOW).text.endswith("being written…")
 
 
 def test_paused_shows_resume_even_with_a_nudge_up() -> None:
@@ -188,7 +259,8 @@ def test_both_languages_say_everything() -> None:
             # one line of at most TEXT_MAX_WIDTH (300 pt) at 13 pt, cut at its end otherwise: about 45 characters
             assert len(m.text) <= 45, m.text
     assert sorted(set(floating.kinds(floating.sample_states().values()))) == sorted(
-        {"idle", "recording", "paused", "listening", "starting", "stopping", "suggestion", "still_there", "notice", "error"})
+        {"idle", "recording", "paused", "listening", "starting", "stopping", "queued", "suggestion", "still_there", "notice",
+         "error"})
 
 
 def test_when_it_shows() -> None:
@@ -534,6 +606,8 @@ def test_the_panel_never_takes_the_focus_and_floats_on_every_space(appkit: Any) 
 
 def test_the_panel_follows_the_state(appkit: Any) -> None:
     p, actions, moves = _panel()
+    now = [0.0]
+    p.clock = lambda: now[0]
     p.update(floating.panel_model(_st(), "en", NOW), lang="en")
     idle_frame = floating._rect(p.panel.frame())
     p.update(floating.panel_model(_st("listening", **_meeting(2)), "en", NOW), lang="en")
@@ -560,11 +634,71 @@ def test_the_panel_follows_the_state(appkit: Any) -> None:
     assert p._views["effect"].values["toolTip"] == "Zoom is using the microphone"
     accept, dismiss = _visible_buttons(p)
     assert accept.values["bezelColor"] == "color:accent" and dismiss.values["bezelColor"] is None  # one primary
+    now[0] += floating.CLICK_GUARD_S  # it came up by itself: its buttons wait a moment (see below)
     p.clicked(1)
     assert actions[-1] == "dismiss"
     p.update(None)
     assert p.panel.values["isVisible"] is False and p.model is None
     assert moves == []
+
+
+def test_new_buttons_ignore_clicks_for_a_moment(appkit: Any) -> None:
+    """A question comes up by itself (hidden, the panel pops up at its place ~3 s into a call — where you may be
+    clicking in the meeting app; shown, its look changes under the pointer), and its buttons take the first click
+    (the panel is never key). A click meant for what was there must not start a recording, keep or end a meeting,
+    or cancel the next one: those buttons ignore clicks for CLICK_GUARD_S once they appear. Everything else keeps
+    acting on the first click, and the context menu is never held back."""
+    now = [100.0]
+    p, actions, _ = _panel()
+    p.clock = lambda: now[0]
+
+    def show(st: dict[str, Any]) -> None:
+        p.update(floating.panel_model(st, "en", NOW), lang="en")
+
+    def click(index: int = 0) -> list[str]:
+        before = len(actions)
+        p._target.panelAction_(types.SimpleNamespace(tag=lambda: index))  # as AppKit sends the button's action
+        return actions[before:]
+
+    def first_mouse() -> bool:
+        return all(b.acceptsFirstMouse_(None) for b in _visible_buttons(p))
+
+    show(_st())
+    assert click() == ["start"] and first_mouse()  # the idle look: at once, as before
+    sug = _st(suggestion={"app": "Zoom", "at": "t1"})
+    show(sug)
+    assert click() == [] and not first_mouse()  # just appeared: neither the press nor the action goes through
+    now[0] += floating.CLICK_GUARD_S - 0.01
+    assert click(1) == []
+    now[0] += 0.02
+    assert click() == ["accept"] and first_mouse()
+    show(_st(suggestion={"app": "Teams", "at": "t2"}))  # another call: the same buttons, where they were
+    assert click(1) == ["dismiss"]
+    p._target.contextAction_(types.SimpleNamespace(representedObject=lambda: "hide"))
+    assert actions[-1] == "hide"
+    show(_st("listening", **_meeting(1)))  # recording: Pause / Stop act at once
+    assert click(1) == ["stop"]
+    show(_st("listening", **_meeting(20), still_there={"meeting_id": "m1", "silent_minutes": 15}))
+    assert click() == [] and click(1) == []  # Keep / End where Pause / Stop just were
+    now[0] += floating.CLICK_GUARD_S
+    assert click() == ["keep"]
+    show(_st("stopping"))
+    show(_st("stopping", start_queued=True))  # Cancel appears where there was no button
+    assert click() == []
+    now[0] += floating.CLICK_GUARD_S
+    assert click() == ["cancel"]
+    writing = {"kind": "ended_after_silence", "minutes": 60, "pending": True}
+    show(_st(notice=writing))  # a notice: Start meeting next to OK, moved by its text
+    assert click() == []
+    now[0] += floating.CLICK_GUARD_S
+    show(_st(notice={**writing, "pending": False, "folder": "f"}))  # the same buttons, new words: not again
+    assert click(1) == ["ok"]
+    p.update(None)  # hidden, then up again for a question: held back again
+    now[0] += 60
+    show(sug)
+    assert click() == []
+    show(_st())  # gone before the moment is over: the idle Start is not held back
+    assert click() == ["start"]
 
 
 def test_reduce_motion_keeps_the_dot_still(appkit: Any) -> None:
