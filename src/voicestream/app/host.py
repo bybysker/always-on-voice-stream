@@ -443,7 +443,9 @@ class AppHost:
         "silent_minutes", "ends_at"}`` until speech, Keep or the end of the meeting."""
         self.notice: dict[str, Any] | None = None
         """Something the person should know happened by itself (``kind``: ``ended_after_silence``,
-        ``link_refused``), until dismissed or the next meeting starts."""
+        ``link_refused``), until dismissed or the next meeting starts. ``ended_after_silence`` is ``pending``
+        while the meeting's notes are being written, then says where they are (``title``, ``folder``: none
+        when nothing was said)."""
         self.wall: Callable[[], float] = time.time
         """The clock the calls already suggested are remembered on (tests replace it)."""
         self.status: State = "stopped"
@@ -723,7 +725,7 @@ class AppHost:
             note = self.notice
             if note is not None and note.get("meeting_id") == ev.data.get("meeting_id"):
                 where = ev.data.get("dir")  # none when nothing was said: there is no meeting to open
-                note.update(title=ev.data.get("title"), folder=Path(str(where)).name if where else None)
+                note.update(title=ev.data.get("title"), folder=Path(str(where)).name if where else None, pending=False)
             self._publish_state()
             if self.restart_pending:
                 self.track(asyncio.ensure_future(self._apply_pending()))
@@ -737,9 +739,10 @@ class AppHost:
             return
         self.still_there = None
         if ev.data.get("reason") == "silence":
+            # pending: its notes are being written (meeting.ended says whether there are any, and where)
             self.notice = {"kind": "ended_after_silence", "meeting_id": ev.data.get("meeting_id"),
                            "minutes": round(a.end_after_s / 60), "at": utcnow().isoformat(), "title": None,
-                           "folder": None}  # fmt: skip
+                           "folder": None, "pending": True}  # fmt: skip
         if not self._stop_requested and not self._closing:
             self.track(asyncio.ensure_future(self.listen_stop()))
         else:
@@ -892,8 +895,11 @@ class AppHost:
                     # its wrap-up was cut short (a forced stop cancelled it): unlocked, its lock file left
                     # in place marks it as cut off, so Meetings finishes it now (not in an hour)
                     s.store.release(ended=False)
+            settled = self._settle_notice(assistant)
             if self._retiring.pop(assistant, None) is not None:
-                pass  # it had handed listening over already (see _stop): its agents are done now
+                # it had handed listening over already (see _stop): its agents are done now
+                if settled:
+                    self._publish_state()
             else:
                 if self._assistant is assistant:
                     self._assistant = None
@@ -909,6 +915,17 @@ class AppHost:
                     self._set_status("error", self._last_source_error or "Listening stopped unexpectedly (see the log)")
                 else:
                     self._set_status("stopped")
+
+    def _settle_notice(self, assistant: Assistant) -> bool:
+        """``assistant`` is over, however it ended: a notice still saying one of its meetings' notes are being
+        written (``pending``) stops saying so — that wrap-up never said it was done (cut short by a forced
+        stop, failed) and won't now. Returns whether it did."""
+        note = self.notice
+        ids = {s.meeting.id for s in [assistant.current, *assistant.finished_meetings] if s is not None}
+        if note is None or not note.get("pending") or note.get("meeting_id") not in ids:
+            return False
+        note["pending"] = False
+        return True
 
     async def listen_pause(self) -> None:
         a = self._assistant

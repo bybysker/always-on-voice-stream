@@ -248,6 +248,50 @@ async def test_an_hour_without_speech_ends_the_meeting_and_says_why(tmp_path: Pa
     await _until(lambda: host.status == "stopped")
 
 
+async def test_the_notice_says_the_notes_are_being_written_until_they_are(tmp_path: Path,
+                                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ended after an hour without speech: the wrap-up (summary, pushes) takes a while, and until it says
+    whether there are notes the notice says they are being written (``pending``), not that nothing had been
+    said; it says so once it is known, also when nothing was said, or when the wrap-up never says it."""
+    gate = _slow_wrap_up(monkeypatch)
+    wall = Wall()
+    built: list[Assistant] = []
+    host = _manual(tmp_path, wall, built)
+    try:
+        await host.meeting_start()
+        await built[0]._route(seg("I'll send the deck to Sam by Friday.", "mic", t=1.0))
+        wall.advance(61)
+        await _until(lambda: host.status == "stopping" and host.notice is not None)
+        await asyncio.sleep(0.1)
+        notice = host.state()["notice"]
+        assert notice["kind"] == "ended_after_silence" and notice["pending"] is True and notice["folder"] is None
+        assert all(e["notice"]["pending"] is True for e in _events(host, "app.state") if e["notice"])
+        gate.set()
+        await _until(lambda: host.status == "stopped")
+        notice = host.state()["notice"]
+        assert notice["pending"] is False and notice["folder"] == list_sessions(host.cfg.data_path)[-1].name
+
+        await host.meeting_start()  # nothing said this time: no notes, once that is known
+        wall.advance(61)
+        await _until(lambda: host.status == "stopped" and host.notice is not None)
+        assert host.state()["notice"]["pending"] is False and host.state()["notice"]["folder"] is None
+
+        # a wrap-up that fails (a full disk) never says it is done: the notice doesn't stay "being written"
+        await host.meeting_start()
+        await built[-1]._route(seg("Budget review.", "mic", t=1.0))
+
+        def full(*args: Any, **kw: Any) -> None:
+            raise OSError("No space left on device")
+
+        monkeypatch.setattr(built[-1].current.store, "save", full)
+        wall.advance(61)
+        await _until(lambda: host.status == "error")
+        assert host.state()["notice"]["pending"] is False and not _events(host, "meeting.ended")[2:]
+    finally:
+        gate.set()
+        await host.shutdown()
+
+
 async def test_speech_right_after_waking_up_isnt_added_to_a_forgotten_meeting(tmp_path: Path) -> None:
     """A meeting started by hand and forgotten, the lid closed overnight: woken up, the first line can come in
     before the idle monitor looks again (words cut off when the lid closed, or the next meeting already
