@@ -129,12 +129,9 @@ SETTINGS_PAGE = "#/settings/general"
 """Settings… in the floating button's menu opens the window there (Settings → General → Starting meetings)."""
 
 SOUNDS = {"start": "Tink", "restart": "Tink", "resume": "Tink", "stop": "Pop", "error": "Basso"}
-"""What the keyboard shortcut plays (macOS's own sounds, /System/Library/Sounds) for what it did;
-``error``: listening could not start (the menu bar says why), or a start did nothing (:func:`start_missed`)."""
+"""What the keyboard shortcut plays (macOS's own sounds, /System/Library/Sounds) for what it did (:func:`sound_for`);
+``error``: listening could not start (the menu bar says why), or a start can't happen (the app is quitting)."""
 HOTKEY_ANSWER_S = 5.0  # the self-test's wait for the host's answer to a press
-ASKS_A_START = frozenset({"stopped", "error", "stopping"})
-"""Where a press of the shortcut (or a toggle link) asks for a start: nothing is recorded — stopped, after a problem,
-or the last meeting being wrapped up (the host starts the next one once it is)."""
 
 LISTENING_STATES = frozenset({"starting", "listening", "paused"})
 SYMBOLS = {
@@ -410,12 +407,20 @@ def meeting_menu_model(state: dict[str, Any], lang: str, *, quitting: bool = Fal
     ]
 
 
-def start_missed(asked: str | None, before: str, did: str | None) -> bool:
-    """A start that did nothing (``did``: the host's ``None``, or a link's ``"nothing"``) while nothing was being
-    recorded (``before``: the host's state when it was asked): said with the failure sound, not silence, which
-    would pass for a meeting being recorded. ``asked``: start, toggle or stop. While a start is under way or a
-    meeting records, nothing was missed."""
-    return did in (None, "nothing") and asked in ("start", "toggle") and before in ASKS_A_START
+def sound_for(asked: str | None, did: str | None, *, quitting: bool = False) -> str | None:
+    """Which of :data:`SOUNDS` says what a press of the shortcut or a link did, ``None``: none. ``asked``: start,
+    toggle or stop; ``did``: the host's answer, which says it all — never a guess from its state before the press,
+    which can't tell a press joined to a start under way from one lost (the "failed" sound, then a recording).
+    A start once it is up, also one that waited for the last meeting's wrap-up; ``error`` when it failed;
+    ``stop`` at once. ``cancelled``: a start that waited for the wrap-up was taken back (Stop, Stop now, quitting,
+    a switch to by hand) — that is what you did, not a failure: nothing. A start that did nothing (``None``, a
+    link's ``"nothing"``) is said only while the app quits: it can't happen then, and nothing else would say so;
+    otherwise the host had nothing to do (a meeting is starting or recorded already)."""
+    if did in SOUNDS:
+        return did
+    if did in (None, "nothing") and asked in ("start", "toggle") and quitting:
+        return "error"
+    return None
 
 
 def needs_quit_confirmation(state: dict[str, Any]) -> bool:
@@ -1133,23 +1138,17 @@ class MacShell:
     async def _toggle(self) -> None:
         """On the host's loop. A stop is said at once (its wrap-up takes a while); a start, restart or
         resume once the host knows how it went — ``error`` when it failed, with its own sound: the
-        "it worked" one must not play for a start that went to the error state. A press meant as a start that did
-        nothing (:func:`start_missed`) has the failure sound too: lost in silence, it passes for a recording."""
+        "it worked" one must not play for a start that went to the error state (:func:`sound_for`)."""
         from PyObjCTools import AppHelper
 
-        before = self._host_status()
         action = await self.host.meeting_toggle()
-        said = "error" if start_missed("toggle", before, action) else action
-        if said is not None:
-            AppHelper.callAfter(_guard, lambda: self._feedback(said))
+        AppHelper.callAfter(_guard, lambda: self._say("toggle", action))
 
-    def _host_status(self) -> str:
-        """On the host's loop: its state now (what a press or a link meant depends on it)."""
-        try:
-            return str((self.host.state() or {}).get("state") or "stopped")
-        except Exception:  # then nothing is said of a start that did nothing, as before
-            log.debug("could not read the host's state", exc_info=True)
-            return ""
+    def _say(self, asked: str | None, did: str | None) -> None:
+        """Main thread (where :attr:`quitting` is set): the sound for what a press or a link did, if any."""
+        sound = sound_for(asked, did, quitting=self.quitting)
+        if sound is not None:
+            self._feedback(sound)
 
     async def _ask_toggle(self) -> str | None:
         ask = getattr(self.host, "toggle_action", None)
@@ -1158,7 +1157,7 @@ class MacShell:
     def _feedback(self, action: str) -> None:
         """Main thread: a short sound, so you know the shortcut worked — or not — without looking (the
         menu-bar icon changes too). Settings → General can turn it off."""
-        if not (self.state.get("prefs") or {}).get("hotkey_sound", True):
+        if not (self.state.get("prefs") or {}).get("hotkey_sound", True) or action not in SOUNDS:
             return
         import AppKit
 
@@ -1402,24 +1401,22 @@ class MacShell:
         from .host import parse_url
 
         follow = getattr(self.host, "open_url", None)
-        before = self._host_status()
         outcome = str(await follow(url) if follow is not None else "unknown")
         parsed = parse_url(url)
-        if parsed is not None and start_missed(parsed[0], before, outcome):
-            outcome = "error"  # the launcher's start did nothing: not silence
-        AppHelper.callAfter(_guard, lambda: self._url_done(outcome))
+        asked = parsed[0] if parsed is not None else None
+        AppHelper.callAfter(_guard, lambda: self._url_done(outcome, asked))
 
-    def _url_done(self, outcome: str) -> None:
-        """Main thread: what a link did. The meeting actions sound as the shortcut's do (a link from Spotlight
-        leaves you in the app you were in, so the sound and the floating button are the feedback), a start that
-        did nothing too (``error``); a link refused for its key sounds as a failure (the floating button and the
-        window say why)."""
+    def _url_done(self, outcome: str, asked: str | None = None) -> None:
+        """Main thread: what a link did (``asked``: start, stop, toggle, open). The meeting actions sound as the
+        shortcut's do (:func:`sound_for`: a link from Spotlight leaves you in the app you were in, so the sound and
+        the floating button are the feedback); a link refused for its key sounds as a failure (the floating button
+        and the window say why)."""
         if outcome == "open":
             self.reopened()
-        elif outcome in SOUNDS:
-            self._feedback(outcome)
         elif outcome == "refused":
             self._feedback("error")
+        else:
+            self._say(asked, outcome)
 
     async def _ask_url(self, url: str) -> dict[str, Any]:
         """The self-test's link, on the loop: what it names, whether it carries the launcher's key (compared as

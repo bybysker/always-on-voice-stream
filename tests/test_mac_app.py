@@ -134,9 +134,15 @@ class FakeHost:
             return "stop" if self._state["state"] in ("starting", "listening", "paused", "error") else None
         return (hotkey.TOGGLE if what == "toggle" else start).get(self._state["state"])
 
+    answer: Any = "as the state says"
+    """What a press answers instead, as AppHost's would in a moment this fake doesn't keep: ``start`` for one
+    joined to a start under way or that waited for the last meeting's wrap-up, ``cancelled`` for one taken back."""
+
     async def meeting_toggle(self) -> str | None:
         """As AppHost's: a start that went to the error state (``start_fails``) is said as ``error``."""
         self.calls.append(("meeting_toggle", None))
+        if self.answer != "as the state says":
+            return self.answer
         action = self.toggle_action()
         return "error" if action in ("start", "restart") and self.start_fails else action
 
@@ -1240,13 +1246,14 @@ def test_a_press_toggles_listening_and_plays_a_sound(host: FakeHost, appkit: Rec
     assert _wait(lambda: len([c for c in host.calls if c[0] == "meeting_toggle"]) == 5)
     time.sleep(0.1)
     assert len(played) == 4
-    # the last meeting is being wrapped up and the host could start nothing (it says None): a press meant to
-    # start the next one is not lost in silence — the failure sound, so you know to press again
+    # the last meeting is being wrapped up: the host starts the next one once it is, and says so then ("start")
     host._state["state"] = "stopping"
+    host.answer = "start"
     shell.on_hotkey()
-    assert _wait(lambda: len(played) == 5 and played[-1] == "Basso")
+    assert _wait(lambda: len(played) == 5 and played[-1] == "Tink")
     del played[-1]
     host._state["state"] = "stopped"
+    host.answer = "as the state says"
     shell.state = _hk_state("stopped", status="ok", sound=False)  # turned off in Settings
     shell.on_hotkey()
     assert _wait(lambda: len([c for c in host.calls if c[0] == "meeting_toggle"]) == 6)
@@ -1266,6 +1273,41 @@ def test_a_press_toggles_listening_and_plays_a_sound(host: FakeHost, appkit: Rec
     shell.state = _hk_state("listening", status="ok")
     shell.on_hotkey()
     assert _wait(lambda: played[-1] == "Pop")
+
+
+def test_the_host_says_what_a_press_did_and_the_shell_adds_no_guess(
+        host: FakeHost, appkit: Recorder, hotkeys: list[FakeHotKeys], sounds: list[str]) -> None:
+    """The sound is the host's answer, never a guess from the state before the press. A press that joined a start
+    under way (two presses in one turn of the loop, the second before the state says "starting") is followed by a
+    recording: a "failed" sound for it would be false. A start that waited for the last meeting's wrap-up and was
+    taken back — by Stop, Stop now, quitting, a switch to by hand — is "cancelled": that is what you did, and the
+    failure sound at that moment (on top of the Stop) would say something went wrong."""
+    host.thread.start()
+    shell = _shell(host)
+    shell._launched = True
+    shell.state = _hk_state("stopped", status="ok")
+
+    def press(answer: Any, state: str = "stopped") -> None:
+        host._state["state"], host.answer = state, answer
+        before = len([c for c in host.calls if c[0] == "meeting_toggle"])
+        shell.on_hotkey()
+        assert _wait(lambda: len([c for c in host.calls if c[0] == "meeting_toggle"]) == before + 1)
+        time.sleep(0.1)  # what it plays is decided on the main thread (here: at once, see _shell)
+
+    for state in ("stopped", "error", "stopping", "starting"):
+        press(None, state)  # the host had nothing to do (a press joined, the moment before the state said so)
+    press("cancelled", "stopping")
+    assert sounds == []
+    press("start", "stopping")  # the queued start, carried out once the wrap-up was over
+    press("stop", "stopping")  # the second press of a double press on Stop: part of that Stop
+    assert sounds == ["Tink", "Pop"]
+    # only while quitting does a start that did nothing say so: it can't happen, and nothing else would tell
+    shell.quitting = True
+    press(None, "stopping")
+    press("cancelled", "stopping")  # taken back by the quit itself: nothing
+    assert sounds == ["Tink", "Pop", "Basso"]
+    assert native.sound_for("stop", None, quitting=True) is None  # nothing to stop: nothing missed
+    assert native.sound_for("toggle", "something new") is None  # an answer this shell doesn't know: no sound
 
 
 def test_the_selftest_presses_the_shortcut_without_listening(host: FakeHost, appkit: Recorder,
@@ -1837,14 +1879,27 @@ def test_links_reach_the_host_and_say_what_they_did(host: FakeHost, appkit: Reco
     assert _wait(lambda: host.calls[-1] == ("open_url", ""))
     time.sleep(0.1)
     assert len(sounds) == 3
-    # a start that did nothing where nothing is recorded — the last meeting being wrapped up, the app quitting —:
-    # the failure sound, as the README says, not silence that passes for a meeting being recorded
-    for state, url in (("stopping", link), ("stopped", f"voicestream://meeting/toggle?key={host.url_key}"),
-                       ("error", link)):
-        host._state["state"] = state
-        before = len(sounds)
+    # what the host answers is what is said, not a guess from its state: during the last meeting's wrap-up the
+    # launcher's start waits for it and says "start" then, or "cancelled" when Stop took it back (nothing to say)
+    toggle = f"voicestream://meeting/toggle?key={host.url_key}"
+    for state, url, outcome in (("stopping", link, "nothing"), ("stopped", toggle, "nothing"), ("error", link, "nothing"),
+                                ("stopping", link, "cancelled"), ("stopping", toggle, "cancelled")):
+        host._state["state"], host.url_outcome = state, outcome
         shell.open_url(url)
-        assert _wait(lambda n=before: len(sounds) == n + 1 and sounds[-1] == "Basso"), state
+        assert _wait(lambda u=url: host.calls[-1] == ("open_url", u))
+    time.sleep(0.1)
+    assert len(sounds) == 3
+    host._state["state"], host.url_outcome = "stopping", "start"
+    shell.open_url(link)
+    assert _wait(lambda: len(sounds) == 4 and sounds[-1] == "Tink")
+    # quitting, a start that did nothing can't happen any more: the failure sound, as the README says (not a stop)
+    shell.quitting = True
+    host.url_outcome = "nothing"
+    for url in ("voicestream://meeting/stop", link, toggle):
+        shell.open_url(url)
+    assert _wait(lambda: sounds[4:] == ["Basso", "Basso"])
+    time.sleep(0.1)
+    assert len(sounds) == 6
 
 
 def test_the_selftest_link_is_only_asked_about(host: FakeHost, appkit: Recorder) -> None:
