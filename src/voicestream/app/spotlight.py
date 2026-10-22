@@ -90,7 +90,8 @@ def script(url: str, app: Path | None = None) -> str:
         "# turn it off there. The link carries a key: only this launcher may start a recording with it.",
     ]
     if app is not None:
-        lines.append(f"/usr/bin/open -g -a {shlex.quote(str(app))} {link} 2>/dev/null || {by_id}")
+        # a Mac shell runs it: the path in / form whatever system wrote it (the tests run on Windows too)
+        lines.append(f"/usr/bin/open -g -a {shlex.quote(app.as_posix())} {link} 2>/dev/null || {by_id}")
     else:
         lines.append(by_id)
     return "\n".join(lines) + "\n"
