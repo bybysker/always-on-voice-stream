@@ -666,6 +666,7 @@ class Assistant:
             return False
         self._paused = True
         self._paused_at = self.wall()
+        self.ask_again()  # its "ends at" won't hold: time on Pause doesn't count
         log.info("paused: nothing is recorded until resumed")
         self.bus.publish("assistant.paused")
         return True
@@ -886,6 +887,14 @@ class Assistant:
         self._check_system_audio(seg)
         if self.manual and self.current is None:
             return  # the meeting started by hand is the only one: words heard without it open no other
+        cur = self.current
+        if (self.manual and cur is not None and not cur.finished and not self._paused and self.end_after_s > 0
+                and self.wall() - cur.last_speech_wall >= self.end_after_s):
+            # just woke up from sleep, before the idle monitor's next look: the meeting has been silent long
+            # enough to end, and this line (words cut off when the lid closed, or the next conversation)
+            # mustn't start the count over. It ends now and the line is dropped, as are those after it
+            self._check_silence(cur)
+            return
         session = await self._ensure_meeting(seg.t_start)
         session.heard()
         session.add_segment(seg)
@@ -1009,6 +1018,14 @@ class Assistant:
         cur.asked = False
         self.bus.publish("meeting.kept", meeting_id=cur.meeting.id)
         return True
+
+    def ask_again(self) -> None:
+        """"Still in a meeting?" was asked with an end time that no longer holds (a pause, new silence
+        limits): the next idle look asks again with a new one — or ends the meeting, or asks nothing, as
+        the silence and the limits now say. The question shown is taken down by whoever calls this."""
+        cur = self.current
+        if cur is not None and not cur.finished:
+            cur.asked = False
 
     async def _screen(self) -> None:
         try:

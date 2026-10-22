@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import secrets
+from collections.abc import Coroutine
 from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -26,7 +27,7 @@ from .. import stt_models
 from ..app import desktop, logs
 from ..app import secrets as keys
 from ..app.checks import run_checks
-from ..app.host import HostError
+from ..app.host import START_WAIT_S, HostError
 from ..app.meetings import MeetingBusy, MeetingNotFound, resolve_folder
 from ..app.prefs import FloatingPosition, Hotkey, MeetingStart, Minutes, layout_context
 from ..app.settings import SettingsError, save_checked, settings_view
@@ -56,6 +57,9 @@ MEETING_ACTIONS = ("start", "stop", "toggle", "keep")
 """``POST /api/meeting/<action>``; ``/api/meeting/end`` is the dashboard's own (:mod:`.server`)."""
 ANSWERS = ("suggestion/accept", "suggestion/dismiss", "notice/dismiss")
 """``POST /api/<answer>``: the answers to what the window and the floating button ask or tell."""
+START_ANSWER_S = START_WAIT_S + 5.0
+"""A start is answered once listening is up (within about :data:`.host.START_WAIT_S`), except one that waits
+for the last meeting's wrap-up, which can take minutes: after this long, with what it will do."""
 
 
 # --------------------------------------------------------------------------- bodies
@@ -249,8 +253,18 @@ class AppApi:
         if name == "keep":
             action: str | None = "keep" if await host.meeting_keep() else None
         else:
-            action = await {"start": host.meeting_start, "stop": host.meeting_stop, "toggle": host.meeting_toggle}[name]()
+            run = {"start": host.meeting_start, "stop": host.meeting_stop, "toggle": host.meeting_toggle}[name]
+            action = await self._in_time(run())
         return JSONResponse({**host.state(), "action": action})
+
+    async def _in_time(self, action: Coroutine[Any, Any, str | None]) -> str | None:
+        """What a meeting action did, once it is done — or, for a start waiting for the last meeting's wrap-up,
+        ``"start"`` after :data:`START_ANSWER_S`: the request mustn't hang for minutes (the window's request
+        could time out meanwhile), the start goes on and ``app.state`` events tell the rest."""
+        task = asyncio.ensure_future(action)
+        self.host.track(task)
+        done, _ = await asyncio.wait({task}, timeout=START_ANSWER_S)
+        return task.result() if done else "start"
 
     async def answer(self, request: Request) -> JSONResponse:
         """Start or Not now on "Call detected — start notes?", and OK on a notice. The reply is the app's
@@ -258,7 +272,7 @@ class AppApi:
         host = self.host
         name = request.url.path.removeprefix("/api/")
         if name == "suggestion/accept":
-            action = await host.suggestion_accept()
+            action = await self._in_time(host.suggestion_accept())
         elif name == "suggestion/dismiss":
             action = "dismiss" if host.suggestion_dismiss() else None
         else:

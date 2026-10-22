@@ -7,8 +7,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from collections.abc import AsyncIterator, Callable, Iterator
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -17,17 +18,22 @@ import pytest
 from helpers import seg
 from pydantic import ValidationError
 from starlette.testclient import TestClient
-from test_app_host import _factory, _host, _prefs, _until
+from test_app_host import _factory, _gated_download, _host, _on_this_mac, _prefs, _until
 from test_session import IdleSource
 
+from voicestream import session as session_mod
+from voicestream import stt_models
 from voicestream.app import host as host_mod
 from voicestream.app import prefs as prefs_mod
 from voicestream.app.host import AppHost, parse_url
+from voicestream.app.settings import save_changes
 from voicestream.audio.base import AudioSource
 from voicestream.config import Config
+from voicestream.dashboard import app_routes
 from voicestream.dashboard.server import TOKEN_HEADER, create_app
 from voicestream.models import AudioFrame, TranscriptSegment
 from voicestream.session import Assistant
+from voicestream.sinks.markdown import MarkdownConfig, MarkdownSink
 from voicestream.storage import list_sessions, load_meeting
 from voicestream.transcribe.base import Transcriber, TranscriptionError
 
@@ -214,6 +220,55 @@ async def test_a_long_silence_asks_whether_you_are_still_in_the_meeting(tmp_path
     assert host.state()["still_there"] is None and await host.meeting_keep() is False
 
 
+async def test_still_in_a_meeting_is_asked_again_after_a_pause_or_new_limits(tmp_path: Path,
+                                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """"Still in a meeting?" says when the meeting ends by itself. Paused, that no longer holds (time on Pause
+    doesn't count) and the floating button must offer Resume rather than Keep/End: the question goes away,
+    and after Resume it is asked again with a new end time. New silence limits likewise."""
+    wall = Wall()
+
+    def now() -> datetime:
+        return datetime.fromtimestamp(wall.t, UTC)
+
+    monkeypatch.setattr(session_mod, "utcnow", now)  # what "ends at" is computed on, moved with the wall clock
+    built: list[Assistant] = []
+    host = _manual(tmp_path, wall, built)  # ask after 15 min, end after 60
+    try:
+        await host.meeting_start()
+        a = built[0]
+        wall.advance(16)
+        await _until(lambda: host.still_there is not None)
+        assert datetime.fromisoformat(host.state()["still_there"]["ends_at"]) == now() + timedelta(minutes=44)
+        await host.listen_pause()
+        assert host.status == "paused" and host.state()["still_there"] is None and not a.current.asked
+        wall.advance(120)  # lunch
+        await asyncio.sleep(0.2)
+        assert host.state()["still_there"] is None and host.in_meeting()
+        await host.listen_resume()
+        await _until(lambda: host.still_there is not None)  # 16 min of silence, the pause not counted
+        nudge = host.state()["still_there"]
+        assert nudge["silent_minutes"] == 16 and datetime.fromisoformat(nudge["ends_at"]) == now() + timedelta(minutes=44)
+
+        host.update_prefs({"silence_end_minutes": 0})  # never ends by itself now
+        assert host.state()["still_there"] is None
+        await _until(lambda: host.still_there is not None)
+        assert host.state()["still_there"]["ends_at"] is None
+        host.update_prefs({"silence_end_minutes": 20})
+        await _until(lambda: host.still_there is not None and host.still_there["ends_at"] is not None)
+        assert datetime.fromisoformat(host.state()["still_there"]["ends_at"]) == now() + timedelta(minutes=4)
+        host.update_prefs({"silence_end_minutes": 20, "floating_button": False})  # the same limits: it stays
+        await asyncio.sleep(0.2)
+        assert host.state()["still_there"] is not None and len(_events(host, "meeting.still_there")) == 4
+        host.update_prefs({"silence_ask_minutes": 30, "silence_end_minutes": 60})  # not that long a silence any more
+        await asyncio.sleep(0.2)
+        assert host.state()["still_there"] is None and host.in_meeting() and len(_events(host, "meeting.still_there")) == 4
+        host.update_prefs({"silence_end_minutes": 10})  # shorter than the silence so far: it ends
+        await _until(lambda: host.status == "stopped")
+        assert [e["reason"] for e in _events(host, "meeting.ending")] == ["silence"]
+    finally:
+        await host.shutdown()
+
+
 async def test_an_hour_without_speech_ends_the_meeting_and_says_why(tmp_path: Path) -> None:
     wall = Wall()
     opened: list[str] = []
@@ -244,6 +299,80 @@ async def test_an_hour_without_speech_ends_the_meeting_and_says_why(tmp_path: Pa
     assert host.state()["notice"] is None
     await host.meeting_stop()
     await _until(lambda: host.status == "stopped")
+
+
+async def test_the_notice_says_the_notes_are_being_written_until_they_are(tmp_path: Path,
+                                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ended after an hour without speech: the wrap-up (summary, pushes) takes a while, and until it says
+    whether there are notes the notice says they are being written (``pending``), not that nothing had been
+    said; it says so once it is known, also when nothing was said, or when the wrap-up never says it."""
+    gate = _slow_wrap_up(monkeypatch)
+    wall = Wall()
+    built: list[Assistant] = []
+    host = _manual(tmp_path, wall, built)
+    try:
+        await host.meeting_start()
+        await built[0]._route(seg("I'll send the deck to Sam by Friday.", "mic", t=1.0))
+        wall.advance(61)
+        await _until(lambda: host.status == "stopping" and host.notice is not None)
+        await asyncio.sleep(0.1)
+        notice = host.state()["notice"]
+        assert notice["kind"] == "ended_after_silence" and notice["pending"] is True and notice["folder"] is None
+        assert all(e["notice"]["pending"] is True for e in _events(host, "app.state") if e["notice"])
+        gate.set()
+        await _until(lambda: host.status == "stopped")
+        notice = host.state()["notice"]
+        assert notice["pending"] is False and notice["folder"] == list_sessions(host.cfg.data_path)[-1].name
+
+        await host.meeting_start()  # nothing said this time: no notes, once that is known
+        wall.advance(61)
+        await _until(lambda: host.status == "stopped" and host.notice is not None)
+        assert host.state()["notice"]["pending"] is False and host.state()["notice"]["folder"] is None
+
+        # a wrap-up that fails (a full disk) never says it is done: the notice doesn't stay "being written"
+        await host.meeting_start()
+        await built[-1]._route(seg("Budget review.", "mic", t=1.0))
+
+        def full(*args: Any, **kw: Any) -> None:
+            raise OSError("No space left on device")
+
+        monkeypatch.setattr(built[-1].current.store, "save", full)
+        wall.advance(61)
+        await _until(lambda: host.status == "error")
+        assert host.state()["notice"]["pending"] is False and not _events(host, "meeting.ended")[2:]
+    finally:
+        gate.set()
+        await host.shutdown()
+
+
+async def test_speech_right_after_waking_up_isnt_added_to_a_forgotten_meeting(tmp_path: Path) -> None:
+    """A meeting started by hand and forgotten, the lid closed overnight: woken up, the first line can come in
+    before the idle monitor looks again (words cut off when the lid closed, or the next meeting already
+    talking). The night counts as silence, so the meeting ends on it, and that line isn't recorded into it."""
+    wall = Wall()
+    built: list[Assistant] = []
+    base = _clocked(wall, built)
+
+    def asleep(host: AppHost) -> Assistant:
+        a = base(host)
+        a.idle_poll_s = 3600  # the monitor is in the middle of its sleep: only routing can notice
+        return a
+
+    _prefs(tmp_path, "manual")
+    host = _host(tmp_path, factory=asleep, mode="manual")
+    await host.meeting_start()
+    a = built[0]
+    first = a.current
+    await a._route(seg("I'll send the deck to Sam by Friday.", "mic", t=1.0))
+    wall.advance(15 * 60)  # the night: the monitor's clock (time.monotonic) stood still
+    await a._route(seg("Morning! Shall we start the stand-up?", "mic", t=2.0))
+    await a._route(seg("Yes, Priya goes first.", "system", t=5.0))  # still arriving while it winds down
+    await _until(lambda: host.status == "stopped" and host.assistant is None)
+    assert [e["reason"] for e in _events(host, "meeting.ending")] == ["silence"]
+    assert host.state()["notice"]["kind"] == "ended_after_silence" and len(built) == 1
+    assert [s.text for s in first.meeting.segments] == ["I'll send the deck to Sam by Friday."]
+    meeting, _ = load_meeting(list_sessions(host.cfg.data_path)[-1])
+    assert [s.text for s in meeting.segments] == ["I'll send the deck to Sam by Friday."]
 
 
 async def test_a_meeting_ended_by_hand_keeps_its_last_words(cfg: Config) -> None:
@@ -304,6 +433,39 @@ async def test_automatic_meetings_still_start_and_split_by_themselves(tmp_path: 
         await host.shutdown()
 
 
+async def test_an_automatic_meeting_is_over_as_soon_as_it_ends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A meeting that closes on a silence (or "End meeting now") is wrapped up in the background while
+    listening goes on: the state says at once that it is over, not once its notes are written. The floating
+    button and the menu bar (which only hear the state) showed it recording, timer ticking, meanwhile."""
+    gate = _slow_wrap_up(monkeypatch)
+    wall = Wall()
+    built: list[Assistant] = []
+    host = _host(tmp_path, factory=_clocked(wall, built), mode="automatic")  # meetings close after 10 min
+    seen: list[dict[str, Any]] = []
+    host.add_state_listener(seen.append)
+    try:
+        await host.listen_start()
+        a = built[0]
+        for split in ("idle", "End meeting now"):
+            await a._route(seg("Let's start.", "mic", t=1.0))
+            assert seen[-1]["in_meeting"] is True
+            gate.clear()
+            if split == "idle":
+                wall.advance(11)
+            else:
+                assert await host.end_meeting() == "end"
+            ended = len(_events(host, "meeting.ended"))
+            await _until(lambda n=ended: len(_events(host, "meeting.ending")) > n)
+            await asyncio.sleep(0.1)
+            assert len(_events(host, "meeting.ended")) == ended, split  # still being wrapped up…
+            assert (seen[-1]["in_meeting"], seen[-1]["meeting"], seen[-1]["state"]) == (False, None, "listening"), split
+            gate.set()
+            await _until(lambda n=ended: len(_events(host, "meeting.ended")) > n)
+    finally:
+        gate.set()
+        await host.shutdown()
+
+
 # ------------------------------------------------------------------ the actions
 
 
@@ -315,7 +477,7 @@ async def test_what_each_action_does_in_each_state(tmp_path: Path) -> None:
         "listening": (None, "stop", "stop"),
         "paused": ("resume", "stop", "resume"),
         "starting": (None, "stop", None),
-        "stopping": (None, None, None),
+        "stopping": ("start", None, "start"),  # once the last meeting is wrapped up (see below)
     }
     for status, expected in table.items():
         host.status = status  # type: ignore[assignment]
@@ -343,6 +505,100 @@ async def test_the_shortcut_starts_pauses_and_stops_a_meeting(tmp_path: Path) ->
     assert await host.end_meeting() == "stop"  # "End meeting now" in a meeting started by hand: Stop
     await _until(lambda: host.status == "stopped")
     assert await host.end_meeting() is None
+
+
+def _slow_wrap_up(monkeypatch: pytest.MonkeyPatch) -> asyncio.Event:
+    """The meeting's summary waits for the event: a wrap-up (summary, pushes, agents) that takes a while."""
+    gate = asyncio.Event()
+    real = session_mod.summarize
+
+    async def slow(*args: Any, **kw: Any) -> Any:
+        await gate.wait()
+        return await real(*args, **kw)
+
+    monkeypatch.setattr(session_mod, "summarize", slow)
+    return gate
+
+
+async def test_a_start_while_the_last_meeting_is_wrapped_up_waits_for_it(tmp_path: Path,
+                                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """Back-to-back calls: Stop, then Start (the shortcut, the floating button, Spotlight) as the next one
+    begins. The microphone is closed already but the wrap-up can take minutes: the next meeting starts as
+    soon as it is done, rather than the press being lost. Stop, Stop now or quitting meanwhile still win."""
+    gate = _slow_wrap_up(monkeypatch)
+    built: list[Assistant] = []
+    host = _manual(tmp_path, built=built)
+
+    async def stopped_with_a_start_waiting(start: Callable[[], Any]) -> asyncio.Future[Any]:
+        await host.meeting_start()
+        await built[-1]._route(seg("I'll send the deck to Sam by Friday.", "mic", t=1.0))
+        gate.clear()
+        assert await host.meeting_stop() == "stop" and host.status == "stopping"
+        assert host.meeting_action("start") == "start" and host.meeting_action("toggle") == "start"
+        waiting = asyncio.ensure_future(start())
+        await asyncio.sleep(0.2)
+        assert not waiting.done() and host.status == "stopping"
+        return waiting
+
+    try:
+        first = await stopped_with_a_start_waiting(host.meeting_toggle)
+        again = asyncio.ensure_future(host.open_url(host.launcher_url()))  # pressed again (Spotlight): one start
+        await asyncio.sleep(0.1)
+        assert host.meeting_action("toggle") == "start" and not again.done() and len(built) == 1
+        gate.set()  # the last meeting's notes are written: the next one starts
+        assert await first == "start" and await again == "start"
+        assert host.status == "listening" and host.in_meeting() and len(built) == 2
+        # in that order: the last meeting's notes, then the next meeting
+        order = [(e.type, e.data.get("notes")) for e in host.bus.history if e.type in ("meeting.ended", "meeting.started")]
+        assert [t for t, _ in order] == ["meeting.started", "meeting.ended", "meeting.started"] and order[1][1]
+
+        # Stop while the start waits: nothing starts after the wrap-up
+        waiting = await stopped_with_a_start_waiting(host.meeting_start)
+        assert host.meeting_action("stop") == "stop" and await host.meeting_stop() == "stop"
+        gate.set()
+        assert await waiting is None
+        await _until(lambda: host.status == "stopped")
+        await asyncio.sleep(0.1)
+        assert host.status == "stopped" and len(built) == 2 and host.assistant is None
+
+        # "Stop now" (the window, during the wrap-up) likewise
+        waiting = await stopped_with_a_start_waiting(host.meeting_start)
+        await host.listen_stop(force=True)
+        assert await waiting is None and host.status == "stopped" and len(built) == 3
+
+        # Start, Stop, Start again during one wrap-up: the last word wins, and it is one start
+        waiting = await stopped_with_a_start_waiting(host.meeting_start)
+        assert await host.meeting_stop() == "stop"
+        again = asyncio.ensure_future(host.meeting_toggle())
+        await asyncio.sleep(0.1)
+        assert not again.done() and host.status == "stopping"
+        gate.set()
+        assert await again == "start" and await waiting == "start" and host.in_meeting() and len(built) == 5
+
+        # two presses of the shortcut in a row while recording: the second comes before the stop says so
+        await built[-1]._route(seg("Last point.", "mic", t=1.0))
+        gate.clear()
+        stop, start = asyncio.ensure_future(host.meeting_toggle()), asyncio.ensure_future(host.meeting_toggle())
+        assert await stop == "stop"
+        await asyncio.sleep(0.1)
+        assert host.status == "stopping" and not start.done()
+        gate.set()
+        assert await start == "start" and host.in_meeting() and len(built) == 6
+
+        # quitting while a start waits: nothing starts
+        await built[-1]._route(seg("One more thing.", "mic", t=1.0))
+        gate.clear()
+        assert await host.meeting_stop() == "stop"
+        waiting = asyncio.ensure_future(host.meeting_start())
+        await asyncio.sleep(0.1)
+        quitting = asyncio.ensure_future(host.shutdown())
+        await asyncio.sleep(0.1)
+        gate.set()
+        await quitting
+        assert await waiting is None and len(built) == 6 and host.assistant is None
+    finally:
+        gate.set()
+        await host.shutdown()
 
 
 async def test_end_meeting_on_the_page_ends_listening_too(tmp_path: Path) -> None:
@@ -398,11 +654,128 @@ async def test_switching_modes_applies_to_listening_in_progress(tmp_path: Path) 
     assert a.manual and host.in_meeting()
     host.update_prefs({"silence_ask_minutes": 5, "silence_end_minutes": 0})
     assert (a.ask_after_s, a.end_after_s) == (300.0, 0.0)
+    host.bus.publish("meeting.still_there", meeting_id=a.current.meeting.id, silent_minutes=5, ends_at=None)
+    await _until(lambda: host.still_there is not None)
     host.update_prefs({"meeting_start": "automatic"})  # during a meeting: it goes on…
     assert host.assistant is a and not a.manual and host.in_meeting()
+    # … and isn't asked about any more: an automatic meeting ends on its own silence, not on that limit
+    assert host.state()["still_there"] is None
     await a.end_meeting("manual")  # … and listening goes on after it, always-on
     assert host.status == "listening" and host.assistant is a and not host.in_meeting()
     host.update_prefs({"meeting_start": "manual"})
+    await _until(lambda: host.status == "stopped")
+
+
+async def test_words_still_being_written_down_at_the_switch_to_manual_open_no_meeting(tmp_path: Path) -> None:
+    """Always-on listening, no meeting yet, someone talking: switched to "when I start one", listening stops,
+    and the words still being written down as the capture closes mustn't open a meeting nobody started."""
+    built: list[Assistant] = []
+
+    def make(host: AppHost) -> Assistant:
+        a = Assistant(host.cfg, sources=[IdleSource("mic")], transcriber_factory=lambda s: LastWords(), llm=None,
+                      sinks=[MarkdownSink(MarkdownConfig(), host.cfg)], bus=host.bus, costs=host.costs)
+        a.idle_poll_s = 0.05
+        built.append(a)
+        return a
+
+    host = _host(tmp_path, factory=make)  # automatic
+    await host.listen_start()
+    assert not host.in_meeting()
+    host.update_prefs({"meeting_start": "manual"})
+    await _until(lambda: host.status == "stopped" and host.assistant is None)
+    assert built[-1].finished_meetings == [] and list_sessions(host.cfg.data_path) == []
+    assert not _events(host, "meeting.started") and not _events(host, "segment")
+
+
+async def test_stop_works_while_a_start_is_under_way(tmp_path: Path) -> None:
+    """Start, then Stop at once (the floating button, the menu) while listening is still starting — a speech
+    service a few seconds away: Stop is never held back by the start, and nothing is recorded."""
+    base = _factory()
+
+    def slow(host: AppHost) -> Assistant:
+        a = base(host)
+        run = a.run
+
+        async def slow_run() -> None:
+            await asyncio.sleep(0.5)  # before "assistant.started": the start is still under way
+            await run()
+
+        a.run = slow_run  # type: ignore[method-assign]
+        return a
+
+    _prefs(tmp_path, "manual")
+    host = _host(tmp_path, factory=slow, mode="manual")
+    try:
+        start = asyncio.ensure_future(host.meeting_start())
+        await _until(lambda: host.status == "starting")
+        assert host._toggling is not None and not host._toggling.done()  # really in the middle of the start
+        assert host.meeting_action("stop") == "stop" and await host.meeting_stop() == "stop"
+        await start
+        await _until(lambda: host.status == "stopped" and host.assistant is None)
+        assert not host.in_meeting() and list_sessions(host.cfg.data_path) == []
+    finally:
+        await host.shutdown()
+
+
+async def test_a_restart_under_way_when_meetings_switch_to_manual_starts_nothing(tmp_path: Path) -> None:
+    """Always-on listening, no meeting: one Save changes a setting and picks "when I start one". The settings
+    restart listening; when the switch lands during that restart's stop, the restart mustn't start again in
+    manual mode, whose meeting opens at once with nobody having started it."""
+    built: list[Assistant] = []
+    host = _host(tmp_path, factory=_factory(built=built))  # automatic
+    await host.listen_start()
+    assert not host.in_meeting()
+    loop = asyncio.get_running_loop()
+    switched: list[str] = []
+
+    def on_state(state: dict[str, Any]) -> None:
+        if state["state"] == "stopping" and not switched:  # the prefs request arrives while it stops
+            switched.append("manual")
+            loop.call_soon(host.update_prefs, {"meeting_start": "manual"})
+
+    host.add_state_listener(on_state)
+    save_changes(host.config_path, {"user_name": "Sam"})
+    assert (await host.apply_settings(wait=False))["restarting"] is True
+    await _until(lambda: switched and host.prefs.meeting_start == "manual" and not host._background)
+    await asyncio.sleep(0.2)
+    assert host.status == "stopped" and host.assistant is None and len(built) == 1
+    assert not host.in_meeting() and list_sessions(host.cfg.data_path) == []
+    assert await host.meeting_start() == "start" and host.in_meeting()  # by hand, it starts with the new settings
+    assert host.assistant.cfg.user_name == "Sam"
+    await host.meeting_stop()
+    await _until(lambda: host.status == "stopped")
+
+
+async def test_a_start_waiting_for_the_speech_model_is_dropped_by_the_switch_to_manual(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Always-on listening asked for while the speech model downloads (at launch, after a quit during the
+    first download) waits for it. Switched to "when I start one" meanwhile, it mustn't open a meeting by
+    itself once the model is in; a Start pressed in manual mode during the download still waits for it."""
+    gate, calls = asyncio.Event(), []
+    monkeypatch.setattr(stt_models, "download", _gated_download(gate, calls))
+    built: list[Assistant] = []
+    host = _host(tmp_path, factory=_factory(built=built))  # automatic
+    _on_this_mac(host, tmp_path, "base")
+    await host.listen_start()
+    assert host.status == "starting" and host.awaiting_model == "base"
+    await _until(lambda: calls == ["base"])
+    host.update_prefs({"meeting_start": "manual"})
+    assert host.status == "stopped" and host.awaiting_model is None and host.error is None
+    assert host.state()["state"] == "stopped"
+    gate.set()  # the download goes on and finishes: nothing starts
+    await _until(lambda: not host._downloads)
+    await asyncio.sleep(0.2)
+    assert host.status == "stopped" and built == [] and host.assistant is None
+
+    stt_models.remove(host.cfg, "base")
+    gate.clear()
+    assert await host.meeting_start() == "start" and host.status == "starting"  # pressed by hand, in manual
+    host.update_prefs({"meeting_start": "manual", "silence_end_minutes": 30})  # not a switch to manual
+    assert host.status == "starting" and host.awaiting_model == "base"
+    gate.set()
+    await _until(lambda: host.in_meeting())
+    assert len(built) == 1 and built[0].manual
+    await host.meeting_stop()
     await _until(lambda: host.status == "stopped")
 
 
@@ -448,6 +821,43 @@ async def test_links_need_the_key_to_start_a_recording(tmp_path: Path, monkeypat
     assert key not in json.dumps(host.state()) and key not in host.prefs.model_dump_json() and key not in repr(host.prefs)
     assert key not in caplog.text
     assert json.loads(host.prefs_path.read_text(encoding="utf-8"))["url_key"] == key  # the private file has it
+
+
+async def test_a_link_that_launches_the_app_doesnt_start_listening(tmp_path: Path) -> None:
+    """Meetings start by themselves and "start listening when Voicestream opens" is on, but the app isn't
+    running: any web page can launch it with a voicestream:// link. The Mac app starts the host without
+    listening and asks for it only when no link launched it, so a link without the key records nothing."""
+    opened: list[str] = []
+    built: list[Assistant] = []
+    _prefs(tmp_path, "automatic", setup_done=True, listen_on_launch=True)
+    host = _host(tmp_path, factory=_factory(sources=lambda: [Tracked("mic", opened)], built=built), mode="automatic")
+    await host.start(auto_listen=False)
+    try:
+        assert host.status == "stopped" and _events(host, "app.state")[-1]["state"] == "stopped"
+        assert await host.open_url("voicestream://open") == "open"
+        assert await host.open_url("voicestream://meeting/start") == "refused"
+        assert await host.open_url("voicestream://whatever") == "unknown"
+        await asyncio.sleep(0.2)
+        assert host.status == "stopped" and built == [] and opened == []
+        assert await host.open_url(host.launcher_url()) == "start"  # the launcher's own link: on purpose
+        assert host.status == "listening" and await host.listen_on_launch() is False  # running already
+        await host.listen_stop()
+
+        assert await host.listen_on_launch() is True  # no link launched it: as it always did
+        assert host.status == "listening" and len(built) == 2
+        await host.listen_stop()
+        host.update_prefs({"listen_on_launch": False})
+        assert await host.listen_on_launch() is False
+        host.update_prefs({"listen_on_launch": True, "meeting_start": "manual"})
+        assert await host.listen_on_launch() is False
+        host.update_prefs({"meeting_start": "automatic"})
+        host.config_error = "Your settings file has a problem: line 3"
+        assert await host.listen_on_launch() is False
+        host.config_error = None
+        host.prefs = host.prefs.model_copy(update={"setup_done": False})
+        assert await host.listen_on_launch() is False and host.status == "stopped" and len(built) == 2
+    finally:
+        await host.shutdown()
 
 
 def test_parse_url() -> None:
@@ -675,6 +1085,36 @@ def test_answers_over_http(client: TestClient, host: AppHost) -> None:
     host.notice = {"kind": "ended_after_silence", "minutes": 60}
     body = client.post("/api/notice/dismiss").json()
     assert body["action"] == "dismiss" and body["notice"] is None
+
+
+def test_a_start_waiting_for_the_wrap_up_is_answered_at_once(client: TestClient, host: AppHost,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """Over HTTP (the window, Start on a call suggestion), a start that waits for the last meeting's
+    wrap-up is answered after a moment with what it will do, not minutes later once the notes are written."""
+    gate = threading.Event()
+    real = session_mod.summarize
+
+    async def slow(*args: Any, **kw: Any) -> Any:
+        await asyncio.to_thread(gate.wait, 5)
+        return await real(*args, **kw)
+
+    monkeypatch.setattr(session_mod, "summarize", slow)
+    monkeypatch.setattr(app_routes, "START_ANSWER_S", 0.3)
+    try:
+        assert client.post("/api/meeting/start").json()["action"] == "start"
+        assert client.post("/api/items", json={"kind": "action", "title": "Send the deck to Sam"}).status_code < 300
+        assert client.post("/api/meeting/stop").json()["state"] == "stopping"
+        body = client.post("/api/meeting/start").json()
+        assert (body["action"], body["state"], body["in_meeting"]) == ("start", "stopping", False)
+        host.suggest_meeting("zoom.us")
+        body = client.post("/api/suggestion/accept").json()
+        assert (body["action"], body["state"], body["suggestion"]) == ("start", "stopping", None)
+        gate.set()  # the notes are written: the start goes on
+        assert _wait(client, lambda s: s["in_meeting"])["state"] == "listening"
+        client.post("/api/meeting/stop")
+        _wait(client, lambda s: s["state"] == "stopped")
+    finally:
+        gate.set()
 
 
 def test_meeting_preferences_over_http(client: TestClient, host: AppHost) -> None:
