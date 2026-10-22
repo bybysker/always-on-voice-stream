@@ -309,6 +309,73 @@ def test_off_macos_there_is_no_probe(monkeypatch: pytest.MonkeyPatch) -> None:
         calls.probe()
 
 
+class FakeCoreAudio:
+    """Core Audio's three calls (AudioHardware.h), answered from a table: object id → {(selector, scope): value},
+    a value an int (a UInt32 property) or a list of ids (an array property)."""
+
+    def __init__(self, objects: dict[int, dict[tuple[int, int], Any]]) -> None:
+        self.objects = objects
+
+    def _value(self, obj: int, address: Any) -> Any:
+        addr = address._obj  # ctypes.byref(PropertyAddress)
+        return self.objects.get(obj, {}).get((addr.mSelector, addr.mScope))
+
+    def AudioObjectHasProperty(self, obj: int, address: Any) -> int:
+        return int(self._value(obj, address) is not None)
+
+    def AudioObjectGetPropertyDataSize(self, obj: int, address: Any, qsize: int, qdata: Any, size: Any) -> int:
+        value = self._value(obj, address)
+        if value is None:
+            return int.from_bytes(b"who?", "big")  # kAudioHardwareUnknownPropertyError
+        size._obj.value = 4 * (len(value) if isinstance(value, list) else 1)
+        return calls.NO_ERR
+
+    def AudioObjectGetPropertyData(self, obj: int, address: Any, qsize: int, qdata: Any, size: Any, out: Any) -> int:
+        value = self._value(obj, address)
+        if value is None:
+            return int.from_bytes(b"who?", "big")
+        if isinstance(value, list):
+            for i, v in enumerate(value):
+                out[i] = v
+            size._obj.value = 4 * len(value)
+        else:
+            out._obj.value = value
+        return calls.NO_ERR
+
+
+def test_a_meeting_app_capturing_from_a_microphone_it_chose_is_noticed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The system's default input stays the built-in microphone; Teams captures from the headset picked in Teams.
+    Asking only the default device whether it runs, the call was never seen (its processes never read)."""
+    builtin, headset, speakers = 40, 41, 42
+    glob, inpt = calls.SCOPE_GLOBAL, calls.SCOPE_INPUT
+    objects: dict[int, dict[tuple[int, int], Any]] = {
+        calls.SYSTEM_OBJECT: {(calls.DEFAULT_INPUT, glob): builtin, (calls.DEVICES, glob): [builtin, headset, speakers]},
+        builtin: {(calls.STREAMS, inpt): [70], (calls.RUNNING_SOMEWHERE, glob): 0},
+        headset: {(calls.STREAMS, inpt): [71], (calls.RUNNING_SOMEWHERE, glob): 1},
+        speakers: {(calls.STREAMS, inpt): [], (calls.RUNNING_SOMEWHERE, glob): 1},  # output only
+    }
+    monkeypatch.setattr(calls, "_LIBS", (FakeCoreAudio(objects), None))
+    probe = calls.CoreAudioProbe(own_pid=1)
+    assert probe.default_input() == builtin and probe.device_running() is True
+    objects[headset][(calls.RUNNING_SOMEWHERE, glob)] = 0
+    assert probe.device_running() is False  # the speakers play music: no microphone runs
+    objects[calls.SYSTEM_OBJECT][(calls.DEVICES, glob)] = [speakers]
+    assert probe.device_running() is None  # no microphone at all
+    objects[calls.SYSTEM_OBJECT][(calls.DEVICES, glob)] = [builtin]
+    del objects[builtin][(calls.RUNNING_SOMEWHERE, glob)]
+    assert probe.device_running() is None  # couldn't be read
+    # who captures, from any input: the process objects (macOS 14), ours left out
+    assert probe.captures() is None  # before macOS 14: no process objects
+    objects[calls.SYSTEM_OBJECT][(calls.PROCESS_LIST, glob)] = [100, 101, 102]
+    objects[100] = {(calls.PROCESS_RUNNING_INPUT, glob): 1, (calls.PROCESS_PID, glob): 4242}
+    objects[101] = {(calls.PROCESS_RUNNING_INPUT, glob): 0, (calls.PROCESS_PID, glob): 4243}  # plays only
+    objects[102] = {(calls.PROCESS_RUNNING_INPUT, glob): 1, (calls.PROCESS_PID, glob): 1}  # Voicestream itself
+    assert probe.captures() == (Capture(4242, None),)  # no bundle id given: named by its pid later
+    objects[calls.SYSTEM_OBJECT][(calls.PROCESS_LIST, glob)] = []
+    assert probe.captures() == ()
+    assert (calls.DEVICES, calls.STREAMS, calls.SCOPE_INPUT) == (0x64657623, 0x73746D23, 0x696E7074)  # 'dev#' 'stm#' 'inpt'
+
+
 def test_launch_asks_core_audio_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """native.run reads available() on the main thread before the window shows: loading Core Audio says it is a Mac
     where calls can be watched; a call into it there could stall the launch while coreaudiod restarts."""

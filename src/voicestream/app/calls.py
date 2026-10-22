@@ -8,13 +8,15 @@ ends the shell says so (:meth:`~voicestream.app.host.AppHost.call_ended`).
 How a call is seen, from Core Audio (``CoreAudio.framework``, through ``ctypes``; reading either
 needs no permission):
 
-* the default input device's ``kAudioDevicePropertyDeviceIsRunningSomewhere``: some process on the
-  Mac is running it. The default device is read again at each look, so switching to AirPods is
-  followed. It is the cheap question, asked every :data:`POLL_S`;
-* only while that device runs, the HAL's process objects (``kAudioHardwarePropertyProcessObjectList``,
-  macOS 14): which processes capture (``kAudioProcessPropertyIsRunningInput``), with their pid and
-  bundle id. That leaves Voicestream's own capture out (its pid) and names the app: Zoom, Microsoft
-  Teams, FaceTime, a browser (a Meet call)… It is read when the device starts running and then at
+* each input device's ``kAudioDevicePropertyDeviceIsRunningSomewhere``: some process on the Mac is
+  running it. Every device with input streams, not only the default: a meeting app may capture from
+  a headset picked in it while the Mac's default input stays the built-in microphone. The devices
+  are listed again at each look, so plugging in AirPods is followed. It is the cheap question, asked
+  every :data:`POLL_S`;
+* only while one of them runs, the HAL's process objects (``kAudioHardwarePropertyProcessObjectList``,
+  macOS 14): which processes capture (``kAudioProcessPropertyIsRunningInput``, from any input), with
+  their pid and bundle id. That leaves Voicestream's own capture out (its pid) and names the app: Zoom,
+  Microsoft Teams, FaceTime, a browser (a Meet call)… It is read when a device starts running and then at
   most every :data:`ATTRIBUTE_S`: each process read makes ``coreaudiod`` run privacy checks for the
   caller, and a poll of every process every second was measured making a dozen of them a second.
 
@@ -54,7 +56,7 @@ from . import hotkey
 log = logging.getLogger(__name__)
 
 POLL_S = 2.0
-"""How often the default input device is asked whether it runs."""
+"""How often the input devices are asked whether one runs."""
 ATTRIBUTE_S = 10.0
 """While it runs, how often the processes capturing are read again (see the module's docstring)."""
 START_AFTER_S = 3.0
@@ -152,10 +154,19 @@ SYSTEM_OBJECT = 1
 instance of the AudioSystemObject class"."""
 UNKNOWN_OBJECT = 0  # AudioHardwareBase.h kAudioObjectUnknown = 0: "No object will have an ID whose value is 0"
 SCOPE_GLOBAL = _fourcc(b"glob")  # AudioHardwareBase.h kAudioObjectPropertyScopeGlobal = 'glob'
+SCOPE_INPUT = _fourcc(b"inpt")
+"""AudioHardwareBase.h ``kAudioObjectPropertyScopeInput = 'inpt'``: "The AudioObjectPropertyScope for properties that
+apply to the input side of an object"."""
 ELEMENT_MAIN = 0  # AudioHardwareBase.h kAudioObjectPropertyElementMain = 0 (kAudioObjectPropertyElementMaster before 12.0)
 DEFAULT_INPUT = _fourcc(b"dIn ")
 """AudioHardware.h ``kAudioHardwarePropertyDefaultInputDevice = 'dIn '``: "The AudioObjectID of the default input
 AudioDevice"."""
+DEVICES = _fourcc(b"dev#")
+"""AudioHardware.h ``kAudioHardwarePropertyDevices = 'dev#'``: "An array of the AudioObjectIDs that represent all the
+devices currently available to the system"."""
+STREAMS = _fourcc(b"stm#")
+"""AudioHardwareBase.h ``kAudioDevicePropertyStreams = 'stm#'``: "An array of AudioStreamIDs that represent the
+AudioStreams of the AudioDevice" — asked in the input scope, its input streams: none for speakers."""
 RUNNING_SOMEWHERE = _fourcc(b"gone")
 """AudioHardware.h ``kAudioDevicePropertyDeviceIsRunningSomewhere = 'gone'``: "A UInt32 where 1 means that the
 AudioDevice is running in at least one process on the system and 0 means that it isn't running at all"."""
@@ -219,8 +230,8 @@ def _libs() -> tuple[Any, Any]:
     return _LIBS
 
 
-def _address(selector: int) -> PropertyAddress:
-    return PropertyAddress(selector, SCOPE_GLOBAL, ELEMENT_MAIN)
+def _address(selector: int, scope: int = SCOPE_GLOBAL) -> PropertyAddress:
+    return PropertyAddress(selector, scope, ELEMENT_MAIN)
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,7 +244,7 @@ class Capture:
 
 @dataclass(frozen=True, slots=True)
 class MicUse:
-    """One full look at the microphone (:func:`probe`). ``device_running``: the default input runs in some
+    """One full look at the microphone (:func:`probe`). ``device_running``: an input device runs in some
     process, ours included (``None``: no input device, or it couldn't be read); ``others``: the other
     processes capturing (``None``: this macOS can't say which)."""
 
@@ -242,7 +253,7 @@ class MicUse:
 
     @property
     def in_use(self) -> bool:
-        """Another process is capturing (or, where processes can't be told apart, the default input runs)."""
+        """Another process is capturing (or, where processes can't be told apart, an input device runs)."""
         if self.others is not None:
             return bool(self.others)
         return bool(self.device_running)
@@ -288,34 +299,59 @@ class CoreAudioProbe:
         finally:
             self._cf.CFRelease(ref.value)
 
+    def _size(self, obj: int, selector: int, scope: int = SCOPE_GLOBAL) -> int | None:
+        """A property's size in bytes; ``None`` when Core Audio says no."""
+        size = ctypes.c_uint32(0)
+        err = self._ca.AudioObjectGetPropertyDataSize(obj, ctypes.byref(_address(selector, scope)), 0, None,
+                                                      ctypes.byref(size))
+        return int(size.value) if err == NO_ERR else None
+
+    def _ids(self, obj: int, selector: int, scope: int = SCOPE_GLOBAL) -> list[int] | None:
+        """An array of AudioObjectIDs (devices, processes); ``None`` when Core Audio says no."""
+        size = self._size(obj, selector, scope)
+        if size is None:
+            return None
+        count = size // ctypes.sizeof(ctypes.c_uint32)
+        if count == 0:
+            return []
+        ids = (ctypes.c_uint32 * count)()
+        got = ctypes.c_uint32(ctypes.sizeof(ids))
+        if self._ca.AudioObjectGetPropertyData(obj, ctypes.byref(_address(selector, scope)), 0, None, ctypes.byref(got),
+                                               ids) != NO_ERR:
+            return None
+        return list(ids[: got.value // ctypes.sizeof(ctypes.c_uint32)])
+
     def default_input(self) -> int | None:
         """The default input device's AudioObjectID (``None``: there is none)."""
         device = self._u32(SYSTEM_OBJECT, DEFAULT_INPUT)
         return None if device in (None, UNKNOWN_OBJECT) else device
 
-    def device_running(self) -> bool | None:
-        device = self.default_input()
-        if device is None:
+    def input_devices(self) -> list[int] | None:
+        """Every device with input streams — a microphone: built in, USB, Bluetooth, a webcam's —, the default one
+        or not (``None``: the list couldn't be read)."""
+        devices = self._ids(SYSTEM_OBJECT, DEVICES)
+        if devices is None:
             return None
-        flag = self._u32(device, RUNNING_SOMEWHERE)
-        return None if flag is None else bool(flag)
+        return [d for d in devices if (self._size(d, STREAMS, SCOPE_INPUT) or 0) > 0]
+
+    def device_running(self) -> bool | None:
+        """Some input device runs in some process, ours included (``None``: there is none, or it couldn't be read).
+        Any of them, not only the default: a meeting app may capture from a headset picked in it while the Mac's
+        default input stays the built-in microphone. (The flag isn't for input alone: a headset playing music
+        counts too, which only means its processes are read; who captures is still asked of each one.)"""
+        devices = self.input_devices()
+        if not devices:
+            return None
+        flags = [self._u32(d, RUNNING_SOMEWHERE) for d in devices]
+        if all(f is None for f in flags):
+            return None
+        return any(bool(f) for f in flags)
 
     def _process_objects(self) -> list[int] | None:
         """The HAL's process objects; ``None`` before macOS 14, where there are none to read."""
-        ca, addr = self._ca, _address(PROCESS_LIST)
-        if not ca.AudioObjectHasProperty(SYSTEM_OBJECT, ctypes.byref(addr)):
+        if not self._ca.AudioObjectHasProperty(SYSTEM_OBJECT, ctypes.byref(_address(PROCESS_LIST))):
             return None
-        size = ctypes.c_uint32(0)
-        if ca.AudioObjectGetPropertyDataSize(SYSTEM_OBJECT, ctypes.byref(addr), 0, None, ctypes.byref(size)) != NO_ERR:
-            return None
-        count = size.value // ctypes.sizeof(ctypes.c_uint32)
-        if count == 0:
-            return []
-        ids = (ctypes.c_uint32 * count)()
-        size = ctypes.c_uint32(ctypes.sizeof(ids))
-        if ca.AudioObjectGetPropertyData(SYSTEM_OBJECT, ctypes.byref(addr), 0, None, ctypes.byref(size), ids) != NO_ERR:
-            return None
-        return list(ids[: size.value // ctypes.sizeof(ctypes.c_uint32)])
+        return self._ids(SYSTEM_OBJECT, PROCESS_LIST)
 
     def captures(self) -> tuple[Capture, ...] | None:
         """The other processes capturing from any input now (``None``: this macOS can't say)."""
@@ -385,7 +421,7 @@ class _Seen:
 
 def calls_in(captures: tuple[Capture, ...] | None, device_running: bool) -> dict[str, Call]:
     """The calls a look shows, by key: one per app (its helpers capture too), what is never a call left
-    out (:func:`is_background`). Without process information, the default input running is one call ("mic")."""
+    out (:func:`is_background`). Without process information, an input device running is one call ("mic")."""
     if captures is None:
         return {"mic": Call("mic")} if device_running else {}
     out: dict[str, Call] = {}
