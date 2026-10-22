@@ -143,8 +143,9 @@ URL_ACTIONS = {"meeting/start": "start", "meeting/stop": "stop", "meeting/toggle
 KEYED_ACTIONS = frozenset({"start", "toggle"})
 """The links that may start a recording: they need the key (``?key=``), or any web page could."""
 
-MeetingAction = Literal["start", "restart", "resume", "stop", "error"]
-"""What a meeting action did (``error``: a start that failed, the state says why), for the shell's sound."""
+MeetingAction = Literal["start", "restart", "resume", "stop", "error", "cancelled"]
+"""What a meeting action did (``error``: a start that failed, the state says why; ``cancelled``: a start that
+waited for the last meeting's wrap-up, taken back before it began), for the shell's sound."""
 
 _STT_KEYS = {"openai": ("OPENAI_API_KEY", "OpenAI"), "openai-realtime": ("OPENAI_API_KEY", "OpenAI"),
              "deepgram": ("DEEPGRAM_API_KEY", "Deepgram")}  # fmt: skip
@@ -428,7 +429,8 @@ class AppHost:
         """Which action :attr:`_toggling` carries out."""
         self._start_queued = False
         """A start asked for while the last meeting is being wrapped up (state "stopping"): it starts once that
-        is done, unless Stop, Stop now or quitting comes first (:meth:`_start_after_stop`)."""
+        is done, unless Stop, Stop now, quitting or a switch to manual takes it back first (:meth:`_start_after_stop`,
+        :meth:`_take_back_start`). The state says so (``start_queued``)."""
         self._queued_start: asyncio.Task[bool] | None = None
         self._status_changed = asyncio.Event()
         """Set at every change of :attr:`status` (a start queued behind a stop waits for the stop to be over)."""
@@ -592,6 +594,7 @@ class AppHost:
             "error": self.error,
             "restart_pending": self.restart_pending,
             "waiting_for_model": self.awaiting_model,
+            "start_queued": self._start_queued,
             "warnings": list(self.warnings),
             "mode": p.meeting_start,
             "suggestion": dict(self.suggestion) if self.suggestion is not None else None,
@@ -958,7 +961,7 @@ class AppHost:
         Calling it with ``force`` while a normal stop is under way escalates that stop. A restart under
         way (e.g. "apply now") then stays stopped, and so does a start waiting for the stop under way."""
         if force or self._stop_requested:
-            self._start_queued = False  # Stop (now) while the last meeting is wrapped up: the next one doesn't start
+            self._take_back_start()  # Stop (now) while the last meeting is wrapped up: the next one doesn't start
         self._stop_pressed = True
         await self._stop(force, timeout)
         if not self._closing:
@@ -1072,13 +1075,16 @@ class AppHost:
         once listening is up, or after :data:`START_WAIT_S`; one that waits for the last meeting's wrap-up,
         after that too), or ``"error"`` when it failed — a missing key, a permission, a microphone that
         gave up: those become state ``error`` rather than an exception, and the shell's sound must not say
-        it worked. ``None`` for a start taken back while it waited."""
+        it worked. ``cancelled`` for a start that waited and was taken back (:meth:`_take_back_start`)."""
         if action is None:
             return None
         if action == "start" and self._start_waits():
             return await self._queue_start()
-        if action == "stop":
-            self._start_queued = False  # a start waiting for the last meeting's wrap-up is taken back
+        if action == "stop" and self._take_back_start():
+            # what this Stop stops is the start waiting for the wrap-up under way, which goes on as it was
+            # (the notes are written in full); a restart under way stays stopped, as after any Stop
+            self._stop_pressed = True
+            return action
         run = {"start": self.listen_start, "restart": self.listen_restart, "stop": self.listen_stop,
                "resume": self.listen_resume}[action]  # fmt: skip
         task = self._toggling = asyncio.ensure_future(run())
@@ -1087,41 +1093,61 @@ class AppHost:
         if action == "stop":
             await asyncio.sleep(0)  # its first step: the state says "stopping" by the time this returns
             return action
-        await asyncio.wait({task})  # the work isn't cancelled if this is
-        return "error" if self.status == "error" else action
+        return await self._outcome(task, action)
 
-    async def _queue_start(self) -> MeetingAction | None:
+    async def _outcome(self, task: asyncio.Task[Any], action: MeetingAction) -> MeetingAction:
+        """What the meeting action ``task`` carries out did, once it is done (the work isn't cancelled if the
+        caller is): ``cancelled`` for a waiting start taken back, ``error`` for one that failed."""
+        await asyncio.wait({task})
+        if task.cancelled() or (task.exception() is None and task.result() is False):
+            return "cancelled"
+        return "error" if task.exception() is not None or self.status == "error" else action
+
+    async def _queue_start(self) -> MeetingAction:
         """A start while the last meeting is being wrapped up: once that is done (:meth:`_start_after_stop`).
-        Pressed again meanwhile, it is the same start (also after a Stop took it back: the last word wins)."""
+        Pressed again meanwhile, it is the same start; after a Stop took it back, a new one."""
         busy = self._toggling is not None and not self._toggling.done()
         before = self._toggling if busy and self._toggled == "stop" else None
-        self._start_queued = True
-        if self._queued_start is None or self._queued_start.done():
+        if not self._start_queued or self._queued_start is None or self._queued_start.done():
+            self._start_queued = True
             self._queued_start = asyncio.ensure_future(self._start_after_stop(before))
             self.track(self._queued_start)
             log.info("the last meeting is being wrapped up: the next one starts as soon as it is")
+            self._publish_state()  # the window, the floating button and the menus say so, and offer to cancel it
         task = self._toggling = self._queued_start
         self._toggled = "start"
-        await asyncio.wait({task})  # the work isn't cancelled if this is
-        if task.cancelled() or task.exception() is not None or not task.result():
-            return None
-        return "error" if self.status == "error" else "start"
+        return await self._outcome(task, "start")
 
     async def _start_after_stop(self, before: asyncio.Task[Any] | None) -> bool:
         """Wait for the stop under way — ``before``, a Stop pressed just before that hasn't begun yet, then
-        the state ``stopping`` (the capture closed, the meeting wrapped up) — and start listening, unless the
-        start was taken back meanwhile (:attr:`_start_queued`: Stop, Stop now) or the app is quitting. Not
-        on the run task: it also waits for an ended meeting's agents, and is gone once the stop is over."""
+        the state ``stopping`` (the capture closed, the meeting wrapped up) — and start listening. Not on the
+        run task: it also waits for an ended meeting's agents, and is gone once the stop is over. Taken back
+        meanwhile, it is cancelled (:meth:`_take_back_start`); ``False`` if the app is quitting all the same."""
         if before is not None:
             await asyncio.wait({before})
         while self.status == "stopping" and not self._closing:
             self._status_changed.clear()
             await self._status_changed.wait()
-        queued, self._start_queued = self._start_queued, False
-        if not queued or self._closing:
-            log.info("the start waiting for the last meeting's wrap-up was taken back")
+        if not self._start_queued or self._closing:
             return False
+        self._start_queued = False
+        self._publish_state()  # from here on it is a start like any other, and Stop stops it as one
         await self.listen_start()
+        return True
+
+    def _take_back_start(self, publish: bool = True) -> bool:
+        """The start waiting for the last meeting's wrap-up (Stop, Stop now, quitting, a switch to manual): it
+        won't start, and the presses waiting for it are answered ``cancelled`` at once. Returns whether there
+        was one."""
+        if not self._start_queued:
+            return False
+        self._start_queued = False
+        task = self._queued_start
+        if task is not None and not task.done():
+            task.cancel()  # it hasn't begun to start anything: it only waits (see _start_after_stop)
+        log.info("the start waiting for the last meeting's wrap-up was taken back")
+        if publish:
+            self._publish_state()
         return True
 
     async def meeting_start(self) -> MeetingAction | None:
@@ -1271,7 +1297,7 @@ class AppHost:
         recording. ``meeting/stop`` and ``open`` need none: they can't record anything.
 
         Returns the outcome: what the meeting action did (``start``, ``restart``, ``resume``, ``stop``,
-        ``error``), ``nothing`` (nothing to do), ``open`` (the shell shows the window), ``refused`` (no key,
+        ``error``, ``cancelled``), ``nothing`` (nothing to do), ``open`` (the shell shows the window), ``refused`` (no key,
         or not this one: :attr:`notice` says so) or ``unknown`` (not a link Voicestream knows)."""
         parsed = parse_url(url)
         if parsed is None:
@@ -1607,6 +1633,7 @@ class AppHost:
         """Stop listening (a graceful wrap-up of up to :data:`GRACEFUL_SHUTDOWN_S`, then forced; at once
         forced with ``force``), downloads and the server. Safe to call again to escalate."""
         self._closing = True  # a restart in flight (settings, pending after a meeting) must not start a new one
+        self._take_back_start()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + (0 if force else GRACEFUL_SHUTDOWN_S)
         if self._run_task is not None:
