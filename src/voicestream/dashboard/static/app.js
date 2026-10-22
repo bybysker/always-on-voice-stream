@@ -3286,7 +3286,9 @@ function onDownload(d) {
     if (d.state === 'error') toast(d.error || '', 'error', t('stt.download_failed', { name: label }));
     if (d.state === 'done' && S.startAfterDownload === d.name) {
       S.startAfterDownload = null;
-      listen('start');
+      // asked for while meetings started by themselves; since set to start by hand, a start now would
+      // open a meeting nobody started
+      if (!isManual()) listen('start');
     }
     if (S.heldStt && S.heldStt.name === d.name) {
       if (d.state === 'done') applyHeldStt(S.heldStt);
@@ -3588,6 +3590,7 @@ async function saveSettings() {
       });
       setApp({ ...S.app, prefs: { ...S.app.prefs, ...saved }, mode: saved.meeting_start || S.app.mode });
       S.prefsDraft = {};
+      if (saved.meeting_start && saved.meeting_start !== 'automatic') S.startAfterDownload = null;  // by hand from now on
     }
     S.fieldErrors = {};
     await Promise.all([loadSettings(), loadModels()]);

@@ -2047,6 +2047,49 @@ def test_a_start_waiting_for_the_speech_model_can_be_stopped_on_live(make_app: C
     assert app.host.status == "stopped" and app.host.assistant is None and not app.built
 
 
+def test_a_start_left_for_after_the_download_is_dropped_by_a_switch_to_by_hand(make_app: Callable[..., UIApp],
+                                                                               open_page: Callable[..., Page]) -> None:
+    """Listening was to start once the speech model is in (the setup's "Start listening when the download
+    is done", meetings automatic), then meetings were set to start by hand: the download ending starts
+    nothing — no meeting opens, the microphone stays closed."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, backend="whisper-cpp", models=(stt_models.VAD_MODEL,))
+    p = open_page(app)
+    pg = p.page
+    host, loop = app.host, app.host.loop
+    assert loop is not None
+
+    def wait_to_start_after(name: str) -> None:
+        app.dl_gate.clear()
+        loop.call_soon_threadsafe(host.model_download, name)
+        _wait(lambda: pg.evaluate("(n) => Boolean(S.downloads[n])", name))
+        pg.evaluate("(n) => { S.startAfterDownload = n; }", name)  # as finishSetup does
+
+    def download_ends(name: str) -> None:
+        app.dl_gate.set()
+        _wait(lambda: stt_models.model_path(host.cfg, name).is_file() and name not in host._downloads, timeout=15)
+        pg.wait_for_timeout(500)  # the page has had the download's end, when it would start listening
+        assert host.status == "stopped" and host.assistant is None and not app.built
+
+    # by hand from now on, wherever it was changed (the page hears it from the app's state)…
+    wait_to_start_after("large-v3-turbo-q5_0")
+    loop.call_soon_threadsafe(host.update_prefs, {"meeting_start": "manual"})
+    _wait(lambda: pg.evaluate("isManual()"))
+    download_ends("large-v3-turbo-q5_0")
+
+    # … and when it is saved in Settings, the start waiting for the download is forgotten there and then
+    loop.call_soon_threadsafe(host.update_prefs, {"meeting_start": "automatic"})
+    _wait(lambda: not pg.evaluate("isManual()"))
+    wait_to_start_after("small")
+    pg.click("nav a[href='#/settings']")
+    pg.get_by_label("When you start them (recommended)", exact=True).check()
+    pg.click("#save-settings")
+    expect(pg.locator(".toast", has_text="Your settings are saved").last).to_be_visible()
+    assert host.prefs.meeting_start == "manual" and pg.evaluate("S.startAfterDownload") is None
+    download_ends("small")
+
+
 def test_google_bridge_script_route(tmp_path: Path) -> None:
     """Settings → Your tools → Google copies the bridge script from the app (needs the token)."""
     from test_app_host import _factory, _write_config
