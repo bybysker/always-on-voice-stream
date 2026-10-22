@@ -24,7 +24,8 @@ The app's own report says ``ok`` when every check it ran passed, which is not en
   the same link without the key must be refused, and, as for the shortcut, nothing is started;
 * the Spotlight launcher written into a temporary folder must be valid (plutil reads its Info.plist,
   its script may run, the app's icon is in it) and removed again; the microphone probe behind call
-  suggestions must answer from Core Audio, naming the processes that capture.
+  suggestions must answer from Core Audio, naming the processes that capture;
+* the Meeting menu must be in the app's menu bar, with its entries (no unit test sees the real one).
 
 Prints the report and every problem; exits 1 when there is one. Standard library only.
 """
@@ -41,6 +42,7 @@ NATIVE_CHECKS = (
     "app_delegate_patched", "hide_on_close_and_reopen", "whisper_server_bundled",
     "hotkey_registered", "hotkey_reaches_host", "hotkey_in_menu", "keyboard_layout",
     "floating_panel", "floating_panel_states", "url_handler", "url_reaches_host", "spotlight_launcher", "mic_probe",
+    "meeting_menu",
 )  # fmt: skip
 """What native mode checks in the packaged app (voicestream/app/native.py MacShell._selftest)."""
 

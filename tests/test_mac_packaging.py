@@ -377,6 +377,11 @@ def test_selftest_verdict(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     changed = _native_report(app, url={"state_before": "listening", "state_after": "stopped"})
     assert check_selftest.problems(changed, app) == ["the link test changed the app's state (listening → stopped)"]
     assert check_selftest.problems(_native_report(app, url={"state_before": "stopped", "state_after": "stopped"}), app) == []
+    # the Meeting menu in the app's menu bar: no unit test sees the real one
+    no_menu = _native_report(app, checks={k: True for k in check_selftest.NATIVE_CHECKS if k != "meeting_menu"})
+    assert check_selftest.problems(no_menu, app) == ["checks that did not run: meeting_menu"]
+    gone = _native_report(app, ok=False, checks=dict.fromkeys(check_selftest.NATIVE_CHECKS, True) | {"meeting_menu": False})
+    assert check_selftest.problems(gone, app) == ["failed checks: meeting_menu"]
 
     report = tmp_path / "selftest.json"
     report.write_text(json.dumps(browser), encoding="utf-8")

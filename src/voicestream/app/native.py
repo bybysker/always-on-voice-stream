@@ -1569,6 +1569,9 @@ class MacShell:
             checks.update(launcher.http_checks(report["http"]))
             report["status_item"] = item = self._on_main(self._status_item_info) or {}
             checks["status_item"] = bool(item.get("created") and item.get("image"))
+            report["meeting_menu"] = meeting = self._on_main(self._meeting_menu_info) or {}
+            checks["meeting_menu"] = bool(meeting.get("in_menu_bar")) and meeting.get("entries") == [
+                e.key for e in meeting_menu_model(self.state, self.lang) if not e.separator]
             report["delegate"] = patches = self._on_main(self._delegate_info) or {}
             patches["install_error"] = self.delegate_error
             checks["app_delegate_patched"] = bool(patches.get("patched") and patches.get("reopen")
@@ -1655,6 +1658,19 @@ class MacShell:
             "title": str(button.title()) if button is not None else None,
             "menu": [str(mi.title()) for mi in (self._menu.itemArray() if self._menu is not None else [])
                      if not mi.isSeparatorItem() and not mi.isHidden()],
+        }
+
+    def _meeting_menu_info(self) -> dict[str, Any]:
+        """Main thread: the Meeting menu is in the app's menu bar (after pywebview's own: building it again for a
+        window with menus of its own would drop it), with its entries."""
+        main = _app().mainMenu()
+        holder, menu = self._main_menu or (None, None)
+        return {
+            "created": holder is not None,
+            "in_menu_bar": bool(main is not None and holder is not None and int(main.indexOfItem_(holder)) >= 0),
+            "title": str(holder.title()) if holder is not None else None,
+            "entries": [str(mi.representedObject()) for mi in (menu.itemArray() if menu is not None else [])
+                        if not mi.isSeparatorItem()],
         }
 
     def _delegate_info(self) -> dict[str, Any]:

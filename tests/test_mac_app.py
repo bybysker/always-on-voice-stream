@@ -906,6 +906,102 @@ def test_app_delegate_is_a_subclass_with_the_runtime_encodings(host: FakeHost, p
     assert _wait(lambda: ("request_focus", "start") in host.calls)
 
 
+class FakeMenuItem:
+    """NSMenuItem: what was set on it (``setFoo_(v)`` keeps ``foo``), and the getters the shell reads."""
+
+    def __init__(self, title: str = "", action: Any = None, key: str = "", separator: bool = False) -> None:
+        self.values: dict[str, Any] = {"title": title, "action": action, "keyEquivalent": key}
+        self.separator = separator
+
+    @classmethod
+    def alloc(cls) -> Any:
+        return types.SimpleNamespace(initWithTitle_action_keyEquivalent_=lambda t, a, k: cls(t, a, k))
+
+    @classmethod
+    def separatorItem(cls) -> Any:
+        return cls(separator=True)
+
+    def title(self) -> str:
+        return self.values["title"]
+
+    def representedObject(self) -> Any:
+        return self.values.get("representedObject")
+
+    def isSeparatorItem(self) -> bool:
+        return self.separator
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("set") and name.endswith("_") and name.count("_") == 1:
+            key = name[3].lower() + name[4:-1]
+            return lambda value: self.values.__setitem__(key, value)
+        raise AttributeError(name)
+
+
+class FakeMenu(FakeMenuItem):
+    """NSMenu: its items, in order."""
+
+    def __init__(self, title: str = "") -> None:
+        super().__init__(title)
+        self.items: list[Any] = []
+
+    @classmethod
+    def alloc(cls) -> Any:
+        return types.SimpleNamespace(initWithTitle_=lambda t: cls(t))
+
+    def addItem_(self, item: Any) -> None:
+        self.items.append(item)
+
+    def itemArray(self) -> list[Any]:
+        return list(self.items)
+
+    def indexOfItem_(self, item: Any) -> int:
+        return self.items.index(item) if item in self.items else -1
+
+
+def test_the_meeting_menu_is_in_the_menu_bar_and_follows_the_state(host: FakeHost, pyobjc: Any, appkit: Recorder,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real _create_meeting_menu and render() on stand-ins for NSMenu/NSMenuItem: the menu is added to the app's
+    menu bar with the Meeting entries (not the status item's), and render() keeps them enabled, hidden and with the
+    shortcut as meeting_menu_model says — _new_menu sets none of that, so without it every item stays enabled,
+    End Meeting Now shows in manual mode and the shortcut stays where it was first put."""
+    main = FakeMenu("Main")
+    appkit.returns["mainMenu"] = main
+    monkeypatch.setitem(sys.modules, "AppKit", types.SimpleNamespace(NSApplication=sys.modules["AppKit"].NSApplication,
+                                                                    NSMenu=FakeMenu, NSMenuItem=FakeMenuItem))
+    host.thread.start()
+    shell = _shell(host)
+    hk = {"prefs": {"ui_language": "auto", "floating_button": True,
+                    "hotkey": {"code": "KeyR", "mods": ["alt", "cmd"], "key": "R"}},
+          "hotkey": {"status": "ok"}, "setup_done": True, "capabilities": {"floating_button": True}}
+    shell.state = _state("stopped", mode="manual", **hk)
+    shell._create_meeting_menu()
+    (holder,) = main.items
+    menu = holder.values["submenu"]
+    assert holder.title() == menu.title() == "Meeting" and menu.values["autoenablesItems"] is False
+    keys = [e.key for e in native.meeting_menu_model(shell.state, "en")]
+    assert [i.representedObject() if not i.separator else "sep_m" for i in menu.items] == keys
+    entries = {i.representedObject(): i.values for i in menu.items if not i.separator}
+    shell.state = _state("listening", minutes=1, mode="manual", **hk)
+    shell.render()  # no status item here: the Meeting menu is still updated
+    assert entries["m_stop"]["enabled"] is True and entries["m_start"]["enabled"] is False
+    assert entries["m_end"]["hidden"] is True and entries["m_pause"]["hidden"] is False  # manual: End would be Stop
+    assert (entries["m_stop"]["keyEquivalent"], entries["m_start"]["keyEquivalent"]) == ("r", "")  # a press stops
+    shell.state = _state("paused", minutes=1, mode="manual", **hk)
+    shell.render()
+    assert entries["m_pause"]["title"] == "Resume Meeting" and entries["m_pause"]["keyEquivalent"] == "r"
+    shell.lang = "fr"  # changed in Settings
+    shell.render()
+    assert holder.title() == menu.title() == "Réunion" and entries["m_stop"]["title"] == "Arrêter la réunion"
+    # what the self-test reads of it
+    info = shell._meeting_menu_info()
+    assert info == {"created": True, "in_menu_bar": True, "title": "Réunion",
+                    "entries": [k for k in keys if not k.startswith("sep")]}
+    shell._target.menuAction_(types.SimpleNamespace(representedObject=lambda: "m_stop"))  # a click on it
+    assert _wait(lambda: ("meeting_stop", None) in host.calls)
+    main.items.clear()  # pywebview built the menu bar again without it
+    assert shell._meeting_menu_info()["in_menu_bar"] is False
+
+
 def test_the_delegate_is_in_place_before_the_window_opens(host: FakeHost, pyobjc: Any) -> None:
     host.thread.start()
     shell = native.MacShell(host, f"http://127.0.0.1:1/app?token={TOKEN}")
