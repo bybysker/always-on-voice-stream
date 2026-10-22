@@ -78,6 +78,30 @@ def test_starting_stopping_and_problems() -> None:
     assert err.tooltip == "Microphone permission is off: System Settings"  # one line
 
 
+def test_a_start_waiting_for_the_wrap_up_shows_and_can_be_cancelled() -> None:
+    """``start_queued``: a start (a press of the shortcut, the launcher, a call accepted) waits for the last
+    meeting's notes, and records by itself once they are written. Nothing said so: "Saving notes…" alone, no button.
+    Now it says the next meeting comes after the notes, with Cancel (a stop: the start is taken back, the notes
+    are still written)."""
+    queued = floating.panel_model(_st("stopping", start_queued=True), "en", NOW, shortcut="⌥⌘R")
+    assert queued.kind == "queued" and queued.text == "Next meeting after the notes…" and queued.announce == queued.text
+    assert queued.tooltip == "The next meeting starts once these notes are written"
+    (cancel,) = queued.buttons
+    assert (cancel.key, cancel.symbol, cancel.icon_only, cancel.prominent) == ("cancel", "xmark", True, False)
+    assert cancel.label == "Cancel next meeting" and "notes are still written" in cancel.tooltip
+    assert "⌥⌘R" not in cancel.tooltip  # a press doesn't cancel it: it is the same start again
+    fr = floating.panel_model(_st("stopping", start_queued=True), "fr", NOW)
+    assert (fr.text, fr.buttons[0].label) == ("Prochaine réunion après les notes…", "Annuler la prochaine réunion")
+    auto = floating.panel_model(_st("stopping", mode="automatic", start_queued=True), "en", NOW)
+    assert auto.kind == "queued" and "listening" in auto.text.lower() and auto.buttons[0].key == "cancel"
+    # the moment the wrap-up is over and the start not begun yet, it still waits
+    assert floating.panel_model(_st("stopped", start_queued=True), "en", NOW).kind == "queued"
+    assert floating.panel_model(_st("stopping"), "en", NOW).kind == "stopping"  # nothing waits: as before
+    assert floating.panel_model(_st("starting", start_queued=True), "en", NOW).kind == "starting"
+    assert floating.start_queued(_st("stopping", start_queued=True))
+    assert not floating.start_queued(_st("listening", start_queued=True)) and not floating.start_queued(_st("stopping"))
+
+
 def test_french_says_recording_only_while_it_records() -> None:
     """« Enregistrement » is the app's French word for Recording (the dot's VoiceOver label, the window's state):
     after Stop, the wrap-up is said as the window says it, or « Enregistrement des notes… » reads as still recording."""
@@ -212,7 +236,8 @@ def test_both_languages_say_everything() -> None:
             # one line of at most TEXT_MAX_WIDTH (300 pt) at 13 pt, cut at its end otherwise: about 45 characters
             assert len(m.text) <= 45, m.text
     assert sorted(set(floating.kinds(floating.sample_states().values()))) == sorted(
-        {"idle", "recording", "paused", "listening", "starting", "stopping", "suggestion", "still_there", "notice", "error"})
+        {"idle", "recording", "paused", "listening", "starting", "stopping", "queued", "suggestion", "still_there", "notice",
+         "error"})
 
 
 def test_when_it_shows() -> None:

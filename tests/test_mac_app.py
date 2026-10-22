@@ -626,6 +626,42 @@ def test_meeting_menu_in_the_menu_bar() -> None:
     assert fr["m_start"].title == "Démarrer une réunion" and native.STRINGS["fr"]["meeting_menu"] == "Réunion"
 
 
+def test_the_menus_say_a_start_waits_and_offer_to_cancel_it() -> None:
+    """``start_queued``: a start waits for the last meeting's notes and will record by itself once they are written.
+    Both menus say so where Start/Stop is, as a command that takes it back (a stop: the notes are still written);
+    no shortcut is shown next to it (a press is the same start again, not a cancel)."""
+    shortcut = {"prefs": {"hotkey": {"code": "KeyR", "mods": ["alt", "cmd"], "key": "R"}}, "hotkey": {"status": "ok"}}
+    for state in ("stopping", "stopped"):  # stopped: the moment between the wrap-up's end and the start
+        waits = _state(state, mode="manual", start_queued=True, **shortcut)
+        listen = _menu(waits)["listen"]
+        assert (listen.title, listen.enabled, listen.shortcut) == ("Cancel Next Meeting", True, ""), state
+        assert native.shortcut_entry(waits) is None
+        m = {e.key: e for e in native.meeting_menu_model(waits, "en")}
+        assert (m["m_stop"].title, m["m_stop"].enabled, m["m_stop"].shortcut) == ("Cancel Next Meeting", True, "")
+        assert m["m_start"].title == "Start Meeting" and not m["m_start"].enabled and m["m_start"].shortcut == ""
+        assert not m["m_pause"].enabled
+    fr = _state("stopping", mode="manual", start_queued=True)
+    assert {e.key: e for e in native.menu_model(fr, "fr", "disabled", now=NOW)}["listen"].title == (
+        "Annuler la prochaine réunion")
+    assert {e.key: e for e in native.meeting_menu_model(fr, "fr")}["m_stop"].title == "Annuler la prochaine réunion"
+    auto = _menu(_state("stopping", start_queued=True))["listen"]
+    assert auto.title == "Don't Start Listening" and auto.enabled
+    assert not _menu(_state("stopping", mode="manual", start_queued=True), quitting=True)["listen"].enabled
+    # nothing waits: as before, nothing to do while the notes are written
+    plain = _menu(_state("stopping", mode="manual"))["listen"]
+    assert (plain.title, plain.enabled) == ("Stop Meeting", False)
+
+
+def test_cancel_next_meeting_in_the_menus_is_a_stop(host: FakeHost, appkit: Recorder) -> None:
+    """Even at the moment the wrap-up is over (stopped) and the start not begun: "Start" there would join it."""
+    host.thread.start()
+    shell = _shell(host)
+    for state, key in (("stopping", "listen"), ("stopped", "listen"), ("stopped", "m_stop")):
+        shell.state = _state(state, mode="manual", start_queued=True)
+        shell.on_menu(key)
+    assert _wait(lambda: host.calls == [("meeting_stop", None)] * 3)
+
+
 def test_which_shortcut_the_shell_registers() -> None:
     hk = {"code": "KeyR", "mods": ["cmd", "alt"], "key": "R"}
     assert native.hotkey_wanted({"prefs": {"hotkey": hk}, "hotkey": {"recording": False}}) == ("KeyR", ("alt", "cmd"))
@@ -1832,6 +1868,9 @@ def test_floating_button_clicks_go_through_the_host_actions(host: FakeHost, appk
     shell.on_floating("settings")
     assert _wait(lambda: ran == ['location.hash = "#/settings/general"'])  # from another thread: run_js waits on this one
     shell.on_floating("nothing such")  # ignored
+    host.calls.clear()
+    shell.on_floating("cancel")  # the next meeting waits for these notes: Cancel takes it back, as Stop does
+    assert _wait(lambda: host.calls == [("meeting_stop", None)])
 
 
 class Descriptor:
@@ -2266,6 +2305,8 @@ def test_the_selftest_checks_the_floating_button(host: FakeHost, appkit: Recorde
     assert set(out["states"]) == set(floating.sample_states())
     assert out["states"]["suggestion"] == {"drawn": True, "kind": "suggestion", "size": [200, 44], "buttons": 2,
                                            "expected_buttons": 2, "min_button_height": 28.0, "labelled": True}
+    # the next meeting waiting for the notes, with its Cancel: drawn and checked as every other look
+    assert (out["states"]["start_queued"]["kind"], out["states"]["start_queued"]["expected_buttons"]) == ("queued", 1)
     assert panels[0].updates[-1][0] is None and shell._floating_test is None  # hidden again after the test
 
     def short(self: Any) -> dict[str, Any]:

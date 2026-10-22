@@ -18,6 +18,8 @@ pointer target on a Mac), each with a VoiceOver label and a tooltip:
 * idle: the app's mark, to drag it by, and Start meeting (Start listening when meetings start automatically);
 * recording: a red dot that breathes (still, with Reduce Motion on), the time since the meeting
   started, Pause / Resume and Stop;
+* the last meeting's notes being written, and the next meeting waiting for them (a press of the shortcut, the
+  launcher): "Next meeting after the notes…" and Cancel, which takes that start back;
 * a call another app started: "Call detected — start notes?" with Start and Not now;
 * a long silence: "Still in a meeting?" with Keep and End;
 * what happened by itself (a meeting ended after a long silence, a link refused), until OK, with Start
@@ -112,6 +114,15 @@ STRINGS: dict[str, dict[str, str]] = {
         "starting": "Starting…",
         "saving": "Saving notes…",
         "stopping": "Stopping…",
+        "queued": "Next meeting after the notes…",
+        "queued_tip": "The next meeting starts once these notes are written",
+        "queued_auto": "Listening again in a moment…",
+        "queued_auto_tip": "Listening starts again once stopping is done",
+        "cancel": "Cancel",
+        "cancel_next": "Cancel next meeting",
+        "cancel_next_tip": "Cancel the next meeting: these notes are still written",
+        "cancel_listen": "Don't start listening",
+        "cancel_listen_tip": "Don't start listening again: stay stopped",
         "elapsed": "Meeting time {time}",
         "suggestion": "Call detected — start notes?",
         "suggestion_app": "{app} is using the microphone",
@@ -156,6 +167,15 @@ STRINGS: dict[str, dict[str, str]] = {
         # not « Enregistrement » (the app's French for Recording): just after Stop, it would read as still recording
         "saving": "Rédaction des notes…",
         "stopping": "Arrêt…",
+        "queued": "Prochaine réunion après les notes…",
+        "queued_tip": "La prochaine réunion démarre une fois ces notes rédigées",
+        "queued_auto": "L'écoute reprend dans un instant…",
+        "queued_auto_tip": "L'écoute reprend une fois l'arrêt terminé",
+        "cancel": "Annuler",
+        "cancel_next": "Annuler la prochaine réunion",
+        "cancel_next_tip": "Annuler la prochaine réunion : ces notes sont rédigées quand même",
+        "cancel_listen": "Ne pas reprendre l'écoute",
+        "cancel_listen_tip": "Ne pas reprendre l'écoute : rester arrêté",
         "elapsed": "Durée de la réunion {time}",
         "suggestion": "Appel détecté — prendre des notes ?",
         "suggestion_app": "{app} utilise le micro",
@@ -216,7 +236,8 @@ def meeting_mode(state: dict[str, Any]) -> str:
 @dataclass(frozen=True, slots=True)
 class PanelButton:
     key: str
-    """What a click does, for the shell: start, pause, resume, stop, accept, dismiss, keep, end, ok, show, retry."""
+    """What a click does, for the shell: start, pause, resume, stop, accept, dismiss, keep, end, ok, show, retry, cancel
+    (a stop: the start waiting for the last meeting's wrap-up is taken back)."""
     title: str
     label: str
     """What VoiceOver says (the title, or what an icon-only button does)."""
@@ -231,7 +252,8 @@ class PanelButton:
 @dataclass(frozen=True, slots=True)
 class PanelModel:
     kind: str
-    """idle, recording, paused, listening, starting, stopping, suggestion, still_there, notice, error."""
+    """idle, recording, paused, listening, starting, stopping, queued (stopping, a start waiting for it), suggestion,
+    still_there, notice, error."""
     text: str = ""
     symbol: str = ""
     tint: str = "secondary"
@@ -262,6 +284,13 @@ def _question(state: dict[str, Any]) -> tuple[str, str] | None:
     if current in ("stopped", "error", "stopping") and notice.get("kind") == "ended_after_silence":
         return "notice", f"ended:{notice.get('meeting_id')}:{notice.get('at')}"
     return None
+
+
+def start_queued(state: dict[str, Any]) -> bool:
+    """A start waits for the last meeting's wrap-up (the host's ``start_queued``) and will record by itself once it
+    is over: said, with a way to take it back. Also the moment the wrap-up is over and the start not begun (the
+    state already says stopped); never while something is recorded."""
+    return bool(state.get("start_queued")) and str(state.get("state") or "stopped") in ("stopping", "stopped", "error")
 
 
 def question_key(state: dict[str, Any]) -> str | None:
@@ -375,6 +404,13 @@ def panel_model(state: dict[str, Any], lang: str, now: datetime | None = None, *
                           timer_label=timer_label, buttons=(pause, stop))
     if current == "starting":
         return PanelModel("starting", s["starting"], "circle.dotted", "secondary", buttons=(stop,))
+    if start_queued(state):
+        # it would record by itself minutes from now: said, with Cancel (a stop, which takes a waiting start back;
+        # the notes are still written). Not the shortcut in its tooltip: a press is the same start again
+        text, tooltip = (s["queued"], s["queued_tip"]) if manual else (s["queued_auto"], s["queued_auto_tip"])
+        label, cancel_tip = (s["cancel_next"], s["cancel_next_tip"]) if manual else (s["cancel_listen"], s["cancel_listen_tip"])
+        return PanelModel("queued", text, "square.and.arrow.down", "secondary", tooltip=tooltip, announce=text,
+                          buttons=(PanelButton("cancel", s["cancel"], label, "xmark", icon_only=True, tooltip=cancel_tip),))
     if current == "stopping":
         return PanelModel("stopping", s["saving"] if manual else s["stopping"], "square.and.arrow.down", "secondary")
     if state.get("suggestion"):
@@ -406,6 +442,7 @@ def sample_states() -> dict[str, dict[str, Any]]:
         "listening": {**base, "mode": "automatic", "state": "listening"},
         "starting": {**base, "state": "starting"},
         "stopping": {**base, "state": "stopping"},
+        "start_queued": {**base, "state": "stopping", "start_queued": True},
         "suggestion": {**base, "suggestion": {"app": "Microsoft Teams", "at": "2026-01-01T09:00:00+00:00"}},
         "still_there": {**base, **meeting, "state": "listening", "still_there": {"meeting_id": "m", "silent_minutes": 15}},
         "notice": {**base, "notice": {"kind": "ended_after_silence", "minutes": 60}},

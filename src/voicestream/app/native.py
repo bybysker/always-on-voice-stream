@@ -46,7 +46,8 @@ and every way of starting and stopping goes through the host's meeting actions
 
 * the floating button (:mod:`.floating`): a small non-activating panel above every app, on every
   Space, that follows the host's state (Start meeting; the time, Pause, Stop; a call suggestion;
-  "Still in a meeting?") and can be hidden from its own menu — hidden, it still comes up for a call
+  "Still in a meeting?"; the next meeting waiting for the last one's notes, with Cancel — the menus have
+  Cancel Next Meeting then) and can be hidden from its own menu — hidden, it still comes up for a call
   suggestion or "Still in a meeting?", which nothing else would show with the window closed;
 * ``voicestream://`` links (the Info.plist's CFBundleURLTypes): Launch Services sends them as a "get
   URL" Apple event, whose handler (registered before the run loop starts, for the link that launches
@@ -165,6 +166,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "start_meeting": "Start Meeting",
         "stop_meeting": "Stop Meeting",
         "end_meeting": "End Meeting Now",
+        "cancel_next": "Cancel Next Meeting",
+        "cancel_listen": "Don't Start Listening",
         "show_floating": "Show Floating Button",
         "hide_floating": "Hide Floating Button",
         "meeting_menu": "Meeting",
@@ -199,6 +202,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "start_meeting": "Démarrer une réunion",
         "stop_meeting": "Arrêter la réunion",
         "end_meeting": "Terminer la réunion",
+        "cancel_next": "Annuler la prochaine réunion",
+        "cancel_listen": "Ne pas reprendre l'écoute",
         "show_floating": "Afficher le bouton flottant",
         "hide_floating": "Masquer le bouton flottant",
         "meeting_menu": "Réunion",
@@ -326,9 +331,10 @@ def shortcut_entry(state: dict[str, Any]) -> str | None:
     """The menu entry the keyboard shortcut is shown next to: the one that does what a press does now
     (:data:`.hotkey.TOGGLE`) — "Resume listening" while paused (a press resumes: next to "Stop
     listening" it would be read as a stop), Start/Stop listening when a press starts or stops, and none
-    while listening starts or a meeting is wrapped up (a press stops nothing then)."""
+    while listening starts or a meeting is wrapped up (a press stops nothing then) — nor while a start waits for
+    that (next to Cancel Next Meeting it would be read as a cancel: a press is the same start again)."""
     press = hotkey.TOGGLE.get(str(state.get("state") or "stopped"))
-    if press is None:
+    if press is None or floating.start_queued(state):
         return None
     return "pause" if press == "resume" else "listen"
 
@@ -341,11 +347,18 @@ def _floating_entry(key: str, state: dict[str, Any], lang: str, *, quitting: boo
     return MenuEntry(key, s["hide_floating"] if on else s["show_floating"], enabled=not quitting, visible=there)
 
 
+def _cancel_title(state: dict[str, Any], lang: str) -> str:
+    """What takes back a start waiting for the last meeting's wrap-up (:func:`.floating.start_queued`)."""
+    s = STRINGS.get(lang, STRINGS["en"])
+    return s["cancel_next"] if is_manual(state) else s["cancel_listen"]
+
+
 def menu_model(state: dict[str, Any], lang: str, login: str, *, now: datetime | None = None,
                quitting: bool = False) -> list[MenuEntry]:
     """The status item's menu for this state, always the same keys in the same order (the native
     menu is built once and updated in place). Start/Stop Meeting when meetings start by hand (End
-    Meeting Now would be Stop again), Start/Stop Listening and End Meeting Now when automatically."""
+    Meeting Now would be Stop again), Start/Stop Listening and End Meeting Now when automatically;
+    Cancel Next Meeting in their place while a start waits for the last meeting's wrap-up."""
     s = STRINGS.get(lang, STRINGS["en"])
     now = now or datetime.now(UTC)
     current = str(state.get("state") or "stopped")
@@ -360,6 +373,12 @@ def menu_model(state: dict[str, Any], lang: str, login: str, *, now: datetime | 
     start, stop = (s["start_meeting"], s["stop_meeting"]) if manual else (s["start"], s["stop"])
     resume = s["resume_meeting"] if manual else s["resume"]
     floating_item = _floating_entry("floating", state, lang, quitting=quitting)
+    if floating.start_queued(state):  # a stop, which takes the waiting start back (the notes are still written)
+        listen = MenuEntry("listen", _cancel_title(state, lang), enabled=not quitting)
+    else:
+        # Stop may cancel a start still under way (a speech model downloading), as the host allows
+        listen = MenuEntry("listen", start if stopped else stop, enabled=not quitting and current != "stopping",
+                           **on_listen)
     return [
         MenuEntry("status", state_line(state, lang, now, quitting=quitting), enabled=False),
         MenuEntry("sep1"),
@@ -367,8 +386,7 @@ def menu_model(state: dict[str, Any], lang: str, login: str, *, now: datetime | 
         MenuEntry("sep2"),
         MenuEntry("pause", resume if current == "paused" else s["pause"], enabled=not busy,
                   visible=current in ("listening", "paused"), **on_pause),
-        # Stop may cancel a start still under way (a speech model downloading), as the host allows
-        MenuEntry("listen", start if stopped else stop, enabled=not quitting and current != "stopping", **on_listen),
+        listen,
         MenuEntry("end_meeting", s["end_meeting"], enabled=not busy, visible=bool(state.get("in_meeting")) and not manual),
         MenuEntry("sep3", visible=login != "unsupported" or floating_item.visible),
         floating_item,
@@ -382,22 +400,26 @@ def menu_model(state: dict[str, Any], lang: str, login: str, *, now: datetime | 
 def meeting_menu_model(state: dict[str, Any], lang: str, *, quitting: bool = False) -> list[MenuEntry]:
     """The "Meeting" menu of the app's menu bar (shown while the window is in front): the same commands as
     the status item's, each one always there and disabled when it can't be used (the convention for the
-    menu bar), the keyboard shortcut next to the one a press does now."""
+    menu bar), the keyboard shortcut next to the one a press does now. While a start waits for the last meeting's
+    wrap-up, Stop is Cancel Next Meeting (it takes that start back) and Start is disabled (one is coming)."""
     s = STRINGS.get(lang, STRINGS["en"])
     current = str(state.get("state") or "stopped")
     manual = is_manual(state)
-    press = hotkey.TOGGLE.get(current)
+    queued = floating.start_queued(state)
+    press = None if queued else hotkey.TOGGLE.get(current)
     key, mods = listen_shortcut(state)
 
     def shortcut(on: bool) -> dict[str, Any]:
         return {"shortcut": key, "modifiers": mods} if on else {}
 
     recording = current in ("listening", "paused")
+    stop = _cancel_title(state, lang) if queued else s["stop_meeting"] if manual else s["stop"]
     return [
-        MenuEntry("m_start", s["start_meeting"] if manual else s["start"], enabled=not quitting and current in ("stopped", "error"),
+        MenuEntry("m_start", s["start_meeting"] if manual else s["start"],
+                  enabled=not quitting and not queued and current in ("stopped", "error"),
                   **shortcut(press in ("start", "restart"))),
-        MenuEntry("m_stop", s["stop_meeting"] if manual else s["stop"],
-                  enabled=not quitting and current in ("starting", "listening", "paused"), **shortcut(press == "stop")),
+        MenuEntry("m_stop", stop, enabled=not quitting and (queued or current in ("starting", "listening", "paused")),
+                  **shortcut(press == "stop")),
         MenuEntry("m_pause", (s["resume_meeting"] if manual else s["resume"]) if current == "paused" else s["pause"],
                   enabled=not quitting and recording, **shortcut(press == "resume")),
         MenuEntry("m_end", s["end_meeting"], enabled=not quitting and recording and bool(state.get("in_meeting")),
@@ -1177,7 +1199,9 @@ class MacShell:
         elif key in ("pause", "m_pause"):
             self._post(self.host.listen_resume() if current == "paused" else self.host.listen_pause())
         elif key == "listen":
-            self._post(self.host.meeting_start() if current in ("stopped", "error") else self.host.meeting_stop())
+            # Cancel Next Meeting is a stop, also the moment the state says stopped before the start begins
+            start = current in ("stopped", "error") and not floating.start_queued(self.state)
+            self._post(self.host.meeting_start() if start else self.host.meeting_stop())
         elif key == "m_start":
             self._post(self.host.meeting_start())
         elif key == "m_stop":
@@ -1245,7 +1269,7 @@ class MacShell:
             self._post(self.host.listen_pause())
         elif key == "resume":
             self._post(self.host.listen_resume())
-        elif key == "stop":
+        elif key in ("stop", "cancel"):  # cancel: the start waiting for the last meeting's wrap-up is taken back
             self._post(self.host.meeting_stop())
         elif key == "accept":
             self._post(self.host.suggestion_accept())
