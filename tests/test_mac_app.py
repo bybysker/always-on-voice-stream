@@ -1864,7 +1864,7 @@ def test_the_spotlight_launcher_follows_the_setting(host: FakeHost, appkit: Reco
     bundle = folder / "Voicestream – New Meeting.app"
     assert _wait(lambda: (bundle / "Contents" / "MacOS" / "new-meeting").is_file())
     script = (bundle / "Contents" / "MacOS" / "new-meeting").read_text()
-    assert f"key={host.url_key}" in script and str(app) in script and "/usr/bin/open -g" in script
+    assert f"key={host.url_key}" in script and app.as_posix() in script and "/usr/bin/open -g" in script
     assert (bundle / "Contents" / "Resources" / "AppIcon.icns").read_bytes() == b"icon"
     shell._sync_spotlight()
     shell.apply_state(st())  # the same again: not written again
