@@ -5,7 +5,8 @@ Notes on the Claude 5.x API (checked 2026-10):
 
 * Structured output uses ``output_config.format`` (GA, no beta header). Forced
   ``tool_choice`` is rejected on Opus/Sonnet 5.5, so we don't rely on it.
-* ``temperature``/``top_p`` are not accepted by the 1.x SDK.
+* ``temperature``/``top_p``/``top_k`` are never sent: the 1.x SDK doesn't accept them, and API
+  version 2026-10-21 (the 2.x SDK's) answers 400 to any of them.
 * Thinking: Haiku 5.5 may disable it; Sonnet 5.5 uses ``between_tools`` as its
   cheapest mode; Opus 5.5 always thinks (omit the param).
 * Strict schemas allow at most 24 optional and 16 union-typed fields, so the

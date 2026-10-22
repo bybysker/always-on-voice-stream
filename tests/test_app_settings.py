@@ -289,7 +289,9 @@ async def test_verify_claude_key(cfg: Config, monkeypatch: pytest.MonkeyPatch) -
     seen: list[str] = []
 
     def ok(request: Any) -> dict[str, Any]:
-        seen.append(request.headers["x-api-key"])
+        # anthropic 2.x sends the key as a bearer token, 1.x in X-Api-Key: the API takes either
+        auth = request.headers.get("authorization", "")
+        seen.append(auth.removeprefix("Bearer ") if auth else request.headers.get("x-api-key"))
         return {"status_code": 200, "json": {"data": [{"id": "claude-haiku-5-5", "type": "model", "display_name": "Haiku",
                                                        "created_at": "2026-10-01T00:00:00Z"}], "has_more": False}}
 
