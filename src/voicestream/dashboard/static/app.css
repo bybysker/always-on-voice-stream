@@ -152,6 +152,9 @@ a { color: var(--text); text-underline-offset: 3px; text-decoration-color: var(-
 a:hover { text-decoration-color: currentColor; }
 button, input, select, textarea { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--hue); outline-offset: 2px; }
+/* a heading takes the focus only to say where you are (a screen reader reads it): it is not a control,
+   so it gets no ring — Tab goes on from it to the next control, which has one */
+:is(h1, h2)[tabindex="-1"]:focus-visible { outline: none; }
 ::selection { background: rgb(29 95 191 / 18%); }
 .num, td, th, output, .value, .pct, .ts, .when, .dur { font-variant-numeric: tabular-nums; }
 kbd {
@@ -435,14 +438,14 @@ main { flex: 1; outline: none; }
 .start-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; margin-top: 20px; }
 .hero .mode-line { margin-top: 16px; font-size: var(--fs-small); line-height: 18px; }
 .mode-line a { color: var(--text); }
-.shortcut-setting.live { min-width: 0; }
+.shortcut-setting.sc-live { min-width: 0; }
 .shortcut-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .shortcut-text { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--muted); }
-.shortcut-setting.live > p { margin-top: 6px; }
-.shortcut-setting.live .field-error:empty { display: none; }
+.shortcut-setting.sc-live > p { margin-top: 6px; }
+.shortcut-setting.sc-live .field-error:empty { display: none; }
 .warn-text { color: var(--pill-warning-ink); }
 /* the setup's: the keys large, "Choose a shortcut" beside them */
-.shortcut-setting.setup .keys kbd { min-width: 32px; padding: 3px 8px; font-size: var(--fs-section); line-height: 22px; }
+.shortcut-setting.sc-setup .keys kbd { min-width: 32px; padding: 3px 8px; font-size: var(--fs-section); line-height: 22px; }
 .setup-shortcut .field { margin-bottom: 4px; }
 .week { grid-column: span 4; padding: 16px 20px; align-self: start; }
 .week h2 { font-size: var(--fs-small); line-height: 18px; color: var(--muted); font-weight: 400; }
@@ -498,7 +501,7 @@ body.live-meeting main { min-height: 0; display: flex; flex-direction: column; }
 .live-notices { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
 .in-meeting .live-notices { margin-bottom: 0; }
 .live-head { display: flex; align-items: flex-start; gap: 12px 24px; flex-wrap: wrap; }
-.live-head .title { flex: 1 1 320px; min-width: 0; }
+.live-head .title { flex: 1 1 200px; min-width: 0; }  /* beside its controls down to the smallest window */
 .live-head .title .meters { margin-top: 10px; }
 .live-head h1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .live-head .sub { color: var(--muted); display: flex; gap: 8px; align-items: center; min-width: 0; margin-top: 2px; flex-wrap: wrap; }

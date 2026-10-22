@@ -739,6 +739,15 @@ function renderTopbar() {
   if (!bar || !S.app) return;
   const st = stateKey();
   const a = S.app;
+  // today's spending sits at the foot of the sidebar, under the screens it leads to (a link: it opens one)
+  const spend = $('spend') || h('a', { class: 'spend', id: 'spend', href: '#/costs' });
+  fillSpend(spend);
+  if (!spend.isConnected) fill($('spend-slot'), spend);
+  // the recorder is drawn again only when what it says changes: a screen reader hears its state once,
+  // and a press in progress is not lost to a new button under the pointer
+  const sig = [LANG, st, Boolean(a.in_meeting), a.error || '', isManual(), liveOwnsControls()].join('|');
+  if (sig === bar.dataset.sig && bar.childElementCount) return;
+  bar.dataset.sig = sig;
   const elapsed = meetingElapsed();
   const extra = h('span', { class: 'extra', id: 'state-extra' },
     a.in_meeting && elapsed != null ? t('state.meeting_for', { time: fmtDuration(elapsed) }) : '');
@@ -746,11 +755,6 @@ function renderTopbar() {
     h('span', { class: 'dot-state', 'aria-hidden': 'true' }),
     h('span', { class: 'text' }, stateText()), extra);
   if (st === 'error' && a.error) pill.title = humanize(a.error);
-
-  // today's spending sits at the foot of the sidebar, under the screens it leads to (a link: it opens one)
-  const spend = h('a', { class: 'spend', id: 'spend', href: '#/costs' });
-  fillSpend(spend);
-  keepFocus($('spend-slot'), () => fill($('spend-slot'), spend));
 
   const manual = isManual();
   const busy = st === 'starting' || st === 'stopping';
@@ -1435,9 +1439,12 @@ function renderLive() {
   renderLiveNotices();
   if (inMeeting) renderLiveHead();
   else renderIdle();
-  if (LV.view && LV.view !== view && lost && S.route.name === 'live' && !S.setup) {
+  // the focus left on the title while Start was busy (the meeting wrapping up) goes to it once it can start
+  const parked = LV.parked && document.activeElement === LV.heroTitle;
+  if (((LV.view && LV.view !== view && lost) || parked) && S.route.name === 'live' && !S.setup) {
     const target = liveFocusTarget();
-    if (target) target.focus({ preventScroll: true });
+    if (target && target !== document.activeElement) target.focus({ preventScroll: true });
+    LV.parked = target === LV.heroTitle;
   }
   LV.view = view;
 }
@@ -1538,7 +1545,11 @@ function renderMeetingControls(st, elapsed) {
       : btn(t('action.pause'), { id: 'live-pause', disabled: st !== 'listening', onclick: (e) => listen('pause', e.currentTarget) }, 'pause'),
     btn(t('action.stop'), { cls: paused ? '' : 'primary', id: 'live-stop', onclick: (e) => meetingAction('stop', e.currentTarget) }, 'stop'));
   }
-  keepFocus(LV.controls, () => fill(LV.controls, ...parts));
+  const sig = [LANG, st, wrapping].join('|');  // as Start's: not under a press in progress
+  if (sig !== LV.controlsSig || !LV.controls.childElementCount) {
+    LV.controlsSig = sig;
+    keepFocus(LV.controls, () => fill(LV.controls, ...parts));
+  }
 }
 
 function renderIdle() {
@@ -1582,18 +1593,24 @@ function renderStartPanel(st) {
   }
   const between = st === 'stopped' || st === 'error';
   if (between) LV.shortcut.draw();
-  keepFocus(LV.heroRow, () => fill(LV.heroRow, ...parts, between && LV.shortcut.childElementCount ? LV.shortcut : null));
-  LV.heroRow.hidden = false;
-  if (between) {
-    fill(LV.modeLine, t('live.mode.manual', { where: fmtList(startPlaces()) }), ' ', modeChangeLink());
-    LV.modeLine.hidden = false;
-  } else {
-    LV.modeLine.hidden = true;
+  // drawn again only when what it shows changes: a state event between the press of a button and its
+  // release would otherwise put a new button under the pointer, and the click would be lost
+  const sig = [LANG, st, Boolean(S.app.error), between && LV.shortcut.childElementCount > 0].join('|');
+  if (sig !== LV.heroSig || !LV.heroRow.childElementCount) {
+    LV.heroSig = sig;
+    keepFocus(LV.heroRow, () => fill(LV.heroRow, ...parts, between && LV.shortcut.childElementCount ? LV.shortcut : null));
   }
+  LV.heroRow.hidden = false;
+  if (between) setModeLine(t('live.mode.manual', { where: fmtList(startPlaces()) }));
+  LV.modeLine.hidden = !between;
 }
 
-function modeChangeLink() {
-  return h('a', { href: '#/settings/general/starting', id: 'live-mode-change', 'aria-label': t('live.mode.change_aria') }, t('live.mode.change'));
+/** How meetings start, in a sentence, and "Change" (the same sentence is not drawn again: see heroSig). */
+function setModeLine(text) {
+  if (LV.modeLine.dataset.text === text && LV.modeLine.childElementCount) return;
+  LV.modeLine.dataset.text = text;
+  fill(LV.modeLine, text, ' ', h('a', { href: '#/settings/general/starting', id: 'live-mode-change', 'aria-label': t('live.mode.change_aria') },
+    t('live.mode.change')));
 }
 
 /** Listening all the time (automatic): the state and what it means, as before, and that meetings
@@ -1615,8 +1632,9 @@ function renderListeningHero(st) {
   LV.heroText.textContent = text;
   if (st === 'stopped') LV.heroText.append(shortcutHint() || '');
   fill(LV.heroRow);
+  LV.heroSig = null;
   LV.heroRow.hidden = true;
-  fill(LV.modeLine, t('live.mode.automatic'), ' ', modeChangeLink());
+  setModeLine(t('live.mode.automatic'));
   LV.modeLine.hidden = false;
 }
 
@@ -1642,7 +1660,9 @@ const refreshLast = debounce(async () => {
   S.lastMeetingFailed = false;
   try {
     S.recent = await recentMeetings();
-    const m = S.lastMeeting = S.recent[0] || null;
+    // not one still recording: between meetings that is the one wrapping up (a meeting started by hand
+    // and stopped with nothing said has no folder once it is over), and the next refresh brings it
+    const m = S.lastMeeting = S.recent.find((r) => !r.live) || null;
     S.lastMeetingLoaded = true;
     // the last meeting itself: its to-dos and decisions, not only how many, and who spoke when
     const detail = m ? (await api('GET', '/api/meetings/' + enc(m.folder))).meeting : null;
@@ -1698,7 +1718,7 @@ function renderLastMeeting() {
     items.length ? h('ul', { class: 'kept-list', 'aria-label': t('live.items') }, rows) : h('p', { class: 'empty-slot' }, t('live.last_items_none')),
     items.length > shown.length && h('p', { class: 'small muted' }, t('live.more_items', { n: fmtNum(items.length - shown.length) })),
     h('div', { class: 'row panel-foot' }, meetingChips(m), meetingSent(m)));
-  const earlier = (S.recent || []).slice(1, 7);
+  const earlier = (S.recent || []).filter((r) => r !== m && !r.live).slice(0, 6);
   fill(LV.recent,
     h('div', { class: 'panel-head' }, h('h2', { id: 'recent-h', class: 'grow' }, t('live.earlier')),
       h('a', { href: '#/meetings', class: 'view-all' }, t('meetings.all'))),
@@ -1820,6 +1840,12 @@ function liveEvent(type, d, ev) {
       break;
     case 'meeting.ended': {
       L.phase = 'ended';
+      if (!d.dir && !d.notes) {  // nothing was said: nothing kept, no notes to open
+        toast(t('toast.meeting_empty'), 'info', d.title || L.meeting.title || t('live.untitled'));
+        S.lastMeetingLoaded = false;
+        refreshLast();
+        break;
+      }
       const folder = basename(d.dir) || L.meeting.folder;
       L.lastEnded = { id: d.meeting_id, title: d.title || L.meeting.title, folder, items: d.items || 0 };
       toast(tp('toast.meeting_ended', d.items || 0), 'ok', d.title || L.meeting.title || t('live.untitled'),
@@ -4401,7 +4427,7 @@ const SETUP_STEPS = {
       if (caps.hotkey) {
         W.shortcut = W.shortcut || shortcutSetting({ prefix: 'setup-shortcut', variant: 'setup' });
         W.shortcut.draw();
-        parts.push(h('div', { class: 'sub-card setup-shortcut' }, W.shortcut, h('p', { class: 'help small muted' }, t('setup.start.shortcut_help'))));
+        parts.push(h('div', { class: 'sub-card setup-shortcut' }, W.shortcut));
       }
       if (caps.floating_button || caps.spotlight || caps.call_detection) {
         parts.push(h('div', { class: 'sub-card' },
@@ -4602,7 +4628,7 @@ function shortcutKeys(hk, attrs = {}) {
  *  The element's ``draw()`` shows the shortcut as it is now and keeps a recording under way. */
 function shortcutSetting({ prefix = 'shortcut', variant = 'settings' } = {}) {
   const id = (part) => prefix + '-' + part;
-  const box = h('div', { id: id('setting'), class: 'shortcut-setting ' + variant, dataset: variant === 'settings' ? { path: 'pref:hotkey' } : null });
+  const box = h('div', { id: id('setting'), class: 'shortcut-setting sc-' + variant, dataset: variant === 'settings' ? { path: 'pref:hotkey' } : null });
   let recording = false, error = '', timer = null;
   const mac = () => Boolean(S.app.capabilities && S.app.capabilities.hotkey);
 
@@ -4851,6 +4877,7 @@ const STRINGS = {
     'toast.push_failed': "Couldn't send to {tool}", 'toast.pushed': 'Sent', 'toast.pushed_item': '{id} → {tools}',
     'toast.no_tool_takes': 'None of your tools takes this kind of item ({kind}).',
     'toast.meeting_ended.one': '{n} item. The notes are ready.', 'toast.meeting_ended.other': '{n} items. The notes are ready.',
+    'toast.meeting_empty': 'Nothing was said, so nothing was kept.',
     'toast.notes_updated': 'Notes updated', 'toast.notes_updated_agents': 'The notes now include the agents’ results.',
     'toast.notes_pushed': 'Notes sent', 'toast.agent_budget_title': 'Daily agent budget reached',
     'toast.agent_budget': '{id} was not started automatically. Start it yourself if it’s worth it.',
@@ -5336,6 +5363,7 @@ const STRINGS = {
     'toast.push_failed': 'Envoi vers {tool} impossible', 'toast.pushed': 'Envoyé', 'toast.pushed_item': '{id} → {tools}',
     'toast.no_tool_takes': 'Aucun de vos outils ne reçoit ce type d’élément ({kind}).',
     'toast.meeting_ended.one': '{n} élément. Les notes sont prêtes.', 'toast.meeting_ended.other': '{n} éléments. Les notes sont prêtes.',
+    'toast.meeting_empty': 'Rien n’a été dit : rien n’a été gardé.',
     'toast.notes_updated': 'Notes mises à jour', 'toast.notes_updated_agents': 'Les notes incluent maintenant le travail des agents.',
     'toast.notes_pushed': 'Notes envoyées', 'toast.agent_budget_title': 'Budget quotidien des agents atteint',
     'toast.agent_budget': '{id} n’a pas été lancé automatiquement. Lancez-le vous-même si cela en vaut la peine.',
@@ -5741,7 +5769,12 @@ async function boot() {
   buildShell();
   buildLive();
   if (!st.setup_done) openSetup();
-  else { $('shell').hidden = false; navigate(false); }
+  else {
+    $('shell').hidden = false;
+    navigate(false);
+    const start = liveFocusTarget();  // the window opens on Live with Start meeting in focus: Return starts one
+    if (start && start.tagName === 'BUTTON') start.focus({ preventScroll: true });
+  }
   connect();
   loadSettings().then(() => { if (S.route.name === 'live' && !S.setup) renderLive(); }).catch(() => { /* loaded again by Settings */ });
   setInterval(tick, 1000);

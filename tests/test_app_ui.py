@@ -1565,6 +1565,461 @@ def test_keyboard_shortcut_held_with_option_on_an_azerty_keyboard(make_app: Call
             assert why is None and hotkey.describe(ev["code"], saved.mods, saved.key) == text, (ev, why, text)
 
 
+# ----------------------------------------------------------- meetings started by hand
+
+
+def _mac_features(app: UIApp) -> None:
+    """The Mac app's ways of starting a meeting, as the native shell says it has them (its menu bar, the
+    floating button, Spotlight, call detection), and its keyboard shortcut."""
+    app.host.capabilities.update(native_window=True, floating_button=True, spotlight=True, call_detection=True)
+    _fake_mac_shell(app)
+
+
+NEW_STRINGS = ("state.m.", "action.start_meeting", "where.", "sug.", "still.", "notice.silence", "notice.link", "live.m.",
+               "live.mode.", "live.shortcut.", "live.clock", "live.extract_short", "start.", "setup.start.", "setup.done.",
+               "setup.nav.", "shortcut.", "err.minutes")
+
+
+def test_a_meeting_started_by_hand_from_live(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """Meetings start by hand (the default): Live is built around Start meeting, in focus so Return
+    starts one; in the meeting its clock, Pause and Stop lead; Stop ends it without a question (as the
+    shortcut and the floating button do) and Live is ready for the next one, Start in focus again. The
+    sidebar's recorder says what is going on but leaves these controls to the screen."""
+    from playwright.sync_api import expect
+
+    from voicestream.app.native import WINDOW_SIZE
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    _mac_features(app)
+    p = open_page(app, size=WINDOW_SIZE)
+    pg = p.page
+    expect(pg.locator("#live-heading")).to_have_text("No meeting in progress")
+    expect(pg.locator("#state-pill")).to_contain_text("Not recording")
+    expect(pg.locator("#topbar .recorder-actions")).to_be_hidden()
+    start = pg.locator("#live-start")
+    expect(start).to_have_text("Start meeting")
+    expect(start).to_be_focused()
+    box = start.bounding_box()
+    assert box and box["height"] >= 44 and box["y"] + box["height"] <= WINDOW_SIZE[1] / 3, box  # large, at the top
+    expect(pg.locator("#live-shortcut-text")).to_have_text("Or press ⌥⌘R in any app.")
+    expect(pg.locator("#live-shortcut-change")).to_have_text("Choose a shortcut")
+    expect(pg.locator("#live-mode")).to_contain_text(
+        "Meetings start only when you start one, from this window, the menu bar, the floating button, or Spotlight.")
+    expect(pg.locator("#live-mode-change")).to_have_attribute("href", "#/settings/general/starting")
+    p.shot("live-manual-idle")
+
+    # Return starts the meeting, open at once with nothing said yet
+    pg.keyboard.press("Enter")
+    _wait_state(app, "listening")
+    assert app.host.in_meeting()
+    expect(pg.locator("#meeting-heading")).to_be_focused()  # not Stop: Return must not end what it began
+    expect(pg.locator("#rec-clock")).to_be_visible()
+    expect(pg.locator("#live-pause")).to_have_text("Pause")
+    expect(pg.locator("#live-stop")).to_have_class(re.compile(r"\bprimary\b"))
+    expect(pg.locator("#end-meeting")).to_be_hidden()
+    expect(pg.locator("#state-pill")).to_contain_text("Recording")
+    app.say("Je vais envoyer le budget à Sam d'ici vendredi.")
+    expect(pg.locator("#lines .seg")).to_have_count(1)
+    p.shot("live-manual-meeting")
+
+    # Pause and Resume keep the focus on their button
+    pg.focus("#live-pause")
+    pg.keyboard.press("Enter")
+    expect(pg.locator("#live-pause")).to_have_text("Resume")
+    expect(pg.locator("#live-pause")).to_be_focused()
+    expect(pg.locator("#rec-clock")).to_have_class(re.compile(r"\bpaused\b"))
+    assert app.host.assistant is not None and app.host.assistant.paused
+    pg.keyboard.press("Enter")
+    expect(pg.locator("#live-pause")).to_have_text("Pause")
+    assert not app.host.assistant.paused
+
+    # Stop: no question; the meeting is wrapped up and Live waits for the next one
+    pg.click("#live-stop")
+    expect(pg.locator("#ask")).to_be_hidden()
+    expect(pg.locator(".toast", has_text="The notes are ready")).to_be_visible(timeout=15000)
+    expect(pg.locator("#live-heading")).to_have_text("No meeting in progress")
+    expect(pg.locator("#last-meeting")).to_contain_text("Just ended")
+    _wait_state(app, "stopped")
+    assert app.host.assistant is None
+    expect(pg.locator("#live-start")).to_be_focused()
+
+    # elsewhere the recorder has the controls, in the same words, and they start a meeting too
+    pg.click("nav a[href='#/meetings']")
+    expect(pg.locator("#topbar .recorder-actions")).to_be_visible()
+    expect(pg.locator("#primary")).to_have_text("Start meeting")
+    pg.click("#primary")
+    _wait_state(app, "listening")
+    assert app.host.in_meeting()
+    pg.click("#stop")  # by hand: no question here either
+    expect(pg.locator("#ask")).to_be_hidden()
+    _wait_state(app, "stopped")
+
+
+def test_choose_a_shortcut_from_live(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """Live's "Choose a shortcut" records the next combination pressed, as Settings does: refused ones
+    say why, Escape cancels, one another app holds says so beside the button."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    _mac_features(app)
+    p = open_page(app)
+    pg = p.page
+    text, change, error = pg.locator("#live-shortcut-text"), pg.locator("#live-shortcut-change"), pg.locator("#live-shortcut-error")
+    change.click()
+    expect(pg.locator("#live-shortcut-keys")).to_have_text("Press the new shortcut…")
+    expect(change).to_have_text("Cancel")
+    _wait(lambda: app.host.state()["hotkey"]["recording"])
+    pg.keyboard.press("Meta+KeyQ")
+    expect(error).to_contain_text("⌘Q is a command every Mac app has")
+    pg.keyboard.press("Enter")  # still recording: Return is a key to record, not Start meeting
+    assert app.host.status == "stopped"
+    pg.keyboard.press("Escape")
+    expect(text).to_have_text("Or press ⌥⌘R in any app.")
+    expect(change).to_be_focused()
+    _wait(lambda: not app.host.state()["hotkey"]["recording"])
+
+    change.click()
+    pg.keyboard.press("Control+Alt+KeyK")
+    expect(text).to_have_text("Or press ⌃⌥K in any app.")
+    hk = app.host.prefs.hotkey
+    assert hk is not None and (hk.code, hk.mods) == ("KeyK", ["ctrl", "alt"])
+    change.click()
+    pg.keyboard.press("Control+Alt+KeyT")  # another app holds this one
+    expect(text).to_have_text("⌃⌥T is used by another app: choose another.")
+    p.shot("live-manual-shortcut-taken")
+
+
+def test_calls_silences_and_endings_are_banners(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """What the app asks or tells from its state shows inline, on every screen, with its answers — never a
+    dialog, never taking the focus: a call that may want notes (Not now / Start meeting), "Still in a
+    meeting?" after a long silence (End meeting / Keep recording), a meeting that ended by itself, a link
+    that asked to record without the key."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual", meetings=True)
+    _mac_features(app)
+    p = open_page(app)
+    pg = p.page
+    host, loop = app.host, app.host.loop
+    assert loop is not None
+    expect(pg.locator("#live-start")).to_be_focused()
+
+    loop.call_soon_threadsafe(host.suggest_meeting, "zoom.us")
+    call = pg.locator("#notices .notice", has_text="Call detected in zoom.us.")
+    expect(call).to_contain_text("Start notes for this call?")
+    expect(pg.locator("#live-start")).to_be_focused()  # the banner never takes the focus
+    expect(pg.locator("#ask")).to_be_hidden()
+    p.shot("banner-call")
+    pg.click("#suggestion-dismiss")
+    expect(call).to_have_count(0)
+    assert host.suggestion is None and host.status == "stopped"
+
+    # another call, on another screen: Start meeting starts one
+    loop.call_soon_threadsafe(lambda: host.suggest_meeting("Microsoft Teams", call_id="teams-1"))
+    pg.click("nav a[href='#/settings']")
+    expect(pg.locator("#notices .notice", has_text="Call detected in Microsoft Teams.")).to_be_visible()
+    pg.click("#suggestion-start")
+    _wait_state(app, "listening")
+    assert host.in_meeting()
+    expect(pg.locator("#notices .notice", has_text="Call detected")).to_have_count(0)
+
+    def still(minutes: int) -> None:
+        def ask() -> None:
+            a = host.assistant
+            assert a is not None and a.current is not None
+            host.bus.publish("meeting.still_there", meeting_id=a.current.meeting.id, silent_minutes=minutes,
+                             ends_at=(datetime.now().astimezone() + timedelta(minutes=44)).isoformat())
+        loop.call_soon_threadsafe(ask)
+
+    # a long silence: keep the meeting…
+    pg.click("nav a[href='#/live']")
+    still(16)
+    nudge = pg.locator("#notices .notice", has_text="Still in a meeting?")
+    expect(nudge).to_contain_text("Nothing has been said for 16 min. Without an answer, the meeting ends by itself at")
+    p.shot("banner-still-there")
+    pg.click("#still-keep")
+    expect(nudge).to_have_count(0)
+    assert host.in_meeting() and host.still_there is None
+    # … or end it, without a question: that was the question
+    still(17)
+    expect(nudge).to_contain_text("17 min")
+    pg.click("#still-end")
+    expect(pg.locator("#ask")).to_be_hidden()
+    _wait_state(app, "stopped")
+    expect(nudge).to_have_count(0)
+
+    # a meeting that ended by itself: what happened, and its notes one click away
+    folder = app.folder_of("Budget review")
+
+    def ended() -> None:
+        host.notice = {"kind": "ended_after_silence", "meeting_id": "m-1", "minutes": 60, "at": "2026-10-21T10:00:00+00:00",
+                       "title": "Budget review", "folder": folder}
+        host._publish_state()
+
+    loop.call_soon_threadsafe(ended)
+    told = pg.locator("#notices .notice", has_text="The meeting ended by itself.")
+    expect(told).to_contain_text("“Budget review” ended after 60 min without speech: its notes are ready.")
+    p.shot("banner-ended-after-silence")
+    pg.click("#notice-open")
+    expect(pg.locator(".detail-head h1")).to_have_text("Budget review")
+    expect(told).to_have_count(0)
+    _wait(lambda: host.notice is None)
+
+    # a link that asked to record without Voicestream's key: said, and put away with OK
+    assert host.call(host.open_url("voicestream://meeting/start")).result(10) == "refused"
+    refused = pg.locator("#notices .notice", has_text="A link was ignored.")
+    expect(refused).to_contain_text("nothing was recorded")
+    pg.click("#notice-ok")
+    expect(refused).to_have_count(0)
+    assert host.notice is None and host.status == "stopped"
+
+
+def test_starting_meetings_settings(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """Settings → General → Starting meetings, which Live's "Change" opens: how meetings start, the
+    silence thresholds (checked as you type), the shortcut, the floating button, Spotlight and call
+    suggestions, saved with Save; automatically, the always-on settings instead of the silences."""
+    from playwright.sync_api import expect
+
+    from voicestream.app.native import WINDOW_SIZE
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    _mac_features(app)
+    p = open_page(app, size=WINDOW_SIZE)
+    pg = p.page
+    pg.click("#live-mode-change")
+    heading = pg.locator("#set-starting h2")
+    expect(heading).to_have_text("Starting meetings")
+    expect(heading).to_be_focused()
+    box = heading.bounding_box()
+    assert box and 0 <= box["y"] < WINDOW_SIZE[1] / 2
+    expect(pg.locator("input[name='c-How meetings start'][value='manual']")).to_be_checked()
+    expect(pg.locator("#p-silence_ask_minutes")).to_have_value("15")
+    expect(pg.locator("#p-silence_end_minutes")).to_have_value("60")
+    expect(pg.locator("#f-always_on_idle_split_minutes")).to_have_count(0)  # an always-on setting
+    expect(pg.locator("#set-starting #shortcut-keys")).to_have_text("⌥⌘R")
+    expect(pg.locator("#shortcut-status")).to_have_text("Works from any app, even with this window closed: it starts and stops a meeting.")
+    expect(pg.locator("#shortcut-change")).to_have_text("Choose a shortcut")
+    for key in ("floating_button", "spotlight_launcher", "call_suggestions"):
+        expect(pg.locator(f"#p-{key}")).to_be_checked()
+        expect(pg.locator(f"#p-{key}")).to_be_enabled()
+    expect(pg.locator("#start-summary")).to_contain_text("Meetings start when you start them")
+    p.shot("settings-starting-meetings")
+
+    # minutes the app would refuse: said under the field at once, and Save asks to fix it first
+    pg.fill("#p-silence_ask_minutes", "7.5")
+    error = pg.locator("[data-path='pref:silence_ask_minutes'] .field-error")
+    expect(error).to_have_text("Enter a whole number of minutes, from 0 to 600.")
+    expect(pg.locator("#p-silence_ask_minutes")).to_have_attribute("aria-invalid", "true")
+    pg.click("#save-settings")
+    expect(pg.locator("#savebar .msg.error")).to_contain_text("Nothing was saved")
+    expect(pg.locator("#p-silence_ask_minutes")).to_be_focused()
+    assert app.host.prefs.silence_ask_minutes == 15
+    pg.fill("#p-silence_ask_minutes", "20")
+    expect(error).to_have_text("")
+    pg.click("label[for=p-floating_button]")
+    pg.click("#save-settings")
+    expect(pg.locator(".toast", has_text="Your settings are saved").last).to_be_visible()
+    _wait(lambda: (app.host.prefs.silence_ask_minutes, app.host.prefs.floating_button) == (20, False))
+    expect(pg.locator("#start-summary")).not_to_contain_text("Floating button")
+
+    # automatically: listening all the time, so its own settings instead of the silences
+    pg.get_by_label("Automatically", exact=True).check()
+    expect(pg.locator("#p-silence_ask_minutes")).to_have_count(0)
+    expect(pg.locator("#f-always_on_idle_split_minutes")).to_be_visible()
+    expect(pg.locator("#p-listen_on_launch")).to_be_visible()
+    pg.click("#save-settings")
+    _wait(lambda: app.host.prefs.meeting_start == "automatic")
+    pg.click("nav a[href='#/live']")
+    expect(pg.locator("#live-mode")).to_contain_text("Automatic mode: meetings start by themselves when someone speaks.")
+    expect(pg.locator("#live-heading")).to_have_text("Not listening")
+    expect(pg.locator("#primary")).to_have_text("Start listening")
+    expect(pg.locator("#shortcut-hint")).to_have_text(" You can also press ⌥⌘R in any app.")
+
+
+def test_starting_meetings_outside_the_mac_app(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """In a browser (or on Linux), what only the Mac app does is said, not offered: the switches are off
+    and say so, the shortcut says it is the Mac app's, and Live names only this window."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    p = open_page(app, locale="fr-FR")
+    pg = p.page
+    expect(pg.locator("#live-heading")).to_have_text("Aucune réunion en cours")
+    expect(pg.locator("#live-start")).to_have_text("Démarrer la réunion")
+    expect(pg.locator("#live-shortcut-text")).to_have_count(0)
+    expect(pg.locator("#live-mode")).to_contain_text("Une réunion ne démarre que quand vous la lancez, depuis cette fenêtre.")
+    pg.click("#live-mode-change")
+    expect(pg.locator("#shortcut-status")).to_have_text(
+        "Dans l’application Voicestream pour Mac, un raccourci clavier démarre et arrête une réunion depuis n’importe quelle app.")
+    for key in ("floating_button", "spotlight_launcher", "call_suggestions"):
+        expect(pg.locator(f"#p-{key}")).to_be_disabled()
+        expect(pg.locator(f"[data-path='pref:{key}']")).to_contain_text("Disponible uniquement dans l’application Voicestream pour Mac.")
+    # every new word, in both languages
+    keys = pg.evaluate("(prefixes) => [Object.keys(STRINGS.en), Object.keys(STRINGS.fr)].map((ks) => ks.filter("
+                       "(k) => prefixes.some((p) => k.startsWith(p))).sort())", list(NEW_STRINGS))
+    assert keys[0] and keys[0] == keys[1], set(keys[0]) ^ set(keys[1])
+
+
+def test_setup_step_how_you_start_a_meeting(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """The setup's "How you start a meeting": by hand is chosen, every way of starting one is on, so
+    Continue is enough; the shortcut can be chosen there with a large button. In a browser, what only the
+    Mac app does is said instead. The last step then says Done, and nothing starts by itself."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=False, meeting_start="manual")
+    p = open_page(app)
+    pg = p.page
+    pg.goto(app.url + "#/setup/start")  # a link to the step (as a reload of it)
+    pg.locator('#boot').wait_for(state='hidden')
+    expect(pg.locator("#setup-h")).to_have_text("How you start a meeting")
+    expect(pg.locator("input[name='c-How you start a meeting'][value='manual']")).to_be_checked()
+    expect(pg.locator("#setup-start-mac-only")).to_contain_text(
+        "In the Voicestream app for Mac you can also start a meeting with a keyboard shortcut")
+    expect(pg.locator("#setup-shortcut-change")).to_have_count(0)
+
+    _mac_features(app)  # now as in the Mac app
+    pg.reload()
+    pg.locator('#boot').wait_for(state='hidden')
+    expect(pg.locator("#setup-shortcut-keys")).to_have_text("⌥⌘R")
+    choose = pg.locator("#setup-shortcut-change")
+    expect(choose).to_have_text("Choose a shortcut")
+    box = choose.bounding_box()
+    assert box and box["height"] >= 36
+    for switch in ("#setup-floating", "#setup-spotlight", "#setup-suggestions"):
+        expect(pg.locator(switch)).to_be_checked()
+    expect(pg.locator("#setup-start-mac-only")).to_have_count(0)
+    p.shot("setup-start-manual")
+    choose.click()
+    pg.keyboard.press("Control+Alt+KeyK")
+    expect(pg.locator("#setup-shortcut-keys")).to_have_text("⌃⌥K")
+    pg.click("label[for=setup-spotlight]")
+    # automatically: its own switch instead, and back: the choices made are kept
+    pg.get_by_label("Automatically", exact=True).check()
+    expect(pg.locator("#setup-launch")).to_be_visible()
+    expect(pg.locator("#setup-floating")).to_have_count(0)
+    pg.get_by_label("When I start them (recommended)", exact=True).check()
+    expect(pg.locator("#setup-spotlight")).not_to_be_checked()
+    pg.click("#setup-next")
+
+    expect(pg.locator("#setup-h")).to_have_text(re.compile("You’re all set"))
+    prefs = app.host.prefs
+    assert (prefs.meeting_start, prefs.floating_button, prefs.spotlight_launcher, prefs.call_suggestions) == ("manual", True, False, True)
+    expect(pg.locator(".summary-list")).to_contain_text("Meetings start when you start them — or press ⌃⌥K in any app")
+    expect(pg.locator("#setup-next")).to_have_text("Done")
+    expect(pg.locator("#setup-secondary")).to_have_count(0)
+    p.shot("setup-done-manual")
+    pg.click("#setup-next")
+    expect(pg.locator("#shell")).to_be_visible()
+    expect(pg.locator("#live-start")).to_be_focused()
+    assert app.host.prefs.setup_done and app.host.status == "stopped" and app.host.assistant is None
+
+
+def test_the_keyboard_reaches_and_answers_everything(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """Tab reaches Start meeting from the top of the window, each stop showing where it is, and Return
+    starts it; opening the app again (Spotlight, the Dock) brings Live back with Start in focus; a
+    dialog has its default button on the right, Escape cancels it and Return answers it."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual", keys={"ANTHROPIC_API_KEY": "sk-ant-test-0123"})
+    _mac_features(app)
+    p = open_page(app)
+    pg = p.page
+    host, loop = app.host, app.host.loop
+    assert loop is not None
+
+    # opened again while another screen is on show
+    pg.click("nav a[href='#/costs']")
+    expect(pg.locator("#screen-costs h1")).to_be_visible()
+    loop.call_soon_threadsafe(host.request_focus)
+    expect(pg.locator("#live-start")).to_be_focused()
+    assert pg.evaluate("location.hash") == "#/live"
+
+    pg.focus("#skip-link")  # the top of the window
+    stops = []
+    for _ in range(12):
+        pg.keyboard.press("Tab")
+        stops.append(pg.evaluate("""() => { const el = document.activeElement;
+          return [el.id || el.textContent.trim().slice(0, 24), getComputedStyle(el).outlineStyle]; }"""))
+        if stops[-1][0] == "live-start":
+            break
+    assert stops[-1][0] == "live-start" and len(stops) <= 6, stops  # the screens, today's spending, Start
+    assert all(style == "solid" for _, style in stops), stops  # every stop shows the focus
+    pg.keyboard.press("Enter")
+    _wait_state(app, "listening")
+    expect(pg.locator("#meeting-heading")).to_be_focused()
+    expect(pg.locator("#live-pause")).to_be_enabled()
+    pg.keyboard.press("Tab")  # from the meeting's title, on to its controls
+    expect(pg.locator("#live-pause")).to_be_focused()
+    pg.click("#live-stop")
+    _wait_state(app, "stopped")
+
+    # a dialog: Cancel on the left, the answer on the right; Escape cancels, Return answers
+    pg.goto(app.url + "#/settings/claude")
+    pg.locator('#boot').wait_for(state='hidden')
+    pg.locator("[data-secret=ANTHROPIC_API_KEY] .btn", has_text="Remove").click()
+    dialog, ok, cancel = pg.locator("#ask"), pg.locator("#ask-ok"), pg.locator("#ask-cancel")
+    expect(dialog).to_be_visible()
+    expect(cancel).to_be_focused()  # it can't be undone: Return alone doesn't do it
+    assert ok.bounding_box()["x"] > cancel.bounding_box()["x"]
+    pg.keyboard.press("Escape")
+    expect(dialog).to_be_hidden()
+    assert os.environ.get("ANTHROPIC_API_KEY")
+    pg.locator("[data-secret=ANTHROPIC_API_KEY] .btn", has_text="Remove").click()
+    pg.keyboard.press("Tab")
+    expect(ok).to_be_focused()
+    pg.keyboard.press("Enter")
+    expect(dialog).to_be_hidden()
+    expect(pg.locator("#ks-ANTHROPIC_API_KEY")).to_have_text("Not set")
+
+
+def test_a_meeting_by_hand_in_the_smallest_window_and_on_a_phone(make_app: Callable[..., UIApp],
+                                                                    open_page: Callable[..., Page]) -> None:
+    """At the Mac window's smallest, a meeting started by hand keeps its title, clock and controls on one
+    line and its two panes side by side in view, "Still in a meeting?" above them; on a phone, Start
+    meeting is the width of the screen and a thumb high, and nothing scrolls sideways."""
+    from playwright.sync_api import expect
+
+    from voicestream.app.native import MIN_SIZE
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    p = open_page(app, size=(390, 844))
+    pg = p.page
+    start = pg.locator("#live-start")
+    expect(start).to_be_visible()
+    box, row = start.bounding_box(), pg.locator("#live-controls").bounding_box()
+    assert box and row and box["height"] >= 44 and abs(box["width"] - row["width"]) < 1, (box, row)
+    assert pg.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    menu = pg.locator("#menu-btn").bounding_box()
+    assert menu and menu["height"] >= 44 and menu["width"] >= 44, menu
+
+    pg.set_viewport_size({"width": MIN_SIZE[0], "height": MIN_SIZE[1] - 28})
+    start.click()
+    _wait_state(app, "listening")
+    app.say("Bonjour, on fait le point sur le budget.")
+    host = app.host
+    assert host.loop is not None
+
+    def ask() -> None:
+        a = host.assistant
+        assert a is not None and a.current is not None
+        host.bus.publish("meeting.still_there", meeting_id=a.current.meeting.id, silent_minutes=15, ends_at=None)
+
+    host.loop.call_soon_threadsafe(ask)
+    expect(pg.locator("#notices .notice", has_text="Still in a meeting?")).to_be_visible()
+    got = pg.evaluate("""() => {
+      const rect = (sel) => document.querySelector(sel).getBoundingClientRect();
+      const panes = [...document.querySelectorAll('#screen-live .panes > .pane')].map((el) => el.getBoundingClientRect());
+      const page = document.documentElement;
+      return { title: rect('#meeting-heading'), stop: rect('#live-stop'), panes,
+               fits: page.scrollHeight <= innerHeight && page.scrollWidth <= innerWidth, height: innerHeight };
+    }""")
+    assert got["fits"], got
+    assert got["stop"]["top"] < got["title"]["bottom"], got  # the controls beside the title
+    assert len(got["panes"]) == 2 and got["panes"][0]["top"] == got["panes"][1]["top"], got
+    assert got["panes"][1]["bottom"] <= got["height"], got
+    p.shot("live-manual-meeting-smallest-window")
+
+
 def test_google_bridge_script_route(tmp_path: Path) -> None:
     """Settings → Your tools → Google copies the bridge script from the app (needs the token)."""
     from test_app_host import _factory, _write_config
