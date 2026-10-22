@@ -575,13 +575,13 @@ async def test_a_start_while_the_last_meeting_is_wrapped_up_waits_for_it(tmp_pat
         await host.listen_stop(force=True)
         assert await waiting == "cancelled" and host.status == "stopped" and len(built) == 3
 
-        # Start, Stop, Start again during one wrap-up: the last word wins, and it is one start
+        # Start, Stop, Start again during one wrap-up: the last word wins, and it is one start — also when the
+        # Stop and the Start come on the same turn of the loop (the floating button's Cancel, then its Start)
         waiting = await stopped_with_a_start_waiting(host.meeting_start)
-        assert await host.meeting_stop() == "stop"
-        again = asyncio.ensure_future(host.meeting_start())
+        stop, again = asyncio.ensure_future(host.meeting_stop()), asyncio.ensure_future(host.meeting_start())
+        assert await stop == "stop" and await asyncio.wait_for(waiting, 1) == "cancelled"
         await asyncio.sleep(0.1)
-        assert await asyncio.wait_for(waiting, 1) == "cancelled"
-        assert not again.done() and host.status == "stopping"
+        assert not again.done() and host.status == "stopping" and host.state()["start_queued"] is True
         gate.set()
         assert await again == "start" and host.in_meeting() and len(built) == 5
 
