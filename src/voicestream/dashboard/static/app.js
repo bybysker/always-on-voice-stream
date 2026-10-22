@@ -861,7 +861,8 @@ function renderNotices() {
     if (still) out.push(['still|' + still.meeting_id + '|' + still.silent_minutes + '|' + (still.ends_at || ''), () => stillThereBanner(still)]);
     // drawn again when it changes, the notes being written included (an empty meeting's folder stays empty)
     if (n && NOTICE_KINDS.includes(n.kind)) {
-      out.push(['notice|' + n.kind + '|' + (n.at || '') + '|' + (n.pending === true ? 'p' : '') + '|' + (n.folder || '') + '|' + (n.title || ''),
+      const how = n.pending === true ? 'p' : n.unfinished === true ? 'u' : '';
+      out.push(['notice|' + n.kind + '|' + (n.at || '') + '|' + how + '|' + (n.folder || '') + '|' + (n.title || ''),
         () => appNoticeBanner(n)]);
     }
   }
@@ -926,8 +927,8 @@ function stillThereBanner(s) {
 }
 
 /** Something that happened by itself and should be known: the meeting ended after a long silence (its
- *  notes are being written, then ready, or there were none), or a link asked to record without
- *  Voicestream's key. OK puts it away. */
+ *  notes are being written, then ready, or there were none — or its wrap-up never finished, cut short
+ *  or failed, and nobody knows), or a link asked to record without Voicestream's key. OK puts it away. */
 function appNoticeBanner(n) {
   const ok = btn(t('common.ok'), { cls: 'small', id: 'notice-ok', onclick: (e) => answer('notice/dismiss', e.currentTarget) });
   if (n.kind === 'link_refused') {
@@ -935,12 +936,14 @@ function appNoticeBanner(n) {
       h('div', { class: 'notice-actions' }, ok));
   }
   const mins = fmtNum(n.minutes || 0);
-  // until the meeting is wrapped up nobody knows whether it has notes: not "nothing was said" meanwhile
-  const writing = n.pending === true;
-  const text = writing ? t('notice.silence_writing', { n: mins }) : !n.folder ? t('notice.silence_empty', { n: mins })
+  // until the meeting is wrapped up nobody knows whether it has notes: not "nothing was said" meanwhile,
+  // nor after a wrap-up that never said (unfinished): only that it ended
+  const writing = n.pending === true, unfinished = !writing && n.unfinished === true;
+  const text = writing ? t('notice.silence_writing', { n: mins }) : unfinished ? t('notice.silence_unfinished', { n: mins })
+    : !n.folder ? t('notice.silence_empty', { n: mins })
     : n.title ? t('notice.silence_text', { title: n.title, n: mins }) : t('notice.silence_untitled', { n: mins });
   // a link (it opens a screen), which also puts the notice away
-  const open = !writing && n.folder && h('a', { class: 'btn small ghost', id: 'notice-open', href: '#/meetings/' + enc(n.folder),
+  const open = !writing && !unfinished && n.folder && h('a', { class: 'btn small ghost', id: 'notice-open', href: '#/meetings/' + enc(n.folder),
     onclick: () => { answer('notice/dismiss', null); } }, t('live.open_notes'));
   return notice('info', 'checkCircle', h('span', {}, h('strong', {}, t('notice.silence_title')), ' ', text),
     h('div', { class: 'notice-actions' }, open, ok));
@@ -1367,6 +1370,7 @@ function buildLive() {
   LV.heroText = h('p', { id: 'live-text' });
   LV.heroRow = h('div', { class: 'start-row', id: 'live-controls' });
   LV.modeLine = h('p', { class: 'mode-line', id: 'live-mode' });
+  LV.queuedIdle = h('div', { class: 'queued', id: 'live-queued', role: 'status' });
   LV.idleMeterSlot = h('div', { class: 'row' });
   // the shortcut and its "Choose a shortcut": one recorder kept across redraws (a redraw mid-recording
   // must not forget it is recording)
@@ -1379,7 +1383,7 @@ function buildLive() {
   LV.recent = h('section', { class: 'card recent', id: 'live-recent', 'aria-labelledby': 'recent-h' });
   LV.idle = h('div', { class: 'idle' },
     h('div', { class: 'hero' }, LV.heroIcon,
-      h('div', { class: 'grow' }, LV.heroTitle, LV.heroText, LV.idleMeterSlot, LV.heroRow, LV.modeLine)),
+      h('div', { class: 'grow' }, LV.heroTitle, LV.heroText, LV.idleMeterSlot, LV.heroRow, LV.queuedIdle, LV.modeLine)),
     LV.week, LV.lastCard, LV.recent);
 
   LV.title = h('h1', { id: 'meeting-heading', tabindex: '-1' });
@@ -1395,6 +1399,7 @@ function buildLive() {
   LV.extract = btn(t('live.extract_short'), { cls: 'small ghost', title: t('live.extract_help'), id: 'extract', onclick: (e) => extractNow(e.currentTarget) }, 'sparkle');
   LV.end = btn(t('live.end'), { cls: 'danger', id: 'end-meeting', onclick: (e) => endMeeting(e.currentTarget) }, 'stop');
   LV.ending = notice('info', 'clock', t('live.ending'));
+  LV.queuedMeeting = h('div', { class: 'queued', id: 'live-queued', role: 'status' });  // one view on show at a time
   // a meeting started by hand: its clock, then Pause or Resume and Stop, where the eye lands first
   LV.clockTime = h('span', { class: 'num rec-time', role: 'timer', 'aria-label': t('live.clock_label') });
   LV.clock = h('div', { class: 'rec-clock', id: 'rec-clock' }, h('span', { class: 'rec-dot', 'aria-hidden': 'true' }), LV.clockTime);
@@ -1429,7 +1434,7 @@ function buildLive() {
       h('div', { class: 'pane-tools' }, LV.extract, h('label', { for: 'live-show-dismissed' }, dismissed, t('items.show_dismissed')))),
     h('div', { class: 'scroll' }, LV.addForm, LV.board.el));
 
-  LV.meeting = h('div', { class: 'live-meeting' }, head, LV.ending, LV.voices.el, h('div', { class: 'panes' }, transcriptPane, itemsPane));
+  LV.meeting = h('div', { class: 'live-meeting' }, head, LV.ending, LV.queuedMeeting, LV.voices.el, h('div', { class: 'panes' }, transcriptPane, itemsPane));
   fill(root);  // renderLive puts in the view on show: between meetings, or the meeting
   for (const [kind, data] of S.live.segs) {
     LV.lines.append(kind === 'seg' ? segLine(data) : screenLine(data));
@@ -1447,7 +1452,9 @@ function buildLive() {
 function attachLive(inMeeting) {
   if (S.route.name !== 'live' || S.setup) return placeNotices();
   const view = inMeeting ? LV.meeting : LV.idle;
-  if (inMeeting && LV.notices.previousElementSibling !== LV.head) LV.head.after(LV.notices);
+  // moved in only when it isn't there yet: placeNotices puts the shell's banners between the two, and
+  // moving either on every render would take the focus off a banner's button and lose a click on it
+  if (inMeeting && LV.notices.parentNode !== LV.meeting) LV.head.after(LV.notices);
   const want = inMeeting ? [view] : [LV.notices, view];
   if (LV.root.children.length !== want.length || want.some((el, i) => LV.root.children[i] !== el)) {
     fill(LV.root, ...want);
@@ -1594,6 +1601,25 @@ function renderLiveHead() {
   LV.ending.hidden = S.live.phase !== 'ending';
   LV.tEmpty.textContent = t('live.nothing_yet');
   if (manual) renderMeetingControls(st, elapsed);
+  renderQueued(LV.queuedMeeting);
+}
+
+/** A start pressed while the last meeting is wrapped up (the shortcut, the floating button, a link)
+ *  waits for that wrap-up, then records (``start_queued``): said where the wrap-up is shown, with
+ *  Cancel, which takes that start back as Stop does — no question, nothing of it is recorded yet.
+ *  Stop now stays as it is: it cuts the wrap-up itself short. The box is always there, empty when no
+ *  start waits, so a screen reader hears the line when it comes. */
+function renderQueued(el) {
+  const on = stateKey() === 'stopping' && Boolean(S.app && S.app.start_queued);
+  const sig = on ? LANG : '';
+  if (el.dataset.sig === sig) return;  // not under a press in progress
+  el.dataset.sig = sig;
+  const had = el.contains(document.activeElement);
+  fill(el, on ? h('div', { class: 'notice info' }, icon('record'), h('div', { class: 'msg' }, t('live.m.queued')),
+    btn(t('common.cancel'), { cls: 'small', id: 'live-queued-cancel', 'aria-label': t('live.m.queued_cancel_aria'),
+      onclick: (e) => meetingAction('stop', e.currentTarget) })) : null);
+  // taken back: the focus stays on this view (its title), not on the page's body
+  if (had && !on && el.isConnected) (inMeetingView() ? LV.title : LV.heroTitle).focus({ preventScroll: true });
 }
 
 /** A meeting started by hand: its clock, then Pause (Resume) and Stop, Stop filled while it records. */
@@ -1636,7 +1662,8 @@ function renderStartPanel(st) {
     starting: ['', t('live.m.starting'), t('live.idle.starting_text')],
     listening: ['listening', t('live.m.recording'), t('live.m.recording_text')],
     paused: ['paused', t('live.idle.paused'), t('live.m.paused_text')],
-    stopping: ['', t('live.m.stopping'), t('live.m.stopping_text')],
+    // "the next one can start in a moment", unless one waits for it already (renderQueued says so)
+    stopping: ['', t('live.m.stopping'), S.app.start_queued ? t('live.m.stopping_queued_text') : t('live.m.stopping_text')],
     error: ['error', t('live.idle.error'), t('live.m.error_text')],
   };
   const [cls, title, text] = views[st];
@@ -1673,6 +1700,7 @@ function renderStartPanel(st) {
     keepFocus(LV.heroRow, () => fill(LV.heroRow, ...parts, between && LV.shortcut.childElementCount ? LV.shortcut : null));
   }
   LV.heroRow.hidden = false;
+  renderQueued(LV.queuedIdle);
   if (between) setModeLine(t('live.mode.manual', { where: fmtList(startPlaces()) }));
   LV.modeLine.hidden = !between;
 }
@@ -3659,24 +3687,31 @@ async function saveSettings() {
   S.saveError = null;
   renderSaveBar();
   let res = null;
-  try {
-    // the preferences first: switched to by hand, listening all the time stops before the settings
-    // arrive, which would otherwise restart it (or retry a failed start) in automatic mode — the
-    // microphone open after "by hand" was asked for, and a restart that opens a meeting nobody
-    // started. One refused, nothing else is sent and the changes stay on screen.
-    if (Object.keys(prefs).length) {
-      const saved = await api('PATCH', '/api/prefs', prefs).catch((err) => {
-        // "silence_ask_minutes: Input should be…": under the preference's own field
-        const m = err.status === 400 && /^(\w+): (.*)$/s.exec(err.message || '');
-        if (m && m[1] in prefs) err.body = { field: 'pref:' + m[1], error: m[2] };
-        throw err;
-      });
-      forgetSaved(S.prefsDraft, prefs);
-      setApp({ ...S.app, prefs: { ...S.app.prefs, ...saved }, mode: saved.meeting_start || S.app.mode });
-      if (saved.meeting_start && saved.meeting_start !== 'automatic') S.startAfterDownload = null;  // by hand from now on
-    }
+  const sendPrefs = async () => {
+    if (!Object.keys(prefs).length) return;
+    const saved = await api('PATCH', '/api/prefs', prefs).catch((err) => {
+      // "silence_ask_minutes: Input should be…": under the preference's own field
+      const m = err.status === 400 && /^(\w+): (.*)$/s.exec(err.message || '');
+      if (m && m[1] in prefs) err.body = { field: 'pref:' + m[1], error: m[2] };
+      throw err;
+    });
+    forgetSaved(S.prefsDraft, prefs);
+    setApp({ ...S.app, prefs: { ...S.app.prefs, ...saved }, mode: saved.meeting_start || S.app.mode });
+    if (saved.meeting_start && saved.meeting_start !== 'automatic') S.startAfterDownload = null;  // by hand from now on
+  };
+  const sendSettings = async () => {
     if (Object.keys(changes).length) res = await api('PATCH', '/api/settings', { changes });
     forgetSaved(S.draft, sent);
+  };
+  // switched to by hand, the preferences go first: listening all the time stops before the settings
+  // arrive, which would otherwise restart it (or retry a failed start) in automatic mode — the
+  // microphone open after "by hand" was asked for, and a restart that opens a meeting nobody
+  // started. Any other save sends the settings first, as it always did: a start that failed by hand
+  // is only checked again then, so a switch to automatic saved with its fix starts nothing by itself,
+  // as from a clean stop. One refused, what comes after it isn't sent and stays on screen.
+  const toManual = 'meeting_start' in prefs && prefs.meeting_start !== 'automatic' && S.app.prefs.meeting_start === 'automatic';
+  try {
+    for (const send of toManual ? [sendPrefs, sendSettings] : [sendSettings, sendPrefs]) await send();
     S.fieldErrors = {};
     await Promise.all([loadSettings(), loadModels()]);
   } catch (err) {
@@ -4535,20 +4570,22 @@ const SETUP_STEPS = {
       ];
       const parts = [...setupHead(t('setup.start.title'), t('setup.start.lead')),
         choiceCards(t('setup.start.title'), options, c.mode, (v) => { c.mode = v; renderSetup(); }, { list: true })];
-      if (c.mode === 'automatic') {
+      const automatic = c.mode === 'automatic';
+      if (automatic) {
         parts.push(h('div', { class: 'sub-card' },
           switchRow('setup-launch', t('set.listen_on_launch'), t('set.listen_on_launch_help'), c.listenOnLaunch, (on) => { c.listenOnLaunch = on; })));
-        return parts;
       }
-      // first what puts something on screen, writes an app into ~/Applications or watches the
-      // microphone (all on unless turned off here), then the shortcut, which does none of that; the
-      // last step lists the ones on, as this one can be taller than the window
+      // what puts something on screen, writes an app into ~/Applications or watches the microphone
+      // (all on unless turned off here, either way of starting meetings: a meeting can be started by
+      // hand in automatic mode too), then by hand the shortcut, which does none of that; the last step
+      // lists the ones on, as this one can be taller than the window
       if (caps.floating_button || caps.spotlight || caps.call_detection) {
         parts.push(h('div', { class: 'sub-card' },
           caps.floating_button && switchRow('setup-floating', t('start.floating'), t('start.floating_help'), c.floating, (on) => { c.floating = on; }),
           caps.spotlight && switchRow('setup-spotlight', t('start.spotlight'), t('start.spotlight_help'), c.spotlight, (on) => { c.spotlight = on; }),
           caps.call_detection && switchRow('setup-suggestions', t('start.suggest'), t('start.suggest_help'), c.suggestions, (on) => { c.suggestions = on; })));
       }
+      if (automatic) return parts;
       if (caps.hotkey) {
         W.shortcut = W.shortcut || shortcutSetting({ prefix: 'setup-shortcut', variant: 'setup' });
         W.shortcut.draw();
@@ -4587,12 +4624,12 @@ const SETUP_STEPS = {
       const hk = S.app.prefs.hotkey;
       const how = W.choice.mode === 'automatic' ? t('setup.done.automatic')
         : hk && caps.hotkey ? t('setup.done.manual_keys', { keys: shortcutText(hk) }) : t('setup.done.manual');
-      // by hand, what the start step turned on, said here in full: a floating button, an app in your
-      // Applications folder, the microphone watched for calls
-      const c = W.choice, manual = c.mode !== 'automatic';
-      const ways = [manual && caps.floating_button && c.floating && t('setup.done.floating'),
-        manual && caps.spotlight && c.spotlight && t('setup.done.spotlight'),
-        manual && caps.call_detection && c.suggestions && t('setup.done.suggest')].filter(Boolean);
+      // what the start step turned on, said here in full, either way of starting meetings (they work in
+      // both): a floating button, an app in your Applications folder, the microphone watched for calls
+      const c = W.choice;
+      const ways = [caps.floating_button && c.floating && t('setup.done.floating'),
+        caps.spotlight && c.spotlight && t('setup.done.spotlight'),
+        caps.call_detection && c.suggestions && t('setup.done.suggest')].filter(Boolean);
       return [
         ...setupHead(t('setup.done.title', { name: v.user_name }), t('setup.done.lead')),
         h('div', { class: 'summary-list' },
@@ -4931,6 +4968,7 @@ const STRINGS = {
     'notice.silence_untitled': 'It ended after {n}\u00a0min without speech: its notes are ready.',
     'notice.silence_empty': 'It ended after {n}\u00a0min without speech. Nothing had been said, so there are no notes.',
     'notice.silence_writing': 'It ended after {n}\u00a0min without speech: its notes are being written…',
+    'notice.silence_unfinished': 'It ended after {n}\u00a0min without speech.',
     'notice.link_title': 'A link was ignored.',
     'notice.link_text': 'Something asked Voicestream to start recording without its key, so nothing was recorded. To start a meeting, use this window, the menu bar or Spotlight.',
 
@@ -5023,6 +5061,9 @@ const STRINGS = {
     'live.m.paused_text': 'Nothing is recorded until you click Resume.',
     'live.m.stopping': 'Wrapping up the meeting…',
     'live.m.stopping_text': 'Writing its notes and sending the to-dos to your tools. The next meeting can start in a moment.',
+    'live.m.stopping_queued_text': 'Writing its notes and sending the to-dos to your tools.',
+    'live.m.queued': 'The next meeting starts once these notes are written.',
+    'live.m.queued_cancel_aria': 'Cancel the next meeting',
     'live.m.error_text': 'See the message above to fix it, then click Try again.',
     'live.mode.manual': 'Meetings start only when you start one, from {where}.',
     'live.mode.automatic': 'Automatic mode: meetings start by themselves when someone speaks.',
@@ -5421,6 +5462,7 @@ const STRINGS = {
     'notice.silence_untitled': 'Elle s’est terminée après {n}\u00a0min sans parole : ses notes sont prêtes.',
     'notice.silence_empty': 'Elle s’est terminée après {n}\u00a0min sans parole. Rien n’avait été dit, il n’y a donc pas de notes.',
     'notice.silence_writing': 'Elle s’est terminée après {n}\u00a0min sans parole : ses notes sont en cours de rédaction…',
+    'notice.silence_unfinished': 'Elle s’est terminée après {n}\u00a0min sans parole.',
     'notice.link_title': 'Un lien a été ignoré.',
     'notice.link_text': 'Quelque chose a demandé à Voicestream d’enregistrer sans sa clé : rien n’a été enregistré. Pour démarrer une réunion, utilisez cette fenêtre, la barre des menus ou Spotlight.',
 
@@ -5513,6 +5555,9 @@ const STRINGS = {
     'live.m.paused_text': 'Rien n’est enregistré tant que vous ne cliquez pas sur Reprendre.',
     'live.m.stopping': 'Finalisation de la réunion…',
     'live.m.stopping_text': 'Rédaction des notes et envoi des tâches vers vos outils. La réunion suivante pourra démarrer dans un instant.',
+    'live.m.stopping_queued_text': 'Rédaction des notes et envoi des tâches vers vos outils.',
+    'live.m.queued': 'La réunion suivante démarrera une fois ces notes rédigées.',
+    'live.m.queued_cancel_aria': 'Annuler la prochaine réunion',
     'live.m.error_text': 'Suivez le message ci-dessus pour corriger, puis cliquez sur Réessayer.',
     'live.mode.manual': 'Une réunion ne démarre que quand vous la lancez, depuis {where}.',
     'live.mode.automatic': 'Mode automatique : les réunions démarrent d’elles-mêmes dès que quelqu’un parle.',

@@ -6,13 +6,13 @@
 It starts the same app host as the UI tests (``UIApp`` in tests/test_app_ui.py: the real HTTP API
 and event stream, scripted speech, fake model downloads and permission checks) once for each state,
 because one app can only be in one state at a time. Meetings started by hand (the default): between
-meetings, in one, in one asking "Still in a meeting?", with a call detected; listening all the time
-(automatic): not listening, listening between meetings, in a meeting; and a new install on its
-first-run setup. The apps that start
-meetings by hand say they have what the Mac app has (its menu bar, the floating button, Spotlight,
-call detection and the keyboard shortcut), so their screens show all of it. Everything lives in a
-temporary folder that is removed on exit, with a temporary home too, so no real key, Keychain item or
-meeting is touched.
+meetings, in one, in one asking "Still in a meeting?", with a call detected, one being wrapped up with
+the next one waiting for its notes, and after one that ended by itself and whose wrap-up never
+finished; listening all the time (automatic): not listening, listening between meetings, in a meeting;
+and a new install on its first-run setup. The apps that start meetings by hand say they have what
+the Mac app has (its menu bar, the floating button, Spotlight, call detection and the keyboard
+shortcut), so their screens show all of it. Everything lives in a temporary folder that is removed on
+exit, with a temporary home too, so no real key, Keychain item or meeting is touched.
 
 The sample data holds together: the past meetings are imported from transcripts with the real
 ``voicestream import``, so their to-dos and decisions come from what was said; the spending on disk
@@ -345,6 +345,37 @@ def ask_still_there(app: DemoApp) -> None:
     host.loop.call_soon_threadsafe(ask)
 
 
+def wrap_up_with_the_next_waiting(app: DemoApp) -> None:
+    """The meeting in progress stopped and being wrapped up (its summary held), and the next one pressed
+    meanwhile, as with the shortcut or the floating button: it waits for these notes."""
+    import time
+
+    start_meeting(app)
+    app.wrap_gate.clear()
+    app.host.call(app.host.meeting_stop()).result(15)
+    deadline = time.monotonic() + 15
+    while app.host.status != "stopping":
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"the meeting host stayed {app.host.status!r}")
+        time.sleep(0.05)
+    app.queue_start()
+
+
+def ended_unfinished(app: DemoApp) -> None:
+    """A meeting that ended by itself after an hour of silence, whose wrap-up never finished (cut short,
+    failed): nobody knows whether it had notes, and the banner says only that it ended."""
+    host = app.host
+    assert host.loop is not None
+
+    def tell() -> None:
+        host.notice = {"kind": "ended_after_silence", "meeting_id": "m-demo", "minutes": 60,
+                       "at": datetime.now().astimezone().isoformat(), "title": None, "folder": None,
+                       "pending": False, "unfinished": True}
+        host._publish_state()
+
+    host.loop.call_soon_threadsafe(tell)
+
+
 def main() -> int:
     lang = sys.argv[sys.argv.index("--lang") + 1] if "--lang" in sys.argv[:-1] else None
     mp = pytest.MonkeyPatch()
@@ -361,6 +392,7 @@ def main() -> int:
         setup = make(base / "setup", mp, setup_done=False, fresh=True, meeting_start="manual")
         apps.append(setup)
         _mac_features(setup)
+        setup.host.capabilities["login_item"] = True  # the Mac's: All set offers "Open Voicestream at login"
         # meetings started by hand, with what the Mac app has
         idle = make(base / "by-hand", mp, provider="anthropic", setup_done=True, meetings=True, meeting_start="manual")
         apps.append(idle)
@@ -379,6 +411,16 @@ def main() -> int:
         _mac_features(call)
         assert call.host.loop is not None
         call.host.loop.call_soon_threadsafe(call.host.suggest_meeting, "zoom.us")  # a call: suggested, never started
+        queued = make(base / "by-hand-next", mp, setup_done=True, meetings=True, meeting_start="manual")
+        apps.append(queued)
+        _mac_features(queued)
+        unfinished = make(base / "by-hand-unfinished", mp, setup_done=True, meetings=True, meeting_start="manual")
+        apps.append(unfinished)
+        _mac_features(unfinished)
+        ended_unfinished(unfinished)
+        # last: each app's hold on wrap-ups wraps the summary for the whole process, so once this one holds
+        # its wrap-up, the sample meetings of an app made after it could not be imported
+        wrap_up_with_the_next_waiting(queued)
         if lang:  # on each app's own loop, as Settings would change it
             for app in apps:
                 assert app.host.loop is not None
@@ -390,6 +432,8 @@ def main() -> int:
             ("Live, a meeting started by hand", recording, "#/live"),
             ("Live, a meeting asking if you are still in it", still, "#/live"),
             ("Live, a call detected", call, "#/live"),
+            ("Live, wrapping up, the next meeting waiting", queued, "#/live"),
+            ("Live, ended by itself, wrap-up unfinished", unfinished, "#/live"),
             ("Settings: starting meetings", idle, "#/settings/general/starting"),
             ("Live, automatic, not listening", stopped, "#/live"),
             ("Live, automatic, listening", listening, "#/live"),
