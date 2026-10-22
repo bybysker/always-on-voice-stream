@@ -3661,24 +3661,31 @@ async function saveSettings() {
   S.saveError = null;
   renderSaveBar();
   let res = null;
-  try {
-    // the preferences first: switched to by hand, listening all the time stops before the settings
-    // arrive, which would otherwise restart it (or retry a failed start) in automatic mode — the
-    // microphone open after "by hand" was asked for, and a restart that opens a meeting nobody
-    // started. One refused, nothing else is sent and the changes stay on screen.
-    if (Object.keys(prefs).length) {
-      const saved = await api('PATCH', '/api/prefs', prefs).catch((err) => {
-        // "silence_ask_minutes: Input should be…": under the preference's own field
-        const m = err.status === 400 && /^(\w+): (.*)$/s.exec(err.message || '');
-        if (m && m[1] in prefs) err.body = { field: 'pref:' + m[1], error: m[2] };
-        throw err;
-      });
-      forgetSaved(S.prefsDraft, prefs);
-      setApp({ ...S.app, prefs: { ...S.app.prefs, ...saved }, mode: saved.meeting_start || S.app.mode });
-      if (saved.meeting_start && saved.meeting_start !== 'automatic') S.startAfterDownload = null;  // by hand from now on
-    }
+  const sendPrefs = async () => {
+    if (!Object.keys(prefs).length) return;
+    const saved = await api('PATCH', '/api/prefs', prefs).catch((err) => {
+      // "silence_ask_minutes: Input should be…": under the preference's own field
+      const m = err.status === 400 && /^(\w+): (.*)$/s.exec(err.message || '');
+      if (m && m[1] in prefs) err.body = { field: 'pref:' + m[1], error: m[2] };
+      throw err;
+    });
+    forgetSaved(S.prefsDraft, prefs);
+    setApp({ ...S.app, prefs: { ...S.app.prefs, ...saved }, mode: saved.meeting_start || S.app.mode });
+    if (saved.meeting_start && saved.meeting_start !== 'automatic') S.startAfterDownload = null;  // by hand from now on
+  };
+  const sendSettings = async () => {
     if (Object.keys(changes).length) res = await api('PATCH', '/api/settings', { changes });
     forgetSaved(S.draft, sent);
+  };
+  // switched to by hand, the preferences go first: listening all the time stops before the settings
+  // arrive, which would otherwise restart it (or retry a failed start) in automatic mode — the
+  // microphone open after "by hand" was asked for, and a restart that opens a meeting nobody
+  // started. Any other save sends the settings first, as it always did: a start that failed by hand
+  // is only checked again then, so a switch to automatic saved with its fix starts nothing by itself,
+  // as from a clean stop. One refused, what comes after it isn't sent and stays on screen.
+  const toManual = 'meeting_start' in prefs && prefs.meeting_start !== 'automatic' && S.app.prefs.meeting_start === 'automatic';
+  try {
+    for (const send of toManual ? [sendPrefs, sendSettings] : [sendSettings, sendPrefs]) await send();
     S.fieldErrors = {};
     await Promise.all([loadSettings(), loadModels()]);
   } catch (err) {

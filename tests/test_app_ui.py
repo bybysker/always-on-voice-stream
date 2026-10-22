@@ -2345,7 +2345,8 @@ def test_saving_settings_with_a_switch_to_by_hand_sends_the_switch_first(make_ap
     time stops before the new settings arrive — sent the other way round, those settings restart
     listening (or retry a failed start) in automatic mode, the microphone opens after "by hand" was
     asked for, and the restart can open a meeting nobody started. A refused preference then saves
-    nothing else: the other changes stay on screen, unsaved."""
+    nothing else: the other changes stay on screen, unsaved. Any other save sends the settings first,
+    as it always did."""
     from playwright.sync_api import expect
 
     app = make_app(setup_done=True, listen_on_launch=True)  # automatic, listening all the time
@@ -2358,23 +2359,65 @@ def test_saving_settings_with_a_switch_to_by_hand_sends_the_switch_first(make_ap
     pg.click("nav a[href='#/settings']")
     pg.fill("#f-user_name", "Camille Z")
     pg.get_by_label("When you start them (recommended)", exact=True).check()
+    pg.evaluate("setPref('silence_end_minutes', 601)")  # one the app refuses (the page's own check is by-passed)
+    p.allowed.add(400)
+    pg.click("#save-settings")
+    expect(pg.locator("[data-path='pref:silence_end_minutes'] .field-error")).not_to_be_empty()
+    assert sent == ["prefs"], sent
+    assert host.cfg.user_name == "Camille" and host.prefs.silence_end_minutes == 60
+    assert host.prefs.meeting_start == "automatic" and host.status == "listening"
+    expect(pg.locator("#f-user_name")).to_have_value("Camille Z")
+
+    sent.clear()
+    pg.fill("[data-path='pref:silence_end_minutes'] input", "60")  # put back: nothing refused now
     pg.click("#save-settings")
     expect(pg.locator(".toast.ok", has_text="Saved").last).to_be_visible()
+    expect(pg.locator("#savebar")).to_be_hidden()
     assert sent == ["prefs", "settings"], sent
     _wait_state(app, "stopped")
     pg.wait_for_timeout(500)
     assert host.assistant is None and not host.in_meeting() and len(app.built) == 1
     assert host.cfg.user_name == "Camille Z" and host.prefs.meeting_start == "manual"
 
-    sent.clear()
+    sent.clear()  # already by hand: the settings first
     pg.fill("#f-user_name", "Camille Y")
-    pg.evaluate("setPref('silence_end_minutes', 601)")  # one the app refuses (the page's own check is by-passed)
-    p.allowed.add(400)
+    pg.fill("[data-path='pref:silence_ask_minutes'] input", "20")
+    expect(pg.locator("#savebar")).to_be_visible()
     pg.click("#save-settings")
-    expect(pg.locator("[data-path='pref:silence_end_minutes'] .field-error")).not_to_be_empty()
-    assert sent == ["prefs"], sent
-    assert host.cfg.user_name == "Camille Z" and host.prefs.silence_end_minutes == 60
-    expect(pg.locator("#f-user_name")).to_have_value("Camille Y")
+    expect(pg.locator("#savebar")).to_be_hidden()  # saved (the toast is the last save's too)
+    assert sent == ["settings", "prefs"], sent
+    assert host.cfg.user_name == "Camille Y" and host.prefs.silence_ask_minutes == 20
+
+
+def test_saving_a_fix_and_a_switch_to_automatic_starts_nothing_by_itself(make_app: Callable[..., UIApp],
+                                                                         open_page: Callable[..., Page]) -> None:
+    """A start by hand failed (no Deepgram key), then one Save picks speech-to-text on this Mac — the
+    fix — and "Automatically": the settings go first, so the fix is checked as for a meeting started
+    by hand, and the switch then starts nothing. Sent the other way round, the settings found a failed
+    start in automatic mode and retried it: listening all the time began on Save, the microphone open,
+    when the same Save from a clean stop leaves it closed."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual", backend="deepgram",
+                   models=("large-v3-turbo-q5_0", stt_models.VAD_MODEL))
+    p = open_page(app)
+    pg = p.page
+    host = app.host
+    sent: list[str] = []
+    pg.on("request", lambda r: sent.append(r.url.split("/api/")[1].split("?")[0]) if r.method == "PATCH" else None)
+    pg.click("#live-start")
+    _wait_state(app, "error")
+    expect(pg.locator("#live-start")).to_have_text("Try again")
+    pg.click("nav a[href='#/settings']")
+    pg.evaluate("setDraft('transcription.backend', 'whisper-cpp')")  # the fix: no key needed on this Mac
+    pg.get_by_label("Automatically", exact=True).check()
+    pg.click("#save-settings")
+    expect(pg.locator(".toast.ok", has_text="Saved").last).to_be_visible()
+    assert sent == ["settings", "prefs"], sent
+    _wait_state(app, "stopped")
+    pg.wait_for_timeout(500)  # well after a retry would have opened the microphone
+    assert host.status == "stopped" and host.assistant is None and not app.built
+    assert host.prefs.meeting_start == "automatic" and host.cfg.transcription.backend == "whisper-cpp"
 
 
 def test_still_in_a_meeting_is_asked_before_the_meeting_ends(make_app: Callable[..., UIApp],
