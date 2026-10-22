@@ -2020,6 +2020,33 @@ def test_a_meeting_by_hand_in_the_smallest_window_and_on_a_phone(make_app: Calla
     p.shot("live-manual-meeting-smallest-window")
 
 
+def test_a_start_waiting_for_the_speech_model_can_be_stopped_on_live(make_app: Callable[..., UIApp],
+                                                                     open_page: Callable[..., Page]) -> None:
+    """Start meeting pressed while the speech model is still downloading: the meeting waits for it, and
+    Live offers Stop right there. Stopped, nothing starts when the download is done — a start nobody can
+    cancel where they pressed it would open the microphone by itself minutes later."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual", backend="whisper-cpp", models=(stt_models.VAD_MODEL,))
+    app.dl_gate.clear()  # the model download holds at 90%
+    p = open_page(app)
+    pg = p.page
+    pg.click("#live-start")
+    _wait(lambda: app.host.awaiting_model is not None)
+    assert app.host.status == "starting" and app.host.assistant is None
+    expect(pg.locator("#live-heading")).to_have_text("Starting the meeting…")
+    stop = pg.locator("#live-stop")
+    expect(stop).to_have_text("Stop")
+    p.shot("live-manual-starting-waits-for-model")
+    stop.click()
+    _wait_state(app, "stopped")
+    expect(pg.locator("#live-start")).to_have_text("Start meeting")
+    app.dl_gate.set()
+    expect(pg.locator(".toast", has_text="is ready")).to_be_visible(timeout=15000)
+    pg.wait_for_timeout(500)  # well after the download's end, when a start still waiting would run
+    assert app.host.status == "stopped" and app.host.assistant is None and not app.built
+
+
 def test_google_bridge_script_route(tmp_path: Path) -> None:
     """Settings → Your tools → Google copies the bridge script from the app (needs the token)."""
     from test_app_host import _factory, _write_config

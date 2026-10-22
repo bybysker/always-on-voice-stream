@@ -1584,7 +1584,10 @@ function renderStartPanel(st) {
     parts.push(btn(t('action.try_again'), { cls: huge, id: 'live-start', onclick: (e) => meetingStart(e.currentTarget) }, 'refresh'),
       S.app.error && btn(t('action.dismiss'), { cls: 'ghost', id: 'live-dismiss', onclick: (e) => meetingAction('stop', e.currentTarget) }));
   } else if (st === 'starting' || st === 'stopping') {
+    // a start can wait minutes for the speech model, then records by itself: it is cancelled here, where
+    // it was asked for (no question: nothing has been recorded yet)
     parts.push(h('button', { type: 'button', class: 'btn ' + huge, id: 'live-start', disabled: true }, spinner(), stateText()),
+      st === 'starting' && btn(t('action.stop'), { id: 'live-stop', onclick: (e) => meetingAction('stop', e.currentTarget) }, 'stop'),
       st === 'stopping' && btn(t('action.stop_now'), { cls: 'danger small', id: 'live-stop-now', onclick: (e) => stopNow(e.currentTarget) }));
   } else {  // recording, its page on its way
     const paused = st === 'paused';
