@@ -1,12 +1,14 @@
 """The app's UI with believable sample data, to look at every screen in a browser.
 
     python tests/ui_demo.py                  # prints the address of each screen; Ctrl+C stops it
+    python tests/ui_demo.py --lang fr        # every screen in French (the app's own language setting)
 
 It starts the same app host as the UI tests (``UIApp`` in tests/test_app_ui.py: the real HTTP API
 and event stream, scripted speech, fake model downloads and permission checks) once for each state,
 because one app can only be in one state at a time. Meetings started by hand (the default): between
-meetings, in one, with a call detected; listening all the time (automatic): not listening, listening
-between meetings, in a meeting; and a new install on its first-run setup. The apps that start
+meetings, in one, in one asking "Still in a meeting?", with a call detected; listening all the time
+(automatic): not listening, listening between meetings, in a meeting; and a new install on its
+first-run setup. The apps that start
 meetings by hand say they have what the Mac app has (its menu bar, the floating button, Spotlight,
 call detection and the keyboard shortcut), so their screens show all of it. Everything lives in a
 temporary folder that is removed on exit, with a temporary home too, so no real key, Keychain item or
@@ -329,7 +331,22 @@ def start_meeting(app: DemoApp) -> None:
     app.host.call(speak()).result(30)
 
 
+def ask_still_there(app: DemoApp) -> None:
+    """"Still in a meeting?" in the meeting in progress, as after a long silence."""
+    host = app.host
+    assert host.loop is not None
+
+    def ask() -> None:
+        a = host.assistant
+        assert a is not None and a.current is not None
+        host.bus.publish("meeting.still_there", meeting_id=a.current.meeting.id, silent_minutes=16,
+                         ends_at=(datetime.now().astimezone() + timedelta(minutes=44)).isoformat())
+
+    host.loop.call_soon_threadsafe(ask)
+
+
 def main() -> int:
+    lang = sys.argv[sys.argv.index("--lang") + 1] if "--lang" in sys.argv[:-1] else None
     mp = pytest.MonkeyPatch()
     base = Path(tempfile.mkdtemp(prefix="voicestream-demo-"))
     apps: list[DemoApp] = []
@@ -352,16 +369,26 @@ def main() -> int:
         apps.append(recording)
         _mac_features(recording)
         start_meeting(recording)
+        still = make(base / "by-hand-still", mp, setup_done=True, meetings=True, meeting_start="manual")
+        apps.append(still)
+        _mac_features(still)
+        start_meeting(still)
+        ask_still_there(still)
         call = make(base / "by-hand-call", mp, setup_done=True, meetings=True, meeting_start="manual")
         apps.append(call)
         _mac_features(call)
         assert call.host.loop is not None
         call.host.loop.call_soon_threadsafe(call.host.suggest_meeting, "zoom.us")  # a call: suggested, never started
+        if lang:  # on each app's own loop, as Settings would change it
+            for app in apps:
+                assert app.host.loop is not None
+                app.host.loop.call_soon_threadsafe(app.host.update_prefs, {"ui_language": lang})
 
         budget = stopped.folder_of("Budget review")
         screens = [
             ("Live, no meeting in progress", idle, "#/live"),
             ("Live, a meeting started by hand", recording, "#/live"),
+            ("Live, a meeting asking if you are still in it", still, "#/live"),
             ("Live, a call detected", call, "#/live"),
             ("Settings: starting meetings", idle, "#/settings/general/starting"),
             ("Live, automatic, not listening", stopped, "#/live"),
@@ -375,6 +402,7 @@ def main() -> int:
               ("general", "stt", "claude", "audio", "tools", "agents", "advanced")),
             ("Setup wizard", setup, ""),
             ("Setup: how you start a meeting", setup, "#/setup/start"),
+            ("Setup: all set", setup, "#/setup/done"),
         ]
         width = max(len(name) for name, *_ in screens)
         print("Voicestream UI demo — open these in a browser (Ctrl+C stops it):\n")

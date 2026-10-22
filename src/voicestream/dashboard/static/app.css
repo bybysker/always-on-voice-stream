@@ -64,6 +64,7 @@
   --voice-others: #8a8a8a;
   --positive: #2e7d32;
   --negative: #c4242a;
+  --recording: #e0352b;    /* the microphone is on: red, as on the floating button and in macOS */
   --on-negative: #ffffff;  /* a confirmation that cannot be undone: its label on the negative fill */
   --warning: #92400e;
   --pill-bg: #eeeeee; --pill-ink: #3d3d3d;
@@ -113,6 +114,7 @@
     --voice-others: #7d7d7d;
     --positive: #3fc07a;
     --negative: #f0666f;
+    --recording: #ff453a;
     --on-negative: #0a0a0a;  /* white on this coral is 3:1; ink is 6.4:1, as the inverted primary */
     --warning: #e0a24a;
     --pill-bg: #262626; --pill-ink: #cfcfcf;
@@ -319,9 +321,11 @@ input.switch:disabled { opacity: .45; cursor: default; }
 .state .extra { grid-column: 2; color: var(--muted); font-size: var(--fs-small); line-height: 18px; }
 .state .extra:empty { display: none; }
 .dot-state { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--faint); }
-.st-listening .dot-state, .pill .dot-state { background: var(--positive); animation: breathe 2.4s ease-in-out infinite; }
+/* recording, a red dot that breathes; a problem, a red ring that doesn't (never the same dot); green
+   is for "Connected" and things done */
+.st-listening .dot-state, .pill .dot-state { background: var(--recording); animation: breathe 2.4s ease-in-out infinite; }
 .st-paused .dot-state { background: var(--warning); }
-.st-error .dot-state { background: var(--negative); }
+.st-error .dot-state { background: none; border: 2px solid var(--negative); }
 .st-error .text { color: var(--negative); }
 .st-starting .dot-state, .st-stopping .dot-state { background: var(--muted); animation: breathe 1.2s ease-in-out infinite; }
 @keyframes breathe { 50% { opacity: .35; } }
@@ -337,7 +341,7 @@ input.switch:disabled { opacity: .45; cursor: default; }
 .nav a[aria-current=page] { background: var(--active); color: var(--text); }
 .nav a .icon { color: currentColor; }
 .nav .badge-dot { margin-left: auto; width: 7px; height: 7px; border-radius: 50%; background: var(--text); }
-.nav .live-dot { margin-left: auto; width: 7px; height: 7px; border-radius: 50%; background: var(--positive); animation: breathe 2.4s ease-in-out infinite; }
+.nav .live-dot { margin-left: auto; width: 7px; height: 7px; border-radius: 50%; background: var(--recording); animation: breathe 2.4s ease-in-out infinite; }
 .sidebar-spend { margin-top: auto; }
 .spend {
   display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 6px 8px; width: 100%;
@@ -366,6 +370,9 @@ main { flex: 1; outline: none; }
 
 /* ---------------------------------------------------------------- notices */
 #notices:not(:empty) { padding: 20px 40px 0; display: flex; flex-direction: column; gap: 8px; }
+/* in a meeting, under its title and controls (app.js placeNotices): the panes make room, not Pause and Stop */
+.live-meeting > #notices:not(:empty) { padding: 0; }
+.live-meeting > #notices:empty { display: none; }
 .notice {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 10px 14px; border-radius: var(--radius-card);
@@ -428,9 +435,9 @@ main { flex: 1; outline: none; }
 /* the state as a dot before the title (the icon inside is for the old layout: the dot says it) */
 .hero-icon { width: 10px; height: 10px; margin-top: 11px; border-radius: 50%; flex: none; background: var(--faint); }
 .hero-icon > .icon { display: none; }
-.hero-icon.listening { background: var(--positive); animation: breathe 2.4s ease-in-out infinite; }
+.hero-icon.listening { background: var(--recording); animation: breathe 2.4s ease-in-out infinite; }
 .hero-icon.paused { background: var(--warning); }
-.hero-icon.error { background: var(--negative); }
+.hero-icon.error { background: none; border: 2px solid var(--negative); }
 .hero p { color: var(--muted); margin-top: 6px; max-width: 64ch; }
 .hero .row { margin-top: 0; }
 .hero .row > :not(.btn) { margin-top: 14px; }
@@ -508,9 +515,9 @@ body.live-meeting main { min-height: 0; display: flex; flex-direction: column; }
 /* a meeting started by hand: how long it has recorded, then Pause and Stop, where the eye lands first */
 .live-side { display: flex; align-items: center; gap: 12px 16px; flex-wrap: wrap; }
 .rec-clock { display: inline-flex; align-items: center; gap: 8px; font-size: var(--fs-title); line-height: 32px; font-weight: 500; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
-.rec-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--positive); animation: breathe 2.4s ease-in-out infinite; }
+.rec-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--recording); animation: breathe 2.4s ease-in-out infinite; }
 .rec-clock.paused .rec-dot { background: var(--warning); animation: none; }
-.rec-clock.error .rec-dot { background: var(--negative); animation: none; }
+.rec-clock.error .rec-dot { background: none; border: 2px solid var(--negative); animation: none; }
 .rec-clock.stopping, .rec-clock.starting { color: var(--muted); }
 .rec-clock.stopping .rec-dot, .rec-clock.starting .rec-dot { background: var(--faint); animation: none; }
 .live-actions { display: flex; flex-wrap: wrap; gap: 8px; }
