@@ -973,10 +973,12 @@ table.data th { color: var(--muted); font-weight: 400; }
 .promise strong { font-weight: 500; }
 .promise span { color: var(--muted); font-size: var(--fs-small); line-height: 18px; }
 .sub-card .promise { margin: 0; }
-.summary-list { display: flex; flex-direction: column; margin: 4px 0 20px; }
-.summary-list div { display: flex; gap: 10px; align-items: center; padding: 10px 0; border-top: 1px solid var(--rule); }
-.summary-list div:first-child { border-top: 0; }
-.summary-list .icon { color: var(--positive); }
+/* All set: a checklist, one line a row where it fits, its mark on the first line. Rules between the
+   rows made it a table, and the step taller than the smallest window (900×640): the last rows and the
+   login switch went under the buttons. */
+.summary-list { display: flex; flex-direction: column; gap: 2px; margin: 4px 0 16px; }
+.summary-list div { display: flex; gap: 10px; align-items: flex-start; padding: 4px 0; }
+.summary-list .icon { margin-top: 2px; color: var(--positive); }
 .summary-list .pending .icon { color: var(--warning); }
 
 /* --------------------------------------------------- toasts, dialogs, boot */
@@ -1035,6 +1037,17 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
 @media (max-width: 1040px) {
   .set-row { grid-template-columns: minmax(0, 1fr); padding: 24px 0; gap: 12px; }
   .set-label { position: static; }
+}
+/* the smallest Mac windows (native.py's MIN_SIZE is 900×640): the setup's step a little wider and nearer
+   its top and its buttons, so that a long one (All set) is seen whole above the buttons */
+@media (min-width: 900px) and (max-width: 1000px) {
+  .setup-main, .setup-foot { padding-left: 32px; padding-right: 32px; }
+}
+@media (min-width: 900px) and (max-height: 720px) {
+  .setup-main { padding-top: 24px; }
+  .setup-card { padding: 24px 32px; }
+  .setup-card > .lead { margin-bottom: 16px; }
+  .setup-foot { padding-bottom: 24px; }
 }
 /* the tablet and the phone: the sidebar becomes a bar at the top, its menu opens the rest as a sheet.
    Under 900 px only: the Mac window stops at 900 (native.py's MIN_SIZE), and at its smallest it keeps

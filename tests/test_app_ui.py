@@ -2734,6 +2734,65 @@ def test_the_setup_says_what_it_turned_on(make_app: Callable[..., UIApp], open_p
     expect(done).to_contain_text(f"« {spotlight.NAMES['fr']} »")
 
 
+SEEN_ABOVE_FOOT = """() => {
+  const foot = $('setup-foot').getBoundingClientRect().top;
+  const rows = [...document.querySelectorAll('.summary-list > div'), $('setup-login').closest('.switch-row') || $('setup-login')];
+  return { foot, scrolled: document.scrollingElement.scrollTop,
+           cut: rows.filter((el) => el.getBoundingClientRect().bottom > foot).map((el) => el.textContent) };
+}"""
+
+
+@pytest.mark.parametrize("lang", ["en", "fr"])
+def test_the_setup_all_set_is_seen_whole_in_the_smallest_window(make_app: Callable[..., UIApp],
+                                                                 open_page: Callable[..., Page], lang: str) -> None:
+    """All set, at the Mac window's smallest (900×640), in English and in French, with every way of
+    starting a meeting on: each row it lists and the "Open Voicestream at login" switch are above the
+    buttons, without scrolling."""
+    from playwright.sync_api import expect
+
+    from voicestream.app.native import MIN_SIZE
+
+    app = make_app(setup_done=False, meeting_start="manual")
+    _mac_features(app)
+    app.host.capabilities["login_item"] = True  # a Mac's: the switch is on this step
+    p = open_page(app, size=MIN_SIZE, locale="fr-FR" if lang == "fr" else "en-US")
+    pg = p.page
+    pg.goto(app.url + "#/setup/start")
+    pg.locator('#boot').wait_for(state='hidden')
+    pg.evaluate(f"applyLanguage('{lang}')")
+    pg.click("#setup-next")
+    expect(pg.locator(".summary-list > div")).to_have_count(8)  # the 5 always there, the floating button, Spotlight, calls
+    expect(pg.locator("#setup-login")).to_be_attached()
+    seen = pg.evaluate(SEEN_ABOVE_FOOT)
+    assert seen["scrolled"] == 0 and not seen["cut"], seen
+    p.shot(f"setup-done-smallest-{lang}")
+
+
+def test_the_setup_all_set_lists_the_ways_in_automatic_mode_too(make_app: Callable[..., UIApp],
+                                                                open_page: Callable[..., Page]) -> None:
+    """Automatically: a meeting can still be started by hand, so the floating button, Spotlight and the
+    call suggestions are offered on the start step and listed on All set, as by hand."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=False, meeting_start="manual")
+    _mac_features(app)
+    p = open_page(app)
+    pg = p.page
+    pg.goto(app.url + "#/setup/start")
+    pg.locator('#boot').wait_for(state='hidden')
+    pg.click("input[name='c-How you start a meeting'][value='automatic'] >> xpath=..")
+    expect(pg.locator("#setup-launch")).to_be_visible()
+    for switch in ("#setup-floating", "#setup-spotlight", "#setup-suggestions"):
+        expect(pg.locator(switch)).to_be_attached()
+    expect(pg.locator("#setup-shortcut-change")).to_have_count(0)  # the shortcut is for by hand
+    pg.click("label[for=setup-suggestions]")
+    pg.click("#setup-next")
+    done = pg.locator(".summary-list")
+    expect(done).to_contain_text("A floating button above every app starts and stops meetings")
+    expect(done).to_contain_text("Spotlight starts a meeting")
+    expect(done).not_to_contain_text("Suggestions")
+
+
 RECORDING_LOOK = """() => {
   const style = (html) => {
     const box = document.createElement('div');

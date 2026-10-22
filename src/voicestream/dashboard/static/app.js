@@ -4570,20 +4570,22 @@ const SETUP_STEPS = {
       ];
       const parts = [...setupHead(t('setup.start.title'), t('setup.start.lead')),
         choiceCards(t('setup.start.title'), options, c.mode, (v) => { c.mode = v; renderSetup(); }, { list: true })];
-      if (c.mode === 'automatic') {
+      const automatic = c.mode === 'automatic';
+      if (automatic) {
         parts.push(h('div', { class: 'sub-card' },
           switchRow('setup-launch', t('set.listen_on_launch'), t('set.listen_on_launch_help'), c.listenOnLaunch, (on) => { c.listenOnLaunch = on; })));
-        return parts;
       }
-      // first what puts something on screen, writes an app into ~/Applications or watches the
-      // microphone (all on unless turned off here), then the shortcut, which does none of that; the
-      // last step lists the ones on, as this one can be taller than the window
+      // what puts something on screen, writes an app into ~/Applications or watches the microphone
+      // (all on unless turned off here, either way of starting meetings: a meeting can be started by
+      // hand in automatic mode too), then by hand the shortcut, which does none of that; the last step
+      // lists the ones on, as this one can be taller than the window
       if (caps.floating_button || caps.spotlight || caps.call_detection) {
         parts.push(h('div', { class: 'sub-card' },
           caps.floating_button && switchRow('setup-floating', t('start.floating'), t('start.floating_help'), c.floating, (on) => { c.floating = on; }),
           caps.spotlight && switchRow('setup-spotlight', t('start.spotlight'), t('start.spotlight_help'), c.spotlight, (on) => { c.spotlight = on; }),
           caps.call_detection && switchRow('setup-suggestions', t('start.suggest'), t('start.suggest_help'), c.suggestions, (on) => { c.suggestions = on; })));
       }
+      if (automatic) return parts;
       if (caps.hotkey) {
         W.shortcut = W.shortcut || shortcutSetting({ prefix: 'setup-shortcut', variant: 'setup' });
         W.shortcut.draw();
@@ -4622,12 +4624,12 @@ const SETUP_STEPS = {
       const hk = S.app.prefs.hotkey;
       const how = W.choice.mode === 'automatic' ? t('setup.done.automatic')
         : hk && caps.hotkey ? t('setup.done.manual_keys', { keys: shortcutText(hk) }) : t('setup.done.manual');
-      // by hand, what the start step turned on, said here in full: a floating button, an app in your
-      // Applications folder, the microphone watched for calls
-      const c = W.choice, manual = c.mode !== 'automatic';
-      const ways = [manual && caps.floating_button && c.floating && t('setup.done.floating'),
-        manual && caps.spotlight && c.spotlight && t('setup.done.spotlight'),
-        manual && caps.call_detection && c.suggestions && t('setup.done.suggest')].filter(Boolean);
+      // what the start step turned on, said here in full, either way of starting meetings (they work in
+      // both): a floating button, an app in your Applications folder, the microphone watched for calls
+      const c = W.choice;
+      const ways = [caps.floating_button && c.floating && t('setup.done.floating'),
+        caps.spotlight && c.spotlight && t('setup.done.spotlight'),
+        caps.call_detection && c.suggestions && t('setup.done.suggest')].filter(Boolean);
       return [
         ...setupHead(t('setup.done.title', { name: v.user_name }), t('setup.done.lead')),
         h('div', { class: 'summary-list' },
