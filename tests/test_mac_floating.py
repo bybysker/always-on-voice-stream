@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from voicestream.app import floating
+from voicestream.app import floating, hotkey
 from voicestream.app.floating import PanelModel, Screen
 
 NOW = datetime(2026, 10, 22, 10, 0, tzinfo=UTC)
@@ -111,6 +111,34 @@ def test_call_suggestion_nudge_and_notices() -> None:
     assert floating.panel_model(_st(notice={"kind": "something new"}), "en", NOW).kind == "idle"
     # while recording, the recording is what shows
     assert floating.panel_model(_st("listening", **_meeting(1), suggestion={"app": "Zoom"}), "en", NOW).kind == "recording"
+
+
+def test_paused_shows_resume_even_with_a_nudge_up() -> None:
+    """Paused, nothing is recorded and paused time isn't silence: Resume must be there, not Keep / End."""
+    nudge = {"meeting_id": "m1", "silent_minutes": 16}
+    paused = floating.panel_model(_st("paused", **_meeting(20), still_there=nudge), "en", NOW)
+    assert paused.kind == "paused" and _keys(paused) == ["resume", "stop"]
+    assert floating.panel_model(_st("listening", **_meeting(20), still_there=nudge), "en", NOW).kind == "still_there"
+
+
+def test_the_shortcut_is_named_only_next_to_what_a_press_does() -> None:
+    """hotkey.TOGGLE: a press stops while recording, resumes while paused and does nothing while starting —
+    a Stop tooltip naming it while paused would send you to resume a meeting you meant to end."""
+    sc = "⌥⌘R"
+    rec = floating.panel_model(_st("listening", **_meeting(2)), "en", NOW, shortcut=sc)
+    assert rec.buttons[1].key == "stop" and rec.buttons[1].tooltip.endswith("(⌥⌘R)")
+    tips = {b.key: b.tooltip for b in floating.panel_model(_st("paused", **_meeting(2)), "en", NOW, shortcut=sc).buttons}
+    assert tips["resume"] == "Resume (⌥⌘R)" and sc not in tips["stop"] and tips["stop"].startswith("Stop: the notes")
+    starting = floating.panel_model(_st("starting"), "en", NOW, shortcut=sc)
+    assert _keys(starting) == ["stop"] and sc not in starting.buttons[0].tooltip
+    does = {"start": ("start", "restart"), "accept": ("start", "restart"), "retry": ("restart",),
+            "resume": ("resume",), "stop": ("stop",)}
+    for lang in ("en", "fr"):
+        for name, st in floating.sample_states().items():
+            press = hotkey.TOGGLE.get(st.get("state") or "stopped")
+            for b in floating.panel_model(st, lang, NOW, shortcut=sc).buttons:
+                if sc in b.tooltip:
+                    assert press in does[b.key], (name, b.key, press)
 
 
 def test_both_languages_say_everything() -> None:

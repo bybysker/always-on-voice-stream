@@ -260,10 +260,13 @@ def panel_model(state: dict[str, Any], lang: str, now: datetime | None = None, *
         return s["shortcut_tip"].format(tip=text, shortcut=shortcut) if shortcut else text
 
     stop_title = s["stop_meeting"] if manual else s["stop_listening"]
-    stop = PanelButton("stop", stop_title, stop_title, "stop.fill", icon_only=True, tooltip=tip(s["stop_tip"]))
+    # the shortcut is named only where a press stops (hotkey.TOGGLE): paused it resumes, starting it does nothing
+    stop_tip = tip(s["stop_tip"]) if current == "listening" else s["stop_tip"]
+    stop = PanelButton("stop", stop_title, stop_title, "stop.fill", icon_only=True, tooltip=stop_tip)
     if current in ("listening", "paused"):
         still = state.get("still_there")
-        if still and manual:
+        # paused, nothing is recorded (nor counted as silence): Resume shows, not Keep / End
+        if still and manual and current == "listening":
             minutes = int(still.get("silent_minutes") or 0)
             return PanelModel("still_there", s["still"], "hourglass", "secondary", tooltip=s["still_tip"].format(minutes=minutes),
                               buttons=(PanelButton("keep", s["keep"], s["keep"], prominent=True),

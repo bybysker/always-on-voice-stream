@@ -318,11 +318,15 @@ def listen_shortcut(state: dict[str, Any]) -> tuple[str, int]:
     return hotkey.key_equivalent(str(hk["code"]), str(hk.get("key") or "")), hotkey.appkit_mask(hk.get("mods") or ())
 
 
-def shortcut_entry(state: dict[str, Any]) -> str:
+def shortcut_entry(state: dict[str, Any]) -> str | None:
     """The menu entry the keyboard shortcut is shown next to: the one that does what a press does now
     (:data:`.hotkey.TOGGLE`) — "Resume listening" while paused (a press resumes: next to "Stop
-    listening" it would be read as a stop), else Start/Stop listening."""
-    return "pause" if hotkey.TOGGLE.get(str(state.get("state") or "stopped")) == "resume" else "listen"
+    listening" it would be read as a stop), Start/Stop listening when a press starts or stops, and none
+    while listening starts or a meeting is wrapped up (a press stops nothing then)."""
+    press = hotkey.TOGGLE.get(str(state.get("state") or "stopped"))
+    if press is None:
+        return None
+    return "pause" if press == "resume" else "listen"
 
 
 def _floating_entry(key: str, state: dict[str, Any], lang: str, *, quitting: bool) -> MenuEntry:
@@ -347,7 +351,8 @@ def menu_model(state: dict[str, Any], lang: str, login: str, *, now: datetime | 
     login_on = login in ("enabled", "requires_approval")
     key, mods = listen_shortcut(state)
     shortcut: dict[str, Any] = {"shortcut": key, "modifiers": mods}
-    on_pause, on_listen = (shortcut, {}) if shortcut_entry(state) == "pause" else ({}, shortcut)
+    entry = shortcut_entry(state)
+    on_pause, on_listen = (shortcut if entry == "pause" else {}), (shortcut if entry == "listen" else {})
     start, stop = (s["start_meeting"], s["stop_meeting"]) if manual else (s["start"], s["stop"])
     resume = s["resume_meeting"] if manual else s["resume"]
     floating_item = _floating_entry("floating", state, lang, quitting=quitting)
@@ -1708,10 +1713,17 @@ class MacShell:
     def _hotkey_info(self) -> dict[str, Any]:
         hk = self._hotkeys
         entry = shortcut_entry(self.state)
-        item = self._entries.get(entry)
+        item = self._entries.get(entry) if entry is not None else None
         key, mods = listen_shortcut(self.state)
         shown = (str(item.keyEquivalent()), int(item.keyEquivalentModifierMask())) if item is not None else None
         wanted = (self.state.get("prefs") or {}).get("hotkey") is not None
+        if entry is None:  # a press does nothing now (starting, wrapping up): the menu shows it nowhere
+            in_menu = all(not str(self._entries[k].keyEquivalent()) for k in ("listen", "pause") if k in self._entries)
+        else:
+            # the menu shows what the host's state says macOS took — and shows something when a shortcut
+            # is set: a status that never reached the host leaves the menu (and Settings) without it
+            in_menu = (shown is not None and shown[0] == key and (not key or shown[1] == mods)
+                       and (bool(key) or not wanted))
         return {
             "registered": hotkey.describe(*hk.registered) if hk is not None and hk.registered else None,
             "register_result": self._hotkey_err,
@@ -1719,10 +1731,7 @@ class MacShell:
             "host_status": (self.state.get("hotkey") or {}).get("status"),
             "wanted": wanted,
             "menu": {"entry": entry, "key": shown[0], "mask": shown[1]} if shown else None,
-            # the menu shows what the host's state says macOS took — and shows something when a shortcut
-            # is set: a status that never reached the host leaves the menu (and Settings) without it
-            "in_menu": (shown is not None and shown[0] == key and (not key or shown[1] == mods)
-                        and (bool(key) or not wanted)),
+            "in_menu": in_menu,
         }
 
     def _layout_info(self) -> dict[str, Any]:

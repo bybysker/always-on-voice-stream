@@ -552,9 +552,14 @@ def test_menu_model() -> None:
         assert paused["listen"].modifiers == hotkey.APPKIT_MODIFIERS["cmd"]  # NSMenuItem's default, with no key
     listening = _menu(_state("listening", minutes=4, **shortcut))
     assert listening["pause"].shortcut == "" and listening["listen"].shortcut == "r"  # listening: a press stops
-    for st in ("stopped", "error", "starting", "stopping", "listening"):
+    for st in ("stopped", "error", "listening"):
         assert native.shortcut_entry(_state(st)) == "listen"
     assert native.shortcut_entry(_state("paused")) == "pause"
+    # starting or wrapping up, a press stops nothing: next to Stop, the shortcut would say it does
+    for st in ("starting", "stopping"):
+        assert native.shortcut_entry(_state(st)) is None
+        entries = _menu(_state(st, **shortcut))
+        assert entries["listen"].shortcut == "" and entries["pause"].shortcut == ""
 
 
 def test_menu_model_when_meetings_start_by_hand() -> None:
@@ -1164,6 +1169,12 @@ def test_the_selftest_presses_the_shortcut_without_listening(host: FakeHost, app
     info = shell._hotkey_info()
     assert info["menu"]["entry"] == "pause" and info["in_menu"] is True
     pause.returns["keyEquivalent"] = ""  # still next to Stop listening instead
+    listen.returns["keyEquivalent"] = "r"
+    assert shell._hotkey_info()["in_menu"] is False
+    listen.returns["keyEquivalent"] = ""
+    # starting, a press does nothing: the menu must show the shortcut nowhere
+    shell.state = _hk_state("starting", status="ok")
+    assert shell._hotkey_info()["in_menu"] is True
     listen.returns["keyEquivalent"] = "r"
     assert shell._hotkey_info()["in_menu"] is False
     listen.returns["keyEquivalent"] = ""
