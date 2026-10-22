@@ -1592,6 +1592,42 @@ def test_the_floating_button_follows_the_state(host: FakeHost, appkit: Recorder,
     assert "⌥⌘R" not in shell._panel_model().buttons[0].tooltip
 
 
+def test_a_hidden_floating_button_appears_for_a_question_then_goes(host: FakeHost, appkit: Recorder,
+                                                                   panels: list[FakeFloatingPanel]) -> None:
+    """Hidden (the setting off) and the window closed, a call suggestion or "Still in a meeting?" would be shown
+    nowhere: the floating button shows it alone, then goes once it is answered or withdrawn — or hidden again."""
+    host.thread.start()
+
+    def st(*args: Any, on: bool = False, **kw: Any) -> dict[str, Any]:
+        return _manual(*args, capabilities={"floating_button": True}, prefs={"floating_button": on}, **kw)
+
+    shell = _shell(host)
+    shell._launched = True
+    shell.apply_state(st())
+    assert panels == []  # hidden, nothing to ask
+    zoom = st(suggestion={"app": "Zoom", "at": "t1"})
+    shell.apply_state(zoom)
+    (panel,) = panels
+    assert panel.updates[-1][0] == "suggestion"
+    shell.apply_state(st())  # answered, dismissed or the call ended
+    assert panel.updates[-1][0] is None
+    shell.apply_state(zoom)
+    shell.on_floating("hide")  # its menu's Hide Floating Button, the setting already off: gone for this one
+    assert panel.updates[-1][0] is None
+    assert _wait(lambda: ("update_prefs", {"floating_button": False}) in host.calls)
+    shell.apply_state(zoom)
+    assert panel.updates[-1][0] is None
+    shell.apply_state(st(suggestion={"app": "Microsoft Teams", "at": "t2"}))  # the next call is asked about
+    assert panel.updates[-1][0] == "suggestion"
+    # shown by the setting, hidden from the menu bar while a nudge is up: gone, not kept up by the nudge
+    nudge = {"meeting_id": "m1", "silent_minutes": 15, "ends_at": "t3"}
+    shell.apply_state(st("listening", minutes=20, on=True, still_there=nudge))
+    assert panel.updates[-1][0] == "still_there"
+    shell.on_menu("m_floating")
+    shell.apply_state(st("listening", minutes=20, still_there=nudge))
+    assert panel.updates[-1][0] is None
+
+
 def test_floating_button_clicks_go_through_the_host_actions(host: FakeHost, appkit: Recorder) -> None:
     host.thread.start()
     shell = _shell(host)

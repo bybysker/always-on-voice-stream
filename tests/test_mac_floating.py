@@ -198,6 +198,42 @@ def test_when_it_shows() -> None:
     assert floating.wanted({**on, "prefs": {}})  # on by default
 
 
+def test_hidden_it_still_asks_what_nothing_else_would_show() -> None:
+    """Hidden (the setting off) with the window closed, a call suggestion, "Still in a meeting?" and a meeting
+    that ended by itself would be shown nowhere: the floating button appears for them, with that look only."""
+    off = {"prefs": {"floating_button": False}, "capabilities": {"floating_button": True}}
+
+    def st(state: str = "stopped", **extra: Any) -> dict[str, Any]:
+        return {**_st(state, **extra), **off}
+
+    assert not floating.wanted(st()) and not floating.wanted(st("listening", **_meeting(3)))  # nothing to ask
+    sug = st(suggestion={"app": "Zoom", "at": "t1"})
+    assert floating.wanted(sug) and floating.panel_model(sug, "en", NOW).kind == "suggestion"
+    nudge = {"meeting_id": "m1", "silent_minutes": 15, "ends_at": "t2"}
+    still = st("listening", **_meeting(20), still_there=nudge)
+    assert floating.wanted(still) and floating.panel_model(still, "en", NOW).kind == "still_there"
+    assert not floating.wanted({**still, "state": "paused"})  # paused: nothing to keep or end (Resume is for later)
+    assert not floating.wanted({**still, "mode": "automatic"})  # automatic meetings are never asked
+    ended = st("stopping", notice={"kind": "ended_after_silence", "minutes": 60, "pending": True, "at": "t3",
+                                   "meeting_id": "m1"})
+    m = floating.panel_model(ended, "fr", NOW)
+    assert floating.wanted(ended) and m.kind == "notice" and m.text == "Réunion terminée : rédaction des notes…"
+    assert floating.panel_model({**ended, "prefs": {}}, "en", NOW).kind == "stopping"  # shown anyway: as before
+    assert floating.wanted({**ended, "state": "stopped"})
+    assert not floating.wanted({**ended, "state": "starting"})  # the next meeting is under way
+    assert not floating.wanted(st(notice={"kind": "link_refused", "at": "t4"}))  # the failure sound said that one
+    # hidden from its own menu while one is up: not for that one again, but for the next
+    key = floating.question_key(sug)
+    assert key and floating.question_key(st()) is None and floating.question_key(still) != key
+    assert not floating.wanted(sug, hidden_for=key)
+    assert floating.wanted(st(suggestion={"app": "Teams", "at": "t5"}), hidden_for=key)
+    assert floating.wanted({**sug, "prefs": {}}, hidden_for=key)  # on: always shown
+    asked_again = st("listening", **_meeting(70), still_there={**nudge, "ends_at": "t6"})  # asked again after a pause
+    assert floating.wanted(asked_again, hidden_for=floating.question_key(still))
+    assert not floating.wanted({**sug, "setup_done": False}) and not floating.wanted(sug, quitting=True)
+    assert not floating.wanted({**sug, "capabilities": {}})
+
+
 # ------------------------------------------------------------------ placement
 
 MAIN = Screen("Built-in Retina Display", (0, 0, 1512, 982), (0, 0, 1512, 950))

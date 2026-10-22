@@ -45,7 +45,8 @@ and every way of starting and stopping goes through the host's meeting actions
 
 * the floating button (:mod:`.floating`): a small non-activating panel above every app, on every
   Space, that follows the host's state (Start meeting; the time, Pause, Stop; a call suggestion;
-  "Still in a meeting?") and can be hidden from its own menu;
+  "Still in a meeting?") and can be hidden from its own menu — hidden, it still comes up for a call
+  suggestion or "Still in a meeting?", which nothing else would show with the window closed;
 * ``voicestream://`` links (the Info.plist's CFBundleURLTypes): Launch Services sends them as a "get
   URL" Apple event, whose handler (registered before the run loop starts, for the link that launches
   the app) hands them to the host's ``open_url``, which checks the key of the ones that may record;
@@ -699,6 +700,7 @@ class MacShell:
         self._main_entries: dict[str, Any] = {}
         self._floating: floating.FloatingPanel | None = None
         self._floating_test: str | None = None  # the self-test shows this sample on it, whatever the state says
+        self._floating_hidden: str | None = None  # the question it was hidden for (floating.question_key)
         self._watcher: calls.CallWatcher | None = None
         self._recorded = False  # something was recorded since the call watcher last started
         self._spotlight: tuple[Any, ...] | None = None  # what the Spotlight launcher was last made for
@@ -1147,8 +1149,10 @@ class MacShell:
         elif key in ("end_meeting", "m_end"):
             self._post(self._end_meeting())
         elif key in ("floating", "m_floating"):
-            on = bool((self.state.get("prefs") or {}).get("floating_button", True))
-            self._post(self._on_loop("update_prefs", {"floating_button": not on}))
+            if floating.shown_by_setting(self.state):
+                self._hide_floating()
+            else:
+                self._post(self._on_loop("update_prefs", {"floating_button": True}))
         elif key == "login":
             self._toggle_login()
         elif key == "quit":
@@ -1176,10 +1180,13 @@ class MacShell:
         return floating.panel_model(state, self.lang, now, shortcut=shortcut)
 
     def _sync_floating(self) -> None:
-        """Main thread, at each host state: show the floating button as the state says (or hide it)."""
+        """Main thread, at each host state: show the floating button as the state says (or hide it). Hidden by the
+        setting, it still shows a call suggestion or "Still in a meeting?" (:func:`.floating.wanted`): with the
+        window closed nothing else would."""
         if not self._launched:
             return
-        want = self._floating_test is not None or floating.wanted(self.state, quitting=self.quitting)
+        want = self._floating_test is not None or floating.wanted(self.state, quitting=self.quitting,
+                                                                  hidden_for=self._floating_hidden)
         if not want and self._floating is None:
             return
         if self._floating is None:
@@ -1215,7 +1222,15 @@ class MacShell:
         elif key == "settings":
             self.show_settings()
         elif key == "hide":
-            self._post(self._on_loop("update_prefs", {"floating_button": False}))
+            self._hide_floating()
+
+    def _hide_floating(self) -> None:
+        """Main thread: Hide Floating Button (its own menu, the menu bar's). The setting goes off, and the question
+        up now (if any) won't show it again: it would keep it up — or, the setting off already, it was up for that
+        question alone and nothing would change."""
+        self._floating_hidden = floating.question_key(self.state)
+        self._post(self._on_loop("update_prefs", {"floating_button": False}))
+        self._sync_floating()
 
     def _floating_moved(self, position: dict[str, Any]) -> None:
         """Main thread: you dragged the floating button somewhere: remembered for the next launch."""
