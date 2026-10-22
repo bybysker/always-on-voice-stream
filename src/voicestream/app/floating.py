@@ -526,6 +526,7 @@ class FloatingPanel:
         panel.setCanHide_(False)  # … and closing the window hides the app (NSApp hide:): not this panel
         panel.setBecomesKeyOnlyIfNeeded_(True)
         panel.setMovableByWindowBackground_(True)
+        panel.setAllowsToolTipsWhenApplicationIsInactive_(True)  # the icon-only buttons say what they do on hover
         panel.setOpaque_(False)
         panel.setBackgroundColor_(AppKit.NSColor.clearColor())
         panel.setHasShadow_(True)
