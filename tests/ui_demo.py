@@ -392,6 +392,7 @@ def main() -> int:
         setup = make(base / "setup", mp, setup_done=False, fresh=True, meeting_start="manual")
         apps.append(setup)
         _mac_features(setup)
+        setup.host.capabilities["login_item"] = True  # the Mac's: All set offers "Open Voicestream at login"
         # meetings started by hand, with what the Mac app has
         idle = make(base / "by-hand", mp, provider="anthropic", setup_done=True, meetings=True, meeting_start="manual")
         apps.append(idle)
@@ -413,11 +414,13 @@ def main() -> int:
         queued = make(base / "by-hand-next", mp, setup_done=True, meetings=True, meeting_start="manual")
         apps.append(queued)
         _mac_features(queued)
-        wrap_up_with_the_next_waiting(queued)
         unfinished = make(base / "by-hand-unfinished", mp, setup_done=True, meetings=True, meeting_start="manual")
         apps.append(unfinished)
         _mac_features(unfinished)
         ended_unfinished(unfinished)
+        # last: each app's hold on wrap-ups wraps the summary for the whole process, so once this one holds
+        # its wrap-up, the sample meetings of an app made after it could not be imported
+        wrap_up_with_the_next_waiting(queued)
         if lang:  # on each app's own loop, as Settings would change it
             for app in apps:
                 assert app.host.loop is not None

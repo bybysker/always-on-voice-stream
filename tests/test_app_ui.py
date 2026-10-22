@@ -226,7 +226,9 @@ class UIApp:
 
     def _hold_wrap_ups(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A meeting's wrap-up (state ``stopping``) lasts while :attr:`wrap_gate` is cleared, as a long
-        summary does: held before the summary, after the transcript is in."""
+        summary does: held before the summary, after the transcript is in. The summary is patched for the
+        whole process, so while it is cleared every app's summaries wait (one app a test; the demo holds
+        last)."""
         from voicestream import session
 
         gate, summarize = self.wrap_gate, session.summarize
@@ -1948,10 +1950,12 @@ def test_setup_step_how_you_start_a_meeting(make_app: Callable[..., UIApp], open
     pg.keyboard.press("Control+Alt+KeyK")
     expect(pg.locator("#setup-shortcut-keys")).to_have_text("⌃⌥K")
     pg.click("label[for=setup-spotlight]")
-    # automatically: its own switch instead, and back: the choices made are kept
+    # automatically: its own switch as well, the ways of starting one by hand still there (they work in
+    # both) but not the shortcut, and back: the choices made are kept
     pg.get_by_label("Automatically", exact=True).check()
     expect(pg.locator("#setup-launch")).to_be_visible()
-    expect(pg.locator("#setup-floating")).to_have_count(0)
+    expect(pg.locator("#setup-floating")).to_be_checked()
+    expect(pg.locator("#setup-shortcut-change")).to_have_count(0)
     pg.get_by_label("When you start them (recommended)", exact=True).check()
     expect(pg.locator("#setup-spotlight")).not_to_be_checked()
     pg.click("#setup-next")
