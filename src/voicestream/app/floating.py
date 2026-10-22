@@ -3,9 +3,10 @@
 It is an ``NSPanel`` that never takes the focus: borderless and non-activating (clicking it leaves the
 app you are typing in active, with your cursor where it was), at the floating window level, on every
 Space and next to full-screen apps (``canJoinAllSpaces`` + ``fullScreenAuxiliary``), not hidden when
-Voicestream isn't the active app. It is moved by dragging its background, its symbol or its text; where you leave it is
-remembered (``prefs.floating_position``: the frame's origin and the screen's name) and kept on a
-screen when displays come and go. Its own context menu hides it, opens Voicestream or its Settings.
+Voicestream isn't the active app. It is moved by dragging its background, its symbol or its text;
+where you leave it is remembered (``prefs.floating_position``: the frame's origin and the screen's
+name) and kept on a screen when displays come and go. Its own context menu hides it, opens
+Voicestream or its Settings.
 Hidden, it still appears for a call suggestion, "Still in a meeting?" or a meeting that ended by itself
 (with the window closed nothing else shows them), with that look alone, until it is answered.
 
