@@ -541,15 +541,16 @@ async def test_a_start_while_the_last_meeting_is_wrapped_up_waits_for_it(tmp_pat
         await built[-1]._route(seg("I'll send the deck to Sam by Friday.", "mic", t=1.0))
         gate.clear()
         assert await host.meeting_stop() == "stop" and host.status == "stopping"
-        assert host.meeting_action("start") == "start" and host.meeting_action("toggle") == "start"
+        # (the shortcut, this soon after the Stop, is part of it: see the next test)
+        assert host.meeting_action("start") == "start" and host.meeting_action("toggle") == "stop"
         waiting = asyncio.ensure_future(start())
         await asyncio.sleep(0.2)
         assert not waiting.done() and host.status == "stopping"
         return waiting
 
     try:
-        first = await stopped_with_a_start_waiting(host.meeting_toggle)
-        again = asyncio.ensure_future(host.open_url(host.launcher_url()))  # pressed again (Spotlight): one start
+        first = await stopped_with_a_start_waiting(lambda: host.open_url(host.launcher_url()))  # Spotlight
+        again = asyncio.ensure_future(host.meeting_toggle())  # and the shortcut too: the same start
         await asyncio.sleep(0.1)
         assert host.meeting_action("toggle") == "start" and not again.done() and len(built) == 1
         gate.set()  # the last meeting's notes are written: the next one starts
@@ -585,16 +586,6 @@ async def test_a_start_while_the_last_meeting_is_wrapped_up_waits_for_it(tmp_pat
         gate.set()
         assert await again == "start" and host.in_meeting() and len(built) == 5
 
-        # two presses of the shortcut in a row while recording: the second comes before the stop says so
-        await built[-1]._route(seg("Last point.", "mic", t=1.0))
-        gate.clear()
-        stop, start = asyncio.ensure_future(host.meeting_toggle()), asyncio.ensure_future(host.meeting_toggle())
-        assert await stop == "stop"
-        await asyncio.sleep(0.1)
-        assert host.status == "stopping" and not start.done()
-        gate.set()
-        assert await start == "start" and host.in_meeting() and len(built) == 6
-
         # quitting while a start waits: nothing starts
         await built[-1]._route(seg("One more thing.", "mic", t=1.0))
         gate.clear()
@@ -605,7 +596,71 @@ async def test_a_start_while_the_last_meeting_is_wrapped_up_waits_for_it(tmp_pat
         await asyncio.sleep(0.1)
         gate.set()
         await quitting
-        assert await waiting == "cancelled" and len(built) == 6 and host.assistant is None
+        assert await waiting == "cancelled" and len(built) == 5 and host.assistant is None
+    finally:
+        gate.set()
+        await host.shutdown()
+
+
+async def test_the_shortcut_pressed_twice_to_stop_is_one_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shortcut pressed twice while recording (a double press, a key that bounced): the second press comes
+    during the wrap-up the first one began, where a press starts the next meeting once the notes are written.
+    Within DOUBLE_PRESS_S of that Stop it is part of it: it says "stop", and no recording begins minutes later
+    by itself. Later in the wrap-up it is the next meeting's start, as before; and an explicit Start (the window,
+    the floating button, a meeting/start link, a call suggestion) always is one."""
+    monkeypatch.setattr(host_mod, "DOUBLE_PRESS_S", 0.5)
+    gate = _slow_wrap_up(monkeypatch)
+    built: list[Assistant] = []
+    host = _manual(tmp_path, built=built)
+    toggle_link = host.launcher_url().replace("meeting/start", "meeting/toggle")
+
+    async def recording() -> None:
+        if not host.in_meeting():
+            assert await host.meeting_start() == "start"
+        await built[-1]._route(seg("I'll send the deck to Sam by Friday.", "mic", t=1.0))
+        gate.clear()
+
+    try:
+        await recording()
+        # on the same turn of the loop (before the state says "stopping"), and again once it does
+        first, second = asyncio.ensure_future(host.meeting_toggle()), asyncio.ensure_future(host.meeting_toggle())
+        assert [await first, await second] == ["stop", "stop"]
+        assert host.status == "stopping" and host.toggle_action() == "stop"
+        assert await host.meeting_toggle() == "stop" and await host.open_url(toggle_link) == "stop"
+        assert host.state()["start_queued"] is False
+        gate.set()
+        await _until(lambda: host.status == "stopped")
+        await asyncio.sleep(0.2)
+        assert host.status == "stopped" and len(built) == 1 and not host.in_meeting()
+
+        # pressed later in the wrap-up: the next meeting, once the notes are written
+        await recording()
+        assert await host.meeting_toggle() == "stop"
+        await asyncio.sleep(0.6)
+        assert host.status == "stopping" and host.toggle_action() == "start"
+        waiting = asyncio.ensure_future(host.meeting_toggle())
+        await asyncio.sleep(0.1)
+        assert not waiting.done() and host.state()["start_queued"] is True
+        gate.set()
+        assert await waiting == "start" and host.in_meeting() and len(built) == 3
+
+        # an explicit Start right after the Stop: a start (and the shortcut then is the same start)
+        await recording()
+        assert await host.meeting_toggle() == "stop"
+        assert host.meeting_action("start") == "start"
+        waiting = asyncio.ensure_future(host.meeting_start())
+        await asyncio.sleep(0.1)
+        assert host.state()["start_queued"] is True and host.toggle_action() == "start"
+        gate.set()
+        assert await waiting == "start" and host.in_meeting() and len(built) == 4
+
+        # the menu's Stop pressed twice, while the Stop isn't under way yet: one stop
+        await recording()
+        stops = [asyncio.ensure_future(host.meeting_stop()) for _ in range(2)]
+        assert [await t for t in stops] == ["stop", "stop"]
+        gate.set()
+        await _until(lambda: host.status == "stopped")
+        assert len(built) == 4 and len(_events(host, "meeting.ended")) == 4
     finally:
         gate.set()
         await host.shutdown()

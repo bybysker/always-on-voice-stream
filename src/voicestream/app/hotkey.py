@@ -46,7 +46,8 @@ DEFAULT_CODE, DEFAULT_MODS = "KeyR", ("alt", "cmd")  # ⌥⌘R: R for record
 
 TOGGLE = {"stopped": "start", "error": "restart", "listening": "stop", "paused": "resume"}
 """What a press does in each state (:meth:`voicestream.app.host.AppHost.meeting_toggle`); starting, it
-does nothing, and stopping, it starts the next meeting once the last one is wrapped up."""
+does nothing, and stopping, it starts the next meeting once the last one is wrapped up (unless it comes right
+after the Stop that began that wrap-up: then it is part of it, see ``host.DOUBLE_PRESS_S``)."""
 
 # ------------------------------------------------------------------ the keys
 

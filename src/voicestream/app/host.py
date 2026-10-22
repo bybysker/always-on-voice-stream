@@ -131,6 +131,10 @@ START = {"stopped": "start", "error": "restart", "paused": "resume"}
 """What starting a meeting does in each state (:meth:`AppHost.meeting_start`): after a problem, a restart
 as Start does then; paused, Resume. Starting or listening, nothing: one is recorded or about to be. While
 the last one is wrapped up (stopping), the start waits for it (see :meth:`AppHost.meeting_action`)."""
+DOUBLE_PRESS_S = 2.0
+"""The keyboard shortcut (or a toggle link) pressed again this soon after the Stop that began the wrap-up under
+way is part of that Stop — a double press, a key that bounced — not a start of the next meeting once the notes
+are written, which would begin a recording minutes later by itself. An explicit Start always is one."""
 STOPPABLE = frozenset({"starting", "listening", "paused", "error"})
 """The states :meth:`AppHost.meeting_stop` stops (an error: Stop dismisses it, and stops what still runs)."""
 CALL_MEMORY_S = 4 * 3600.0
@@ -432,6 +436,8 @@ class AppHost:
         is done, unless Stop, Stop now, quitting or a switch to manual takes it back first (:meth:`_start_after_stop`,
         :meth:`_take_back_start`). The state says so (``start_queued``)."""
         self._queued_start: asyncio.Task[bool] | None = None
+        self._stop_pressed_at: float | None = None
+        """When (:func:`time.monotonic`) the Stop that began the wrap-up under way was pressed (see :data:`DOUBLE_PRESS_S`)."""
         self._queued_after: asyncio.Task[Any] | None = None
         """The Stop the start waiting for the wrap-up waits for first (pressed just before it, not under way yet)."""
         self._status_changed = asyncio.Event()
@@ -639,6 +645,8 @@ class AppHost:
 
     def _set_status(self, status: State, error: str | None = None) -> None:
         self.status, self.error = status, error
+        if status in ("stopped", "error", "starting"):
+            self._stop_pressed_at = None  # the wrap-up that Stop began is over: a press now is no double press
         self._status_changed.set()
         self._publish_state()
 
@@ -1045,14 +1053,17 @@ class AppHost:
 
     def meeting_action(self, what: Literal["start", "stop", "toggle"] = "toggle") -> MeetingAction | None:
         """What :meth:`meeting_start`, :meth:`meeting_stop` or :meth:`meeting_toggle` would do now, or
-        ``None``: nothing to do, or nothing while listening starts and once the app is quitting. A start
-        pressed while the previous one is still being carried out (the gap before the state says so) is
-        the same start, and says how it went with it: answered with nothing, the shell would play its
-        failure sound for a press followed by a recording. While the last meeting is being wrapped up
-        (``stopping``), a start waits for it (:meth:`_start_after_stop`): its microphone is closed already,
-        but the summary, pushes and agents can take minutes, and back-to-back meetings mustn't lose the
-        next one's start. A stop is never held back by a start under way: Stop must always be able to end
-        a recording, or take back a start that waits."""
+        ``None``: nothing to do, or nothing while listening starts and once the app is quitting.
+
+        A start pressed while the previous one is still being carried out (the gap before the state says
+        so), or while one waits for a wrap-up, is that same start and says how it went with it: answered
+        with nothing, the shell would play its failure sound for a press followed by a recording. While the
+        last meeting is being wrapped up (``stopping``), a start waits for it (:meth:`_start_after_stop`):
+        its microphone is closed already, but the summary, pushes and agents can take minutes, and
+        back-to-back meetings mustn't lose the next one's start — except a toggle (the shortcut) within
+        :data:`DOUBLE_PRESS_S` of the Stop that began that wrap-up, which is part of that Stop. A stop is
+        never held back by a start under way: Stop must always be able to end a recording, or take back a
+        start that waits."""
         if self._closing:
             return None
         if what == "stop":
@@ -1060,7 +1071,7 @@ class AppHost:
         if self._toggling is not None and not self._toggling.done() and self._toggled != "stop":
             return self._toggled  # a start, restart or resume under way (or waiting for a wrap-up): joined
         if self._start_waits():
-            return "start"
+            return "stop" if what == "toggle" and self._pressed_again() else "start"
         return (TOGGLE if what == "toggle" else START).get(self.status)  # type: ignore[return-value]
 
     def _start_waits(self) -> bool:
@@ -1068,6 +1079,11 @@ class AppHost:
         the state doesn't say so yet), or a start waits for one already."""
         busy = self._toggling is not None and not self._toggling.done()
         return self._start_queued or self.status == "stopping" or (busy and self._toggled == "stop")
+
+    def _pressed_again(self) -> bool:
+        """A press now comes within :data:`DOUBLE_PRESS_S` of the Stop that began the wrap-up under way."""
+        at = self._stop_pressed_at
+        return at is not None and time.monotonic() - at < DOUBLE_PRESS_S
 
     def toggle_action(self) -> str | None:
         """What a press of the keyboard shortcut does now (:data:`.hotkey.TOGGLE`): :meth:`meeting_action`."""
@@ -1082,15 +1098,20 @@ class AppHost:
         it worked. ``cancelled`` for a start that waited and was taken back (:meth:`_take_back_start`)."""
         if action is None:
             return None
-        if action != "stop" and self._toggling is not None and not self._toggling.done() and self._toggled == action:
-            return await self._outcome(self._toggling, action)  # pressed again while it is carried out
-        if action == "start" and self._start_waits():
+        under_way = self._toggling if self._toggling is not None and not self._toggling.done() else None
+        if action == "stop":
+            if self._take_back_start():
+                # what this Stop stops is the start waiting for the wrap-up under way, which goes on as it was
+                # (the notes are written in full); a restart under way stays stopped, as after any Stop
+                self._stop_pressed = True
+                return action
+            if self.status == "stopping" or (under_way is not None and self._toggled == "stop"):
+                return action  # pressed again (the shortcut twice): part of the Stop under way
+            self._stop_pressed_at = time.monotonic()
+        elif under_way is not None and self._toggled == action:
+            return await self._outcome(under_way, action)  # pressed again while it is carried out
+        elif action == "start" and self._start_waits():
             return await self._queue_start()
-        if action == "stop" and self._take_back_start():
-            # what this Stop stops is the start waiting for the wrap-up under way, which goes on as it was
-            # (the notes are written in full); a restart under way stays stopped, as after any Stop
-            self._stop_pressed = True
-            return action
         run = {"start": self.listen_start, "restart": self.listen_restart, "stop": self.listen_stop,
                "resume": self.listen_resume}[action]  # fmt: skip
         task = self._toggling = asyncio.ensure_future(run())
