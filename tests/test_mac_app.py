@@ -1610,6 +1610,7 @@ def test_menu_bar_starts_from_a_fresh_state(host: FakeHost, monkeypatch: pytest.
     monkeypatch.setattr(shell, "apply_state", lambda st: applied.append(st["state"]))
     shell._start_menu_bar()
     assert applied == ["listening"]
+    assert _wait(lambda: ("listen_on_launch", None) in host.calls)  # done before the host's loop is stopped
 
 
 def test_half_installed_native_mode_falls_back_to_the_browser(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
