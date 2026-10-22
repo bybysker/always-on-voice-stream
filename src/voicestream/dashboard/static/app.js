@@ -846,7 +846,7 @@ function notice(kind, iconName, msg, ...actions) {
  *  meeting that ended by itself. Inline, never a dialog: nothing takes the focus from what you are doing.
  *  A notice already on show is kept as it is (a screen reader hears it once, a focused button stays). */
 function renderNotices() {
-  const box = $('notices');
+  const box = noticesBox();
   if (!box) return;
   const out = [];  // [key, make]
   if (S.authFailed) {
@@ -877,6 +877,30 @@ function renderNotices() {
 }
 
 const NOTICE_KINDS = ['ended_after_silence', 'link_refused'];
+
+let NOTICES = null;
+/** The shell's notices, kept by reference: in a meeting they are part of Live's view (placeNotices). */
+function noticesBox() { return NOTICES || (NOTICES = $('notices')); }
+
+/** In a meeting on Live, the shell's banners come under its title and controls, as Live's own warnings
+ *  do (attachLive): one that comes or goes by itself ("Still in a meeting?" goes as soon as someone
+ *  speaks) moves the panes, never Pause or Stop away from a pointer on its way to them, nor End meeting
+ *  under it. Everywhere else, above the screen. */
+function placeNotices() {
+  const box = noticesBox();
+  if (!box) return;
+  const inMeeting = S.route.name === 'live' && !S.setup && LV.root && LV.meeting && LV.meeting.parentNode === LV.root;
+  if (inMeeting) {
+    if (box.previousElementSibling !== LV.head) LV.head.after(box);
+  } else {
+    homeNotices();
+  }
+}
+
+function homeNotices() {
+  const box = noticesBox(), main = $('main');
+  if (box && main && box.nextElementSibling !== main) main.before(box);
+}
 
 /** "Call detected in Zoom. Start notes for this call?": Start meeting / Not now. Never a start by itself. */
 function suggestionBanner(s) {
@@ -943,6 +967,7 @@ function go(hash) {
 function navigate(focus) {
   const prev = S.route;
   S.route = parseRoute();
+  placeNotices();  // out of Live's meeting before the screens not on show are emptied
   for (const name of SCREENS) {
     const screen = $('screen-' + name);
     screen.hidden = name !== S.route.name;
@@ -1004,7 +1029,7 @@ function tick() {
     if (now - p.at > 10000) { S.live.partials.delete(src); stale = true; }
   }
   if (stale) renderPartials();
-  if (S.conn !== 'live' && deadSince && now - deadSince > 3000 && !$('notices').querySelector(`[data-key="${LANG}|conn"]`)) renderNotices();
+  if (S.conn !== 'live' && deadSince && now - deadSince > 3000 && !noticesBox().querySelector(`[data-key="${LANG}|conn"]`)) renderNotices();
 }
 
 // ======================================================================= item cards
@@ -1326,6 +1351,7 @@ const liveCtx = {
 
 function buildLive() {
   const root = $('screen-live');
+  homeNotices();  // in the meeting being replaced: kept, not emptied with it
   LV.root = root;
   LV.notices = h('div', { class: 'live-notices', id: 'live-notices' });
 
@@ -1366,7 +1392,7 @@ function buildLive() {
   LV.clockTime = h('span', { class: 'num rec-time', role: 'timer', 'aria-label': t('live.clock_label') });
   LV.clock = h('div', { class: 'rec-clock', id: 'rec-clock' }, h('span', { class: 'rec-dot', 'aria-hidden': 'true' }), LV.clockTime);
   LV.controls = h('div', { class: 'live-actions', id: 'meeting-controls' });
-  const head = h('div', { class: 'live-head' },
+  const head = LV.head = h('div', { class: 'live-head' },
     h('div', { class: 'title' }, LV.title,
       h('div', { class: 'sub' }, LV.elapsed, LV.elapsedSep, LV.subText, LV.pausedPill), LV.meterSlot),
     h('div', { class: 'live-side' }, LV.clock, LV.controls, LV.end));
@@ -1409,13 +1435,18 @@ function buildLive() {
 }
 
 /** Only Live's view on show is in the page (the other keeps following the meeting meanwhile), and only
- *  while Live is the screen on show, not under the setup: a hidden title is not the page's title. */
+ *  while Live is the screen on show, not under the setup: a hidden title is not the page's title. Live's
+ *  warnings lead between meetings; in a meeting they come under its controls (see placeNotices). */
 function attachLive(inMeeting) {
-  if (S.route.name !== 'live' || S.setup) return;
+  if (S.route.name !== 'live' || S.setup) return placeNotices();
   const view = inMeeting ? LV.meeting : LV.idle;
-  if (LV.notices.parentNode === LV.root && view.parentNode === LV.root && LV.root.children.length === 2) return;
-  fill(LV.root, LV.notices, view);
-  if (inMeeting) stick();
+  if (inMeeting && LV.notices.previousElementSibling !== LV.head) LV.head.after(LV.notices);
+  const want = inMeeting ? [view] : [LV.notices, view];
+  if (LV.root.children.length !== want.length || want.some((el, i) => LV.root.children[i] !== el)) {
+    fill(LV.root, ...want);
+    if (inMeeting) stick();
+  }
+  placeNotices();
 }
 
 function inMeetingView() {
@@ -4099,6 +4130,7 @@ function openSetup(forced = false) {
   const linked = STEPS.indexOf((/^#\/setup\/(\w+)$/.exec(location.hash) || [])[1]);
   if (linked > 0) S.setup.step = linked;
   $('shell').hidden = true;
+  homeNotices();  // not emptied with Live's meeting
   for (const name of SCREENS) $('screen-' + name).replaceChildren();  // drawn again when the setup closes
   $('setup').hidden = false;
   document.body.classList.add('in-setup');

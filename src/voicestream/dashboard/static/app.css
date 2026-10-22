@@ -366,6 +366,9 @@ main { flex: 1; outline: none; }
 
 /* ---------------------------------------------------------------- notices */
 #notices:not(:empty) { padding: 20px 40px 0; display: flex; flex-direction: column; gap: 8px; }
+/* in a meeting, under its title and controls (app.js placeNotices): the panes make room, not Pause and Stop */
+.live-meeting > #notices:not(:empty) { padding: 0; }
+.live-meeting > #notices:empty { display: none; }
 .notice {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 10px 14px; border-radius: var(--radius-card);

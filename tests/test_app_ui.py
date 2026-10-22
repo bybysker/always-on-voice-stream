@@ -2139,6 +2139,59 @@ def test_space_scrolls_live_and_never_starts_a_meeting(make_app: Callable[..., U
     assert host.in_meeting()
 
 
+def test_banners_in_a_meeting_never_move_its_controls(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """In a meeting, what comes and goes by itself ("Still in a meeting?", which speech takes away; a
+    warning; new settings waiting) shows under the meeting's title and controls: Pause and Stop stay
+    where the pointer is going, and End meeting never slides under it."""
+    from playwright.sync_api import expect
+
+    from voicestream.app.native import WINDOW_SIZE
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    _mac_features(app)
+    p = open_page(app, size=WINDOW_SIZE)
+    pg = p.page
+    host, loop = app.host, app.host.loop
+    assert loop is not None
+    pg.click("#live-start")
+    _wait_state(app, "listening")
+    app.say("Bonjour, on fait le point sur le budget.")
+    expect(pg.locator("#lines .seg")).to_have_count(1)
+    where = "() => ['#live-pause', '#live-stop', '#rec-clock', '#meeting-heading'].map((s) => { " \
+            "const r = document.querySelector(s).getBoundingClientRect(); return [s, Math.round(r.x), Math.round(r.y)]; })"
+    before = pg.evaluate(where)
+
+    def still() -> None:
+        a = host.assistant
+        assert a is not None and a.current is not None
+        host.bus.publish("meeting.still_there", meeting_id=a.current.meeting.id, silent_minutes=16,
+                         ends_at=(datetime.now().astimezone() + timedelta(minutes=44)).isoformat())
+
+    loop.call_soon_threadsafe(still)
+    nudge = pg.locator("#notices .notice", has_text="Still in a meeting?")
+    expect(nudge).to_be_visible()
+    assert pg.evaluate(where) == before
+    assert nudge.bounding_box()["y"] >= pg.locator("#live-stop").bounding_box()["y"] + 36  # under the controls
+    p.shot("live-manual-still-there")
+    loop.call_soon_threadsafe(lambda: (host.add_warning("Meeting audio isn't coming through: check Settings → Audio"),
+                                       host._publish_state()))
+    expect(pg.locator("#live-notices .notice")).to_be_visible()
+    assert pg.evaluate(where) == before
+    app.say("Oui, toujours là.")  # someone speaks: the question goes by itself
+    expect(nudge).to_have_count(0)
+    assert pg.evaluate(where) == before
+
+    # elsewhere the shell's banners are back above the screen, and in the next meeting under its controls
+    pg.click("nav a[href='#/settings']")
+    loop.call_soon_threadsafe(still)
+    expect(pg.locator(".frame > #notices .notice", has_text="Still in a meeting?")).to_be_visible()
+    pg.click("nav a[href='#/live']")
+    expect(pg.locator(".live-meeting > #notices .notice", has_text="Still in a meeting?")).to_be_visible()
+    pg.click("#still-end")
+    _wait_state(app, "stopped")
+    expect(pg.locator(".frame > #notices")).to_have_count(1)
+
+
 def test_google_bridge_script_route(tmp_path: Path) -> None:
     """Settings → Your tools → Google copies the bridge script from the app (needs the token)."""
     from test_app_host import _factory, _write_config
