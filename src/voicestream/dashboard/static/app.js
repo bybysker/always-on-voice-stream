@@ -3600,6 +3600,12 @@ function discardSettings() {
   redrawSection();
 }
 
+/** Take out of a draft what a save sent: a field typed in again while the save was on its way keeps
+ *  its new value, still to be saved. */
+function forgetSaved(draft, sent) {
+  for (const k of Object.keys(sent)) if (draft[k] === sent[k]) delete draft[k];
+}
+
 const STT_KEYS = ['transcription.backend', 'transcription.whisper_cpp.model'];
 
 /** A speech-to-text choice whose model isn't downloaded yet, taken out of ``changes``: sent now, it
@@ -3647,6 +3653,7 @@ async function saveSettings() {
   }
   const changes = { ...S.draft };
   const prefs = { ...S.prefsDraft };
+  const sent = { ...changes };  // as typed, before the hold below takes a model still to download out
   const held = holdUntilDownloaded(changes);
   S.saving = true;
   S.saveError = null;
@@ -3664,12 +3671,12 @@ async function saveSettings() {
         if (m && m[1] in prefs) err.body = { field: 'pref:' + m[1], error: m[2] };
         throw err;
       });
-      S.prefsDraft = {};
+      forgetSaved(S.prefsDraft, prefs);
       setApp({ ...S.app, prefs: { ...S.app.prefs, ...saved }, mode: saved.meeting_start || S.app.mode });
       if (saved.meeting_start && saved.meeting_start !== 'automatic') S.startAfterDownload = null;  // by hand from now on
     }
     if (Object.keys(changes).length) res = await api('PATCH', '/api/settings', { changes });
-    S.draft = {};
+    forgetSaved(S.draft, sent);
     S.fieldErrors = {};
     await Promise.all([loadSettings(), loadModels()]);
   } catch (err) {

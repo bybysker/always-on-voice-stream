@@ -2372,6 +2372,42 @@ def test_still_in_a_meeting_is_asked_before_the_meeting_ends(make_app: Callable[
                                "n’est jamais posée. Pour ne jamais la poser, mettez-y 0.")
 
 
+def test_what_is_typed_while_a_save_is_on_its_way_stays_to_be_saved(make_app: Callable[..., UIApp],
+                                                                     open_page: Callable[..., Page]) -> None:
+    """Save sent, then a field typed in again before its answer comes: the answer takes out of the draft
+    only what it saved, so the new value stays on screen, still to be saved, instead of being dropped."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    _mac_features(app)
+    p = open_page(app)
+    pg = p.page
+    host = app.host
+    pg.goto(app.url + "#/settings/general/starting")
+    pg.locator('#boot').wait_for(state='hidden')
+    # the page's answers to PATCH /api/prefs wait until the test lets them through
+    pg.evaluate("""() => {
+      window.__held = new Promise((r) => { window.__release = r; });
+      const send = window.fetch;
+      window.fetch = async (url, opts) => {
+        const res = await send(url, opts);
+        if (String(url).includes('/api/prefs') && opts && opts.method === 'PATCH') await window.__held;
+        return res;
+      };
+    }""")
+    ask = pg.locator("#p-silence_ask_minutes")
+    ask.fill("20")
+    pg.click("#save-settings")
+    _wait(lambda: host.prefs.silence_ask_minutes == 20)  # saved; the page doesn't know yet
+    ask.fill("25")
+    pg.evaluate("window.__release()")
+    expect(pg.locator("#savebar .msg")).to_have_text("You have unsaved changes.")
+    expect(ask).to_have_value("25")
+    pg.click("#save-settings")
+    _wait(lambda: host.prefs.silence_ask_minutes == 25)
+    expect(pg.locator("#savebar")).to_be_hidden()
+
+
 def test_a_wrong_silence_left_behind_by_a_switch_to_automatic_is_dropped(make_app: Callable[..., UIApp],
                                                                          open_page: Callable[..., Page]) -> None:
     """Minutes typed wrong, then Automatically picked: the silence fields are gone from the screen, so
