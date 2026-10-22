@@ -306,7 +306,8 @@ async def test_the_notice_says_the_notes_are_being_written_until_they_are(tmp_pa
                                                                           monkeypatch: pytest.MonkeyPatch) -> None:
     """Ended after an hour without speech: the wrap-up (summary, pushes) takes a while, and until it says
     whether there are notes the notice says they are being written (``pending``), not that nothing had been
-    said; it says so once it is known, also when nothing was said, or when the wrap-up never says it."""
+    said; it says so once it is known, also when nothing was said. A wrap-up that never says it (it failed, or
+    was cut short) leaves it ``unfinished``: whether anything was said isn't known, so it must not say nothing was."""
     gate = _slow_wrap_up(monkeypatch)
     wall = Wall()
     built: list[Assistant] = []
@@ -324,11 +325,13 @@ async def test_the_notice_says_the_notes_are_being_written_until_they_are(tmp_pa
         await _until(lambda: host.status == "stopped")
         notice = host.state()["notice"]
         assert notice["pending"] is False and notice["folder"] == list_sessions(host.cfg.data_path)[-1].name
+        assert notice["unfinished"] is False
 
         await host.meeting_start()  # nothing said this time: no notes, once that is known
         wall.advance(61)
         await _until(lambda: host.status == "stopped" and host.notice is not None)
-        assert host.state()["notice"]["pending"] is False and host.state()["notice"]["folder"] is None
+        notice = host.state()["notice"]
+        assert notice["pending"] is False and notice["folder"] is None and notice["unfinished"] is False
 
         # a wrap-up that fails (a full disk) never says it is done: the notice doesn't stay "being written"
         await host.meeting_start()
@@ -340,7 +343,9 @@ async def test_the_notice_says_the_notes_are_being_written_until_they_are(tmp_pa
         monkeypatch.setattr(built[-1].current.store, "save", full)
         wall.advance(61)
         await _until(lambda: host.status == "error")
-        assert host.state()["notice"]["pending"] is False and not _events(host, "meeting.ended")[2:]
+        notice = host.state()["notice"]
+        assert notice["pending"] is False and notice["unfinished"] is True and notice["folder"] is None
+        assert not _events(host, "meeting.ended")[2:]
     finally:
         gate.set()
         await host.shutdown()

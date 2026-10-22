@@ -445,7 +445,7 @@ class AppHost:
         """Something the person should know happened by itself (``kind``: ``ended_after_silence``,
         ``link_refused``), until dismissed or the next meeting starts. ``ended_after_silence`` is ``pending``
         while the meeting's notes are being written, then says where they are (``title``, ``folder``: none
-        when nothing was said)."""
+        when nothing was said) — or, when its wrap-up failed or was cut short, ``unfinished``."""
         self.wall: Callable[[], float] = time.time
         """The clock the calls already suggested are remembered on (tests replace it)."""
         self.status: State = "stopped"
@@ -749,7 +749,7 @@ class AppHost:
             # pending: its notes are being written (meeting.ended says whether there are any, and where)
             self.notice = {"kind": "ended_after_silence", "meeting_id": ev.data.get("meeting_id"),
                            "minutes": round(a.end_after_s / 60), "at": utcnow().isoformat(), "title": None,
-                           "folder": None, "pending": True}  # fmt: skip
+                           "folder": None, "pending": True, "unfinished": False}  # fmt: skip
         if not self._stop_requested and not self._closing:
             self.track(asyncio.ensure_future(self.listen_stop()))
         else:
@@ -926,12 +926,14 @@ class AppHost:
     def _settle_notice(self, assistant: Assistant) -> bool:
         """``assistant`` is over, however it ended: a notice still saying one of its meetings' notes are being
         written (``pending``) stops saying so — that wrap-up never said it was done (cut short by a forced
-        stop, failed) and won't now. Returns whether it did."""
+        stop, failed) and won't now. It is ``unfinished`` then: with no ``meeting.ended``, whether anything
+        had been said isn't known, and its missing folder must not read as "nothing was said". Returns
+        whether it did."""
         note = self.notice
         ids = {s.meeting.id for s in [assistant.current, *assistant.finished_meetings] if s is not None}
         if note is None or not note.get("pending") or note.get("meeting_id") not in ids:
             return False
-        note["pending"] = False
+        note.update(pending=False, unfinished=True)
         return True
 
     async def listen_pause(self) -> None:
