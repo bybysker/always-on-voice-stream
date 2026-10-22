@@ -861,7 +861,8 @@ function renderNotices() {
     if (still) out.push(['still|' + still.meeting_id + '|' + still.silent_minutes + '|' + (still.ends_at || ''), () => stillThereBanner(still)]);
     // drawn again when it changes, the notes being written included (an empty meeting's folder stays empty)
     if (n && NOTICE_KINDS.includes(n.kind)) {
-      out.push(['notice|' + n.kind + '|' + (n.at || '') + '|' + (n.pending === true ? 'p' : '') + '|' + (n.folder || '') + '|' + (n.title || ''),
+      const how = n.pending === true ? 'p' : n.unfinished === true ? 'u' : '';
+      out.push(['notice|' + n.kind + '|' + (n.at || '') + '|' + how + '|' + (n.folder || '') + '|' + (n.title || ''),
         () => appNoticeBanner(n)]);
     }
   }
@@ -926,8 +927,8 @@ function stillThereBanner(s) {
 }
 
 /** Something that happened by itself and should be known: the meeting ended after a long silence (its
- *  notes are being written, then ready, or there were none), or a link asked to record without
- *  Voicestream's key. OK puts it away. */
+ *  notes are being written, then ready, or there were none — or its wrap-up never finished, cut short
+ *  or failed, and nobody knows), or a link asked to record without Voicestream's key. OK puts it away. */
 function appNoticeBanner(n) {
   const ok = btn(t('common.ok'), { cls: 'small', id: 'notice-ok', onclick: (e) => answer('notice/dismiss', e.currentTarget) });
   if (n.kind === 'link_refused') {
@@ -935,12 +936,14 @@ function appNoticeBanner(n) {
       h('div', { class: 'notice-actions' }, ok));
   }
   const mins = fmtNum(n.minutes || 0);
-  // until the meeting is wrapped up nobody knows whether it has notes: not "nothing was said" meanwhile
-  const writing = n.pending === true;
-  const text = writing ? t('notice.silence_writing', { n: mins }) : !n.folder ? t('notice.silence_empty', { n: mins })
+  // until the meeting is wrapped up nobody knows whether it has notes: not "nothing was said" meanwhile,
+  // nor after a wrap-up that never said (unfinished): only that it ended
+  const writing = n.pending === true, unfinished = !writing && n.unfinished === true;
+  const text = writing ? t('notice.silence_writing', { n: mins }) : unfinished ? t('notice.silence_unfinished', { n: mins })
+    : !n.folder ? t('notice.silence_empty', { n: mins })
     : n.title ? t('notice.silence_text', { title: n.title, n: mins }) : t('notice.silence_untitled', { n: mins });
   // a link (it opens a screen), which also puts the notice away
-  const open = !writing && n.folder && h('a', { class: 'btn small ghost', id: 'notice-open', href: '#/meetings/' + enc(n.folder),
+  const open = !writing && !unfinished && n.folder && h('a', { class: 'btn small ghost', id: 'notice-open', href: '#/meetings/' + enc(n.folder),
     onclick: () => { answer('notice/dismiss', null); } }, t('live.open_notes'));
   return notice('info', 'checkCircle', h('span', {}, h('strong', {}, t('notice.silence_title')), ' ', text),
     h('div', { class: 'notice-actions' }, open, ok));
@@ -4940,6 +4943,7 @@ const STRINGS = {
     'notice.silence_untitled': 'It ended after {n}\u00a0min without speech: its notes are ready.',
     'notice.silence_empty': 'It ended after {n}\u00a0min without speech. Nothing had been said, so there are no notes.',
     'notice.silence_writing': 'It ended after {n}\u00a0min without speech: its notes are being written…',
+    'notice.silence_unfinished': 'It ended after {n}\u00a0min without speech.',
     'notice.link_title': 'A link was ignored.',
     'notice.link_text': 'Something asked Voicestream to start recording without its key, so nothing was recorded. To start a meeting, use this window, the menu bar or Spotlight.',
 
@@ -5430,6 +5434,7 @@ const STRINGS = {
     'notice.silence_untitled': 'Elle s’est terminée après {n}\u00a0min sans parole : ses notes sont prêtes.',
     'notice.silence_empty': 'Elle s’est terminée après {n}\u00a0min sans parole. Rien n’avait été dit, il n’y a donc pas de notes.',
     'notice.silence_writing': 'Elle s’est terminée après {n}\u00a0min sans parole : ses notes sont en cours de rédaction…',
+    'notice.silence_unfinished': 'Elle s’est terminée après {n}\u00a0min sans parole.',
     'notice.link_title': 'Un lien a été ignoré.',
     'notice.link_text': 'Quelque chose a demandé à Voicestream d’enregistrer sans sa clé : rien n’a été enregistré. Pour démarrer une réunion, utilisez cette fenêtre, la barre des menus ou Spotlight.',
 

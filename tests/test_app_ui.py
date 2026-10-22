@@ -2300,7 +2300,8 @@ def test_opening_the_app_again_keeps_what_you_were_typing(make_app: Callable[...
 def test_a_meeting_that_ended_by_itself_says_while_its_notes_are_written(make_app: Callable[..., UIApp],
                                                                          open_page: Callable[..., Page]) -> None:
     """A meeting that ended after a long silence is wrapped up before anyone knows whether it had notes:
-    meanwhile its banner says they are being written (no link yet), never that nothing was said."""
+    meanwhile its banner says they are being written (no link yet), never that nothing was said — nor
+    once a wrap-up that never finished (cut short, failed) is over: then it says only that it ended."""
     from playwright.sync_api import expect
 
     app = make_app(setup_done=True, meeting_start="manual", meetings=True)
@@ -2332,10 +2333,18 @@ def test_a_meeting_that_ended_by_itself_says_while_its_notes_are_written(make_ap
     expect(told).to_contain_text("Nothing had been said, so there are no notes.")
     notice()  # a notice from before the field: as it says
     expect(told).to_contain_text("Nothing had been said, so there are no notes.")
+    notice(pending=True)  # the next one, and its wrap-up is cut short: no meeting.ended to say either way
+    expect(told).to_contain_text("its notes are being written…")
+    notice(pending=False, unfinished=True)
+    expect(told).to_have_text(re.compile(r"The meeting ended by itself\. It ended after 60\smin without speech\.\s*OK$"))
+    expect(pg.locator("#notice-open")).to_have_count(0)
+    p.shot("banner-ended-after-silence-unfinished")
 
     pg.evaluate("applyLanguage('fr')")
+    fr = pg.locator("#notices .notice", has_text="La réunion s’est terminée d’elle-même.")
+    expect(fr).to_have_text(re.compile(r"La réunion s’est terminée d’elle-même\. Elle s’est terminée après 60\smin sans parole\.\s*OK$"))
     notice(pending=True)
-    expect(pg.locator("#notices .notice", has_text="La réunion s’est terminée d’elle-même.")).to_contain_text(
+    expect(fr).to_contain_text(
         "Elle s’est terminée après 60 min sans parole : ses notes sont en cours de rédaction…")
 
 
