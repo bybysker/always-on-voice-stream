@@ -58,7 +58,10 @@ class FakeHost:
         self.start_fails = False  # a press's start goes to the error state
 
     # --- the contract
-    def run_in_thread(self) -> str:
+    auto_listen: bool | None = None  # what run_in_thread was asked: listen at launch, or leave it to the shell
+
+    def run_in_thread(self, *, auto_listen: bool = True) -> str:
+        self.auto_listen = auto_listen
         if self.fail is not None:
             raise self.fail
         self.thread.start()
@@ -105,6 +108,10 @@ class FakeHost:
 
     async def listen_start(self) -> None:
         self.calls.append(("listen_start", None))
+
+    async def listen_on_launch(self) -> bool:
+        self.calls.append(("listen_on_launch", None))
+        return False
 
     async def listen_pause(self) -> None:
         self.calls.append(("listen_pause", None))
@@ -1012,7 +1019,9 @@ def test_the_delegate_is_in_place_before_the_window_opens(host: FakeHost, pyobjc
     ((name, (target, selector, notification, _obj)),) = pyobjc.center.calls
     assert (name, selector, notification, target.shell) == ("addObserver_selector_name_object_", "appWillTerminate:",
                                                           "NSApplicationWillTerminateNotification", shell)
-    assert host.calls == [("shutdown", False)]  # the run loop stopped without AppKit ending the process
+    # asked to listen as it launched (no link launched it), then stopped: the run loop ended without AppKit ending
+    # the process
+    assert _wait(lambda: host.calls == [("listen_on_launch", None), ("shutdown", False)])
 
 
 def test_a_failed_delegate_install_is_reported_and_quitting_still_works(
@@ -1582,6 +1591,7 @@ def test_app_location_problems(monkeypatch: pytest.MonkeyPatch, mac: None, tmp_p
 def test_menu_bar_starts_from_a_fresh_state(host: FakeHost, monkeypatch: pytest.MonkeyPatch) -> None:
     """Listening may start while the window opens: the menu bar reads the state again when it appears,
     and a failure to create the icon never takes the window down."""
+    host.thread.start()  # it also asks the host to listen at launch
     shell = _shell(host)
     shell.state = _state("stopped")
     host._state = _state("listening", minutes=1)
@@ -2201,3 +2211,27 @@ def test_the_native_capabilities(host: FakeHost, monkeypatch: pytest.MonkeyPatch
     caps = host.capabilities
     assert caps["native_window"] and caps["floating_button"] and caps["call_detection"]
     assert caps["spotlight"] is False  # the link needs the packaged app's Info.plist
+    # the shell says when to listen at launch: once it knows no link launched the app (see the test below)
+    assert host.auto_listen is False
+
+
+def test_listening_at_launch_waits_to_know_whether_a_link_launched_the_app(host: FakeHost, appkit: Recorder,
+                                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    """Automatic meetings with "Start listening when Voicestream opens": a voicestream:// link from any web page can
+    launch the app (Safari asks once, Slack or Notes don't), and listening must not start before the link is even
+    looked at — a keyless link may never start a recording. The shell asks the host to listen once the app has
+    launched (any link that launched it arrived by then), and only if none did; at login, or from the Dock, it
+    still listens (the host's listen_on_launch checks the settings)."""
+    host.thread.start()
+    monkeypatch.setattr(native.MacShell, "apply_state", lambda self, st: None)
+    shell = _shell(host)
+    shell._start_menu_bar()  # NSApp is running: no link came
+    assert _wait(lambda: ("listen_on_launch", None) in host.calls)
+    host.calls.clear()
+    linked = _shell(host)
+    host.url_outcome = "refused"
+    linked.open_url("voicestream://meeting/start")  # the link that launched it, delivered as the app finished launching
+    linked._start_menu_bar()
+    assert _wait(lambda: ("open_url", "voicestream://meeting/start") in host.calls)
+    time.sleep(0.1)
+    assert ("listen_on_launch", None) not in host.calls

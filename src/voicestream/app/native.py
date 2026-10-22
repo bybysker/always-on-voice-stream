@@ -50,7 +50,9 @@ and every way of starting and stopping goes through the host's meeting actions
   suggestion or "Still in a meeting?", which nothing else would show with the window closed;
 * ``voicestream://`` links (the Info.plist's CFBundleURLTypes): Launch Services sends them as a "get
   URL" Apple event, whose handler (registered before the run loop starts, for the link that launches
-  the app) hands them to the host's ``open_url``, which checks the key of the ones that may record;
+  the app) hands them to the host's ``open_url``, which checks the key of the ones that may record.
+  Listening at launch (automatic meetings) waits until the app has launched, and is skipped when a
+  link launched it: any web page can open one;
 * the Spotlight launcher (:mod:`.spotlight`), "Voicestream – New Meeting" in ~/Applications, written
   while its setting is on, which opens the keyed ``meeting/start`` link;
 * call suggestions (:mod:`.calls`): while nothing is recorded, a thread looks at whether another app
@@ -612,7 +614,9 @@ def run(host: launcher.Host, *, selftest: float | None = None, report_path: Path
         caps["spotlight"] = native_hooks.bundle_path() is not None
         caps["call_detection"] = calls.available()
     try:
-        url = host.run_in_thread()
+        # not listening at launch yet: a voicestream:// link from any web page can launch the app, and must not
+        # have started a recording before it is looked at — the shell asks once it knows (_start_menu_bar)
+        url = host.run_in_thread(auto_listen=False)
     except Exception as exc:  # noqa: BLE001
         log.exception("the app failed to start")
         if selftest is not None:
@@ -813,6 +817,16 @@ class MacShell:
         self._launched = True  # the keyboard shortcut is registered by the apply_state below
         # read again: listening may have started before the state listener was added
         self.apply_state(launcher.safe_state(self.host))
+        # NSApp is running, so finishLaunching has delivered the Apple event that launched the app, if any. A link
+        # did: it decides (a keyed meeting/start starts a meeting, anything else only opens the app) and listening
+        # never starts by itself. Otherwise (Finder, the Dock, a login item) as the settings say.
+        if self._urls == 0:
+            self._post(self._listen_on_launch())
+
+    async def _listen_on_launch(self) -> None:
+        listen = getattr(self.host, "listen_on_launch", None)
+        if listen is not None:
+            await listen()
 
     def _language(self) -> str:
         prefs = self.state.get("prefs") or {}
