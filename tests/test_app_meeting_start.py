@@ -453,12 +453,12 @@ async def test_an_automatic_meeting_is_over_as_soon_as_it_ends(tmp_path: Path, m
             else:
                 assert await host.end_meeting() == "end"
             ended = len(_events(host, "meeting.ended"))
-            await _until(lambda: len(_events(host, "meeting.ending")) > ended)
+            await _until(lambda n=ended: len(_events(host, "meeting.ending")) > n)
             await asyncio.sleep(0.1)
             assert len(_events(host, "meeting.ended")) == ended, split  # still being wrapped up…
             assert (seen[-1]["in_meeting"], seen[-1]["meeting"], seen[-1]["state"]) == (False, None, "listening"), split
             gate.set()
-            await _until(lambda: len(_events(host, "meeting.ended")) > ended)
+            await _until(lambda n=ended: len(_events(host, "meeting.ended")) > n)
     finally:
         gate.set()
         await host.shutdown()
