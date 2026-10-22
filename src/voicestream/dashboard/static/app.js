@@ -978,6 +978,8 @@ function navigate(focus) {
       (heading || main).setAttribute('tabindex', '-1');
       (heading || main).focus({ preventScroll: true });
     }
+  } else if (settingsAnchor()) {
+    focusSettingsAnchor();  // the window opened on that link
   }
 }
 
