@@ -972,7 +972,7 @@ function navigate(focus) {
     } else if (section) {
       section.focus({ preventScroll: true });  // moving along the sections: stay in the section list
     } else if (control) {
-      control.focus({ preventScroll: true });  // Live's one job: Return starts the meeting
+      focusLive(control);  // Live's one job: Return starts the meeting
     } else {
       const heading = $('screen-' + r.name).querySelector('h1');
       (heading || main).setAttribute('tabindex', '-1');
@@ -1444,7 +1444,7 @@ function renderLive() {
   const parked = LV.parked && document.activeElement === LV.heroTitle;
   if (((LV.view && LV.view !== view && lost) || parked) && S.route.name === 'live' && !S.setup) {
     const target = liveFocusTarget();
-    if (target && target !== document.activeElement) target.focus({ preventScroll: true });
+    if (target && target !== document.activeElement) focusLive(target);
     LV.parked = target === LV.heroTitle;
   }
   LV.view = view;
@@ -1463,6 +1463,26 @@ function liveFocusTarget() {
   return resume || LV.title;
 }
 
+/** Put the focus on Live's control (see liveFocusTarget). Start put there by the app, not reached with
+ *  Tab, takes Return but not Space: Live is a long page and Space is how one scrolls it, and a meeting
+ *  must not start because someone wanted to read further down. */
+let startParked = false;
+
+function focusLive(target) {
+  target.focus({ preventScroll: true });
+  startParked = target.id === 'live-start' && document.activeElement === target;
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Tab') startParked = false;  // moving through the controls: Start is then a button like any other
+  if (e.key !== ' ' || !startParked || e.target.id !== 'live-start' || e.altKey || e.ctrlKey || e.metaKey) return;
+  e.preventDefault();  // a button is pressed on Space's keyup only if its keydown went through
+  window.scrollBy(0, (e.shiftKey ? -1 : 1) * innerHeight * 0.85);
+}, true);
+document.addEventListener('pointerdown', () => { startParked = false; }, true);
+// a redraw that puts the focus back on a new Start (same id) keeps it parked; anywhere else, it is not
+document.addEventListener('focusin', (e) => { if (e.target.id !== 'live-start') startParked = false; });
+
 /** The app was opened again (from Spotlight, the Dock, its menu): Live, with its Start control in
  *  focus, unless a dialog is open, or the setup: what you were doing there stays as it is. */
 function focusStart() {
@@ -1473,7 +1493,7 @@ function focusStart() {
     return;
   }
   const target = liveFocusTarget() || $('primary');
-  if (target) target.focus({ preventScroll: true });
+  if (target) focusLive(target);
 }
 
 function renderLiveNotices() {
@@ -5780,7 +5800,7 @@ async function boot() {
     // the window opens on Live with Start meeting in focus: Return starts one (not under a finger: a
     // focused button there only draws a ring)
     const start = liveFocusTarget();
-    if (start && start.tagName === 'BUTTON' && !matchMedia('(pointer: coarse)').matches) start.focus({ preventScroll: true });
+    if (start && start.tagName === 'BUTTON' && !matchMedia('(pointer: coarse)').matches) focusLive(start);
   }
   connect();
   loadSettings().then(() => { if (S.route.name === 'live' && !S.setup) renderLive(); }).catch(() => { /* loaded again by Settings */ });

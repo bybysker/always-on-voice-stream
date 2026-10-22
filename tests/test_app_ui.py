@@ -2090,6 +2090,55 @@ def test_a_start_left_for_after_the_download_is_dropped_by_a_switch_to_by_hand(m
     download_ends("small")
 
 
+def test_space_scrolls_live_and_never_starts_a_meeting(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """Start meeting is in focus whenever Live opens (Return starts one), and Live is a long page: Space
+    scrolls it, as on any page, wherever the app put the focus on Start — the window opening, the
+    meeting just stopped, the app opened again. Reached with Tab, Start is a button like any other and
+    Space presses it."""
+    from playwright.sync_api import expect
+
+    from voicestream.app.native import WINDOW_SIZE
+
+    app = make_app(setup_done=True, meeting_start="manual", meetings=True)
+    _mac_features(app)
+    p = open_page(app, size=WINDOW_SIZE)
+    pg = p.page
+    host, loop = app.host, app.host.loop
+    assert loop is not None
+    start = pg.locator("#live-start")
+    expect(start).to_be_focused()
+    _wait(lambda: pg.evaluate("document.documentElement.scrollHeight > innerHeight + 200"))  # the meetings are in
+
+    def space_scrolls() -> None:
+        pg.evaluate("scrollTo(0, 0)")
+        pg.keyboard.press("Space")
+        _wait(lambda: pg.evaluate("scrollY") > 200)
+        pg.keyboard.press("Shift+Space")
+        _wait(lambda: pg.evaluate("scrollY") == 0)
+        pg.wait_for_timeout(300)
+        assert host.status == "stopped" and host.assistant is None, host.status
+        expect(start).to_be_focused()
+
+    space_scrolls()  # the window opened
+    pg.keyboard.press("Enter")  # Return still starts one
+    _wait_state(app, "listening")
+    pg.click("#live-stop")
+    _wait_state(app, "stopped")
+    expect(start).to_be_focused()
+    space_scrolls()  # the meeting just stopped
+    pg.click("nav a[href='#/costs']")
+    loop.call_soon_threadsafe(host.request_focus)
+    expect(start).to_be_focused()
+    space_scrolls()  # opened again
+
+    pg.keyboard.press("Shift+Tab")
+    pg.keyboard.press("Tab")
+    expect(start).to_be_focused()
+    pg.keyboard.press("Space")
+    _wait_state(app, "listening")
+    assert host.in_meeting()
+
+
 def test_google_bridge_script_route(tmp_path: Path) -> None:
     """Settings → Your tools → Google copies the bridge script from the app (needs the token)."""
     from test_app_host import _factory, _write_config
