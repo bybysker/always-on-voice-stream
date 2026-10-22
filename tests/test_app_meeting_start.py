@@ -1110,7 +1110,8 @@ def test_a_start_waiting_for_the_wrap_up_is_answered_at_once(client: TestClient,
         body = client.post("/api/suggestion/accept").json()
         assert (body["action"], body["state"], body["suggestion"]) == ("start", "stopping", None)
         gate.set()  # the notes are written: the start goes on
-        assert _wait(client, lambda s: s["in_meeting"])["state"] == "listening"
+        # the meeting opens while the state still says starting: wait for both
+        _wait(client, lambda s: s["in_meeting"] and s["state"] == "listening")
         client.post("/api/meeting/stop")
         _wait(client, lambda s: s["state"] == "stopped")
     finally:
