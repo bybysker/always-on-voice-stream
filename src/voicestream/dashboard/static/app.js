@@ -1447,7 +1447,9 @@ function buildLive() {
 function attachLive(inMeeting) {
   if (S.route.name !== 'live' || S.setup) return placeNotices();
   const view = inMeeting ? LV.meeting : LV.idle;
-  if (inMeeting && LV.notices.previousElementSibling !== LV.head) LV.head.after(LV.notices);
+  // moved in only when it isn't there yet: placeNotices puts the shell's banners between the two, and
+  // moving either on every render would take the focus off a banner's button and lose a click on it
+  if (inMeeting && LV.notices.parentNode !== LV.meeting) LV.head.after(LV.notices);
   const want = inMeeting ? [view] : [LV.notices, view];
   if (LV.root.children.length !== want.length || want.some((el, i) => LV.root.children[i] !== el)) {
     fill(LV.root, ...want);

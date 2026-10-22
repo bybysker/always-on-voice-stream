@@ -2210,6 +2210,57 @@ def test_banners_in_a_meeting_never_move_its_controls(make_app: Callable[..., UI
     expect(pg.locator(".frame > #notices")).to_have_count(1)
 
 
+def test_a_banner_in_a_meeting_keeps_its_focus_and_its_click_through_a_redraw(make_app: Callable[..., UIApp],
+                                                                              open_page: Callable[..., Page]) -> None:
+    """Live is drawn again on every change of the meeting (a title, to-dos, the state): "Still in a
+    meeting?" stays where it is meanwhile. Keep recording in focus stays in focus, so Return keeps the
+    meeting; a click begun before the meeting got its title still lands."""
+    from playwright.sync_api import expect
+
+    from voicestream.app.native import WINDOW_SIZE
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    _mac_features(app)
+    p = open_page(app, size=WINDOW_SIZE)
+    pg = p.page
+    host, loop = app.host, app.host.loop
+    assert loop is not None
+    pg.click("#live-start")
+    _wait_state(app, "listening")
+    app.say("Bonjour, on fait le point sur le budget.")
+    expect(pg.locator("#lines .seg")).to_have_count(1)
+    meeting_id = host.state()["meeting"]["id"]
+
+    def still() -> None:
+        host.bus.publish("meeting.still_there", meeting_id=meeting_id, silent_minutes=16,
+                         ends_at=(datetime.now().astimezone() + timedelta(minutes=44)).isoformat())
+
+    def titled(title: str) -> None:  # what Claude's to-dos do to the meeting, while the banner is up
+        loop.call_soon_threadsafe(lambda: host.bus.publish("meeting.updated", meeting_id=meeting_id, title=title))
+        expect(pg.locator("#meeting-heading")).to_have_text(title)
+
+    keep = pg.locator("#still-keep")
+    loop.call_soon_threadsafe(still)
+    expect(keep).to_be_visible()
+    keep.focus()
+    titled("Budget review")
+    expect(keep).to_be_focused()
+    pg.keyboard.press("Enter")
+    expect(keep).to_have_count(0)
+    assert host.still_there is None and host.in_meeting()
+
+    loop.call_soon_threadsafe(still)
+    expect(keep).to_be_visible()
+    box = keep.bounding_box()
+    assert box is not None
+    pg.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    pg.mouse.down()
+    titled("Budget review, Q4")
+    pg.mouse.up()
+    expect(keep).to_have_count(0)
+    assert host.still_there is None and host.in_meeting()
+
+
 def test_opening_the_app_again_keeps_what_you_were_typing(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
     """Opening the app again (the Dock, Spotlight, its menus) brings Live back with Start in focus —
     unless something is being typed: a to-do being corrected, or Settings changed and not saved yet.
