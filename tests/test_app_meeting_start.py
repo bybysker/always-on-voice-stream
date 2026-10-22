@@ -31,6 +31,7 @@ from voicestream.config import Config
 from voicestream.dashboard.server import TOKEN_HEADER, create_app
 from voicestream.models import AudioFrame, TranscriptSegment
 from voicestream.session import Assistant
+from voicestream.sinks.markdown import MarkdownConfig, MarkdownSink
 from voicestream.storage import list_sessions, load_meeting
 from voicestream.transcribe.base import Transcriber, TranscriptionError
 
@@ -643,12 +644,67 @@ async def test_switching_modes_applies_to_listening_in_progress(tmp_path: Path) 
     assert a.manual and host.in_meeting()
     host.update_prefs({"silence_ask_minutes": 5, "silence_end_minutes": 0})
     assert (a.ask_after_s, a.end_after_s) == (300.0, 0.0)
+    host.bus.publish("meeting.still_there", meeting_id=a.current.meeting.id, silent_minutes=5, ends_at=None)
+    await _until(lambda: host.still_there is not None)
     host.update_prefs({"meeting_start": "automatic"})  # during a meeting: it goes on…
     assert host.assistant is a and not a.manual and host.in_meeting()
+    # … and isn't asked about any more: an automatic meeting ends on its own silence, not on that limit
+    assert host.state()["still_there"] is None
     await a.end_meeting("manual")  # … and listening goes on after it, always-on
     assert host.status == "listening" and host.assistant is a and not host.in_meeting()
     host.update_prefs({"meeting_start": "manual"})
     await _until(lambda: host.status == "stopped")
+
+
+async def test_words_still_being_written_down_at_the_switch_to_manual_open_no_meeting(tmp_path: Path) -> None:
+    """Always-on listening, no meeting yet, someone talking: switched to "when I start one", listening stops,
+    and the words still being written down as the capture closes mustn't open a meeting nobody started."""
+    built: list[Assistant] = []
+
+    def make(host: AppHost) -> Assistant:
+        a = Assistant(host.cfg, sources=[IdleSource("mic")], transcriber_factory=lambda s: LastWords(), llm=None,
+                      sinks=[MarkdownSink(MarkdownConfig(), host.cfg)], bus=host.bus, costs=host.costs)
+        a.idle_poll_s = 0.05
+        built.append(a)
+        return a
+
+    host = _host(tmp_path, factory=make)  # automatic
+    await host.listen_start()
+    assert not host.in_meeting()
+    host.update_prefs({"meeting_start": "manual"})
+    await _until(lambda: host.status == "stopped" and host.assistant is None)
+    assert built[-1].finished_meetings == [] and list_sessions(host.cfg.data_path) == []
+    assert not _events(host, "meeting.started") and not _events(host, "segment")
+
+
+async def test_stop_works_while_a_start_is_under_way(tmp_path: Path) -> None:
+    """Start, then Stop at once (the floating button, the menu) while listening is still starting — a speech
+    service a few seconds away: Stop is never held back by the start, and nothing is recorded."""
+    base = _factory()
+
+    def slow(host: AppHost) -> Assistant:
+        a = base(host)
+        run = a.run
+
+        async def slow_run() -> None:
+            await asyncio.sleep(0.5)  # before "assistant.started": the start is still under way
+            await run()
+
+        a.run = slow_run  # type: ignore[method-assign]
+        return a
+
+    _prefs(tmp_path, "manual")
+    host = _host(tmp_path, factory=slow, mode="manual")
+    try:
+        start = asyncio.ensure_future(host.meeting_start())
+        await _until(lambda: host.status == "starting")
+        assert host._toggling is not None and not host._toggling.done()  # really in the middle of the start
+        assert host.meeting_action("stop") == "stop" and await host.meeting_stop() == "stop"
+        await start
+        await _until(lambda: host.status == "stopped" and host.assistant is None)
+        assert not host.in_meeting() and list_sessions(host.cfg.data_path) == []
+    finally:
+        await host.shutdown()
 
 
 async def test_a_restart_under_way_when_meetings_switch_to_manual_starts_nothing(tmp_path: Path) -> None:
