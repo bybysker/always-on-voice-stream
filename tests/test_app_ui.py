@@ -177,6 +177,9 @@ class UIApp:
                                                "meeting_start": meeting_start}), encoding="utf-8")
         self.dl_gate = threading.Event()
         self.dl_gate.set()
+        self.wrap_gate = threading.Event()  # cleared: a meeting's wrap-up holds before its summary
+        self.wrap_gate.set()
+        self._hold_wrap_ups(monkeypatch)
         self.reminders_checks: list[str] = []
         self.reminders_denied = False
         self._fake_downloads(monkeypatch)
@@ -215,10 +218,43 @@ class UIApp:
             return a
 
         self.host = AppHost(self.config_path, process_setup=False, prefs_path=self.prefs_path, assistant_factory=factory)
+        self._say_start_queued()
         self.url = self.host.run_in_thread()
         self.token = self.host.token
 
     # ------------------------------------------------------------------ fakes
+
+    def _hold_wrap_ups(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A meeting's wrap-up (state ``stopping``) lasts while :attr:`wrap_gate` is cleared, as a long
+        summary does: held before the summary, after the transcript is in."""
+        from voicestream import session
+
+        gate, summarize = self.wrap_gate, session.summarize
+
+        async def held(*args: Any, **kw: Any) -> Any:
+            while not gate.is_set():
+                await asyncio.sleep(0.05)
+            return await summarize(*args, **kw)
+
+        monkeypatch.setattr(session, "summarize", held)
+
+    def _say_start_queued(self) -> None:
+        """The app's state says whether a start waits for the last meeting's wrap-up (``start_queued``).
+        A host that doesn't say it yet gets it here from the start it holds, so the window can be shown it;
+        the host's own value wins once it has one."""
+        host = self.host
+        state = host.state
+        host.state = lambda: {"start_queued": host._start_queued, **state()}  # type: ignore[method-assign]
+
+    def queue_start(self) -> Any:
+        """A start pressed during a wrap-up, as from the shortcut or the floating button: it waits for that
+        wrap-up (contract C), and the app's state says so. Returns the press's future (what it did)."""
+        host = self.host
+        assert host.loop is not None and host.status == "stopping", host.status
+        pressed = host.call(host.meeting_start())
+        _wait(lambda: host._start_queued)
+        host.loop.call_soon_threadsafe(host._publish_state)  # a host that doesn't publish it yet
+        return pressed
 
     def _fake_downloads(self, monkeypatch: pytest.MonkeyPatch) -> None:
         gate = self.dl_gate
@@ -345,6 +381,7 @@ class UIApp:
             (spend / f"{day}.json").write_text(json.dumps({"day": day, "stt_usd": stt, "llm_usd": llm, "agents_usd": agents}))
 
     def close(self) -> None:
+        self.wrap_gate.set()  # a wrap-up held by the test ends as usual
         try:
             self.host.call(self.host.shutdown(force=True)).result(30)
         finally:
@@ -2063,6 +2100,80 @@ def test_a_start_waiting_for_the_speech_model_can_be_stopped_on_live(make_app: C
     expect(pg.locator(".toast", has_text="is ready")).to_be_visible(timeout=15000)
     pg.wait_for_timeout(500)  # well after the download's end, when a start still waiting would run
     assert app.host.status == "stopped" and app.host.assistant is None and not app.built
+
+
+def test_a_start_waiting_for_the_wrap_up_is_shown_on_live_and_can_be_cancelled(make_app: Callable[..., UIApp],
+                                                                               open_page: Callable[..., Page]) -> None:
+    """The shortcut (or the floating button) pressed while the last meeting is wrapped up: the next
+    meeting waits for its notes, then records. Live says so, in the meeting being wrapped up and on the
+    screen between meetings, with Cancel, which takes that start back at once (no question: nothing of it
+    is recorded yet) and leaves the wrap-up and Stop now as they are. Not cancelled, it records once the
+    notes are written, and the line goes."""
+    from playwright.sync_api import expect
+
+    from voicestream.app.native import WINDOW_SIZE
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    _mac_features(app)
+    p = open_page(app, size=WINDOW_SIZE)
+    pg = p.page
+    host = app.host
+    queued = pg.locator("#live-queued")
+    cancel = pg.locator("#live-queued-cancel")
+
+    def wrap_up_a_meeting() -> None:
+        pg.click("#live-start")
+        _wait_state(app, "listening")
+        app.say("Bonjour, on fait le point sur le budget.")
+        expect(pg.locator("#lines .seg").last).to_have_text(re.compile("budget"))
+        app.wrap_gate.clear()  # its summary takes a while
+        pg.click("#live-stop")
+        expect(pg.locator("#live-stop-now")).to_be_visible()
+        _wait_state(app, "stopping")
+
+    wrap_up_a_meeting()
+    expect(queued).to_be_empty()
+    pressed = app.queue_start()
+    expect(queued).to_have_text(re.compile(r"^The next meeting starts once these notes are written\.\s*Cancel$"))
+    expect(cancel).to_have_attribute("aria-label", "Cancel the next meeting")
+    expect(pg.locator("#live-stop-now")).to_be_visible()  # the wrap-up itself can still be cut short
+    p.shot("live-manual-stopping-next-queued")
+
+    pg.reload()  # opened during the wrap-up: the screen between meetings says it too
+    pg.locator("#boot").wait_for(state="hidden")
+    expect(pg.locator("#live-heading")).to_have_text("Wrapping up the meeting…")
+    expect(pg.locator("#live-text")).to_have_text("Writing its notes and sending the to-dos to your tools.")
+    expect(queued).to_contain_text("The next meeting starts once these notes are written.")
+    p.shot("live-manual-stopping-next-queued-idle")
+    pg.evaluate("applyLanguage('fr')")
+    expect(queued).to_have_text(re.compile(r"^La réunion suivante démarrera une fois ces notes rédigées\.\s*Annuler$"))
+    expect(cancel).to_have_attribute("aria-label", "Annuler la prochaine réunion")
+    expect(pg.locator("#live-text")).to_have_text("Rédaction des notes et envoi des tâches vers vos outils.")
+    pg.evaluate("applyLanguage('en')")
+
+    with pg.expect_response("**/api/meeting/stop") as answered:
+        cancel.click()
+    assert answered.value.json()["action"] == "stop" and answered.value.json()["start_queued"] is False
+    expect(queued).to_be_empty()
+    expect(pg.locator("#live-heading")).to_be_focused()  # not lost with the button
+    assert not pg.evaluate("$('ask').open")
+    assert host.status == "stopping" and not host._start_queued
+    expect(pg.locator("#live-stop-now")).to_be_visible()
+    app.wrap_gate.set()
+    _wait_state(app, "stopped")
+    assert pressed.result(10) in (None, "cancelled")  # taken back ("cancelled" once the host says so)
+    pg.wait_for_timeout(500)  # well after the wrap-up, when the start would have run
+    assert host.status == "stopped" and host.assistant is None and len(app.built) == 1
+    expect(pg.locator("#live-start")).to_have_text("Start meeting")
+
+    wrap_up_a_meeting()  # the next one, not cancelled: it records once the notes are written
+    pressed = app.queue_start()
+    expect(queued).to_contain_text("The next meeting starts once these notes are written.")
+    app.wrap_gate.set()
+    _wait_state(app, "listening")
+    assert pressed.result(10) == "start" and host.in_meeting()
+    expect(pg.locator("#live-stop")).to_be_visible()
+    expect(queued).to_be_empty()
 
 
 def test_a_start_left_for_after_the_download_is_dropped_by_a_switch_to_by_hand(make_app: Callable[..., UIApp],

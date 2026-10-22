@@ -1370,6 +1370,7 @@ function buildLive() {
   LV.heroText = h('p', { id: 'live-text' });
   LV.heroRow = h('div', { class: 'start-row', id: 'live-controls' });
   LV.modeLine = h('p', { class: 'mode-line', id: 'live-mode' });
+  LV.queuedIdle = h('div', { class: 'queued', id: 'live-queued', role: 'status' });
   LV.idleMeterSlot = h('div', { class: 'row' });
   // the shortcut and its "Choose a shortcut": one recorder kept across redraws (a redraw mid-recording
   // must not forget it is recording)
@@ -1382,7 +1383,7 @@ function buildLive() {
   LV.recent = h('section', { class: 'card recent', id: 'live-recent', 'aria-labelledby': 'recent-h' });
   LV.idle = h('div', { class: 'idle' },
     h('div', { class: 'hero' }, LV.heroIcon,
-      h('div', { class: 'grow' }, LV.heroTitle, LV.heroText, LV.idleMeterSlot, LV.heroRow, LV.modeLine)),
+      h('div', { class: 'grow' }, LV.heroTitle, LV.heroText, LV.idleMeterSlot, LV.heroRow, LV.queuedIdle, LV.modeLine)),
     LV.week, LV.lastCard, LV.recent);
 
   LV.title = h('h1', { id: 'meeting-heading', tabindex: '-1' });
@@ -1398,6 +1399,7 @@ function buildLive() {
   LV.extract = btn(t('live.extract_short'), { cls: 'small ghost', title: t('live.extract_help'), id: 'extract', onclick: (e) => extractNow(e.currentTarget) }, 'sparkle');
   LV.end = btn(t('live.end'), { cls: 'danger', id: 'end-meeting', onclick: (e) => endMeeting(e.currentTarget) }, 'stop');
   LV.ending = notice('info', 'clock', t('live.ending'));
+  LV.queuedMeeting = h('div', { class: 'queued', id: 'live-queued', role: 'status' });  // one view on show at a time
   // a meeting started by hand: its clock, then Pause or Resume and Stop, where the eye lands first
   LV.clockTime = h('span', { class: 'num rec-time', role: 'timer', 'aria-label': t('live.clock_label') });
   LV.clock = h('div', { class: 'rec-clock', id: 'rec-clock' }, h('span', { class: 'rec-dot', 'aria-hidden': 'true' }), LV.clockTime);
@@ -1432,7 +1434,7 @@ function buildLive() {
       h('div', { class: 'pane-tools' }, LV.extract, h('label', { for: 'live-show-dismissed' }, dismissed, t('items.show_dismissed')))),
     h('div', { class: 'scroll' }, LV.addForm, LV.board.el));
 
-  LV.meeting = h('div', { class: 'live-meeting' }, head, LV.ending, LV.voices.el, h('div', { class: 'panes' }, transcriptPane, itemsPane));
+  LV.meeting = h('div', { class: 'live-meeting' }, head, LV.ending, LV.queuedMeeting, LV.voices.el, h('div', { class: 'panes' }, transcriptPane, itemsPane));
   fill(root);  // renderLive puts in the view on show: between meetings, or the meeting
   for (const [kind, data] of S.live.segs) {
     LV.lines.append(kind === 'seg' ? segLine(data) : screenLine(data));
@@ -1599,6 +1601,25 @@ function renderLiveHead() {
   LV.ending.hidden = S.live.phase !== 'ending';
   LV.tEmpty.textContent = t('live.nothing_yet');
   if (manual) renderMeetingControls(st, elapsed);
+  renderQueued(LV.queuedMeeting);
+}
+
+/** A start pressed while the last meeting is wrapped up (the shortcut, the floating button, a link)
+ *  waits for that wrap-up, then records (``start_queued``): said where the wrap-up is shown, with
+ *  Cancel, which takes that start back as Stop does — no question, nothing of it is recorded yet.
+ *  Stop now stays as it is: it cuts the wrap-up itself short. The box is always there, empty when no
+ *  start waits, so a screen reader hears the line when it comes. */
+function renderQueued(el) {
+  const on = stateKey() === 'stopping' && Boolean(S.app && S.app.start_queued);
+  const sig = on ? LANG : '';
+  if (el.dataset.sig === sig) return;  // not under a press in progress
+  el.dataset.sig = sig;
+  const had = el.contains(document.activeElement);
+  fill(el, on ? h('div', { class: 'notice info' }, icon('record'), h('div', { class: 'msg' }, t('live.m.queued')),
+    btn(t('common.cancel'), { cls: 'small', id: 'live-queued-cancel', 'aria-label': t('live.m.queued_cancel_aria'),
+      onclick: (e) => meetingAction('stop', e.currentTarget) })) : null);
+  // taken back: the focus stays on this view (its title), not on the page's body
+  if (had && !on && el.isConnected) (inMeetingView() ? LV.title : LV.heroTitle).focus({ preventScroll: true });
 }
 
 /** A meeting started by hand: its clock, then Pause (Resume) and Stop, Stop filled while it records. */
@@ -1641,7 +1662,8 @@ function renderStartPanel(st) {
     starting: ['', t('live.m.starting'), t('live.idle.starting_text')],
     listening: ['listening', t('live.m.recording'), t('live.m.recording_text')],
     paused: ['paused', t('live.idle.paused'), t('live.m.paused_text')],
-    stopping: ['', t('live.m.stopping'), t('live.m.stopping_text')],
+    // "the next one can start in a moment", unless one waits for it already (renderQueued says so)
+    stopping: ['', t('live.m.stopping'), S.app.start_queued ? t('live.m.stopping_queued_text') : t('live.m.stopping_text')],
     error: ['error', t('live.idle.error'), t('live.m.error_text')],
   };
   const [cls, title, text] = views[st];
@@ -1678,6 +1700,7 @@ function renderStartPanel(st) {
     keepFocus(LV.heroRow, () => fill(LV.heroRow, ...parts, between && LV.shortcut.childElementCount ? LV.shortcut : null));
   }
   LV.heroRow.hidden = false;
+  renderQueued(LV.queuedIdle);
   if (between) setModeLine(t('live.mode.manual', { where: fmtList(startPlaces()) }));
   LV.modeLine.hidden = !between;
 }
@@ -5036,6 +5059,9 @@ const STRINGS = {
     'live.m.paused_text': 'Nothing is recorded until you click Resume.',
     'live.m.stopping': 'Wrapping up the meeting…',
     'live.m.stopping_text': 'Writing its notes and sending the to-dos to your tools. The next meeting can start in a moment.',
+    'live.m.stopping_queued_text': 'Writing its notes and sending the to-dos to your tools.',
+    'live.m.queued': 'The next meeting starts once these notes are written.',
+    'live.m.queued_cancel_aria': 'Cancel the next meeting',
     'live.m.error_text': 'See the message above to fix it, then click Try again.',
     'live.mode.manual': 'Meetings start only when you start one, from {where}.',
     'live.mode.automatic': 'Automatic mode: meetings start by themselves when someone speaks.',
@@ -5527,6 +5553,9 @@ const STRINGS = {
     'live.m.paused_text': 'Rien n’est enregistré tant que vous ne cliquez pas sur Reprendre.',
     'live.m.stopping': 'Finalisation de la réunion…',
     'live.m.stopping_text': 'Rédaction des notes et envoi des tâches vers vos outils. La réunion suivante pourra démarrer dans un instant.',
+    'live.m.stopping_queued_text': 'Rédaction des notes et envoi des tâches vers vos outils.',
+    'live.m.queued': 'La réunion suivante démarrera une fois ces notes rédigées.',
+    'live.m.queued_cancel_aria': 'Annuler la prochaine réunion',
     'live.m.error_text': 'Suivez le message ci-dessus pour corriger, puis cliquez sur Réessayer.',
     'live.mode.manual': 'Une réunion ne démarre que quand vous la lancez, depuis {where}.',
     'live.mode.automatic': 'Mode automatique : les réunions démarrent d’elles-mêmes dès que quelqu’un parle.',
