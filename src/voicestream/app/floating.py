@@ -126,6 +126,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ended_writing": "Meeting ended: its notes are being written…",
         "ended_writing_tip": "It ended after {minutes} min of silence. Its notes are being written.",
         "ended_empty_tip": "Nothing had been said, so there are no notes",
+        "ended_unfinished_tip": "It ended after {minutes} min without speech",
         "link_refused": "A link tried to start recording — ignored",
         "link_tip": "Only Voicestream's own launcher can start a meeting from a link",
         "ok": "OK",
@@ -169,6 +170,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ended_writing": "Réunion terminée : rédaction des notes…",
         "ended_writing_tip": "Elle s'est terminée après {minutes} min de silence. Ses notes sont en cours de rédaction.",
         "ended_empty_tip": "Rien n'avait été dit, il n'y a donc pas de notes",
+        "ended_unfinished_tip": "Elle s'est terminée après {minutes} min sans parole",
         "link_refused": "Un lien voulait enregistrer — ignoré",  # one line of the panel: « ignoré » must show
         "link_tip": "Seul le lanceur de Voicestream peut démarrer une réunion depuis un lien",
         "ok": "OK",
@@ -333,6 +335,11 @@ def panel_model(state: dict[str, Any], lang: str, now: datetime | None = None, *
         if notice.get("pending") is True:
             text, symbol = s["ended_writing"], "square.and.arrow.down"
             tooltip = s["ended_writing_tip"].format(minutes=minutes)
+        elif notice.get("unfinished") is True:
+            # settled without its meeting.ended (the wrap-up failed, or Stop now or a quit cut it short): whether
+            # anything was said, or saved, isn't known — only how it ended (no tick: it may not have gone well)
+            text, symbol = s["ended_silence"].format(minutes=minutes), "stop.circle"
+            tooltip = s["ended_unfinished_tip"].format(minutes=minutes)
         else:
             text, symbol = s["ended_silence"].format(minutes=minutes), "checkmark.circle"
             # written, and no folder: nothing had been said (only a host that says pending says that much)
@@ -403,6 +410,8 @@ def sample_states() -> dict[str, dict[str, Any]]:
         "still_there": {**base, **meeting, "state": "listening", "still_there": {"meeting_id": "m", "silent_minutes": 15}},
         "notice": {**base, "notice": {"kind": "ended_after_silence", "minutes": 60}},
         "notice_writing": {**base, "notice": {"kind": "ended_after_silence", "minutes": 60, "pending": True}},
+        "notice_unfinished": {**base, "notice": {"kind": "ended_after_silence", "minutes": 60, "pending": False,
+                                                 "unfinished": True}},
         "link_refused": {**base, "notice": {"kind": "link_refused"}},
         "error": {**base, "state": "error", "error": "Microphone permission is off: System Settings → Privacy & Security"},
     }

@@ -149,6 +149,30 @@ def test_a_meeting_that_ended_by_itself_says_its_notes_are_being_written() -> No
     assert (legacy.text, legacy.tooltip) == (done.text, done.tooltip)
 
 
+def test_a_wrap_up_that_did_not_finish_claims_nothing_about_the_notes() -> None:
+    """``unfinished``: the host settled the notice without its meeting.ended (the wrap-up failed or was cut short,
+    by Stop now or a quit), so there is no folder — for a meeting that may well have had speech. Neither "nothing
+    had been said" nor "its notes are saved" is known: only that it ended after so long without speech."""
+    cut = {"kind": "ended_after_silence", "minutes": 60, "pending": False, "unfinished": True, "title": None,
+           "folder": None}
+    for lang in ("en", "fr"):
+        m = floating.panel_model(_st(notice=cut), lang, NOW)
+        s = floating.STRINGS[lang]
+        assert m.kind == "notice" and _keys(m) == ["start", "ok"] and m.announce == m.text
+        assert m.text == s["ended_silence"].format(minutes=60)
+        assert m.tooltip not in (s["ended_empty_tip"], s["ended_tip"]) and "60 min" in m.tooltip
+        assert m.tooltip == s["ended_unfinished_tip"].format(minutes=60)
+        assert m.symbol != "checkmark.circle"  # a tick would say it all went well
+    assert floating.panel_model(_st(notice=cut), "en", NOW).tooltip == "It ended after 60 min without speech"
+    assert floating.panel_model(_st(notice=cut), "fr", NOW).tooltip == "Elle s'est terminée après 60 min sans parole"
+    # hidden by the setting, it still comes up for it (a meeting that ended by itself), with that wording
+    hidden = {**_st(notice={**cut, "at": "t", "meeting_id": "m1"}), "prefs": {"floating_button": False},
+              "capabilities": {"floating_button": True}}
+    assert floating.wanted(hidden) and floating.panel_model(hidden, "en", NOW).tooltip.startswith("It ended after 60")
+    # pending wins: still being written is still being written
+    assert floating.panel_model(_st(notice={**cut, "pending": True}), "en", NOW).text.endswith("being written…")
+
+
 def test_paused_shows_resume_even_with_a_nudge_up() -> None:
     """Paused, nothing is recorded and paused time isn't silence: Resume must be there, not Keep / End."""
     nudge = {"meeting_id": "m1", "silent_minutes": 16}
