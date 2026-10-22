@@ -155,7 +155,12 @@ step_dmg() {
     [[ $attempt == 3 ]] && fail "hdiutil create failed"
     sleep 5
   done
-  hdiutil verify "$dmg"
+  # right after create, diskimages-helper can still hold the image: "Resource temporarily unavailable"
+  for attempt in 1 2 3; do
+    hdiutil verify "$dmg" && break
+    [[ $attempt == 3 ]] && fail "hdiutil verify failed"
+    sleep 5
+  done
   du -h "$dmg"
   echo "$dmg"
 }
