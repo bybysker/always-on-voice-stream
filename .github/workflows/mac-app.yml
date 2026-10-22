@@ -2,7 +2,8 @@ name: mac app
 
 # Builds Voicestream.app on a real Apple Silicon Mac, tests the on-device speech-to-text with the
 # whisper-server it bundles (real model, speech made with `say`), launches the packaged app in
-# self-test mode (window, page, menu-bar icon, hide/reopen, keyboard shortcut, quit) and uploads the DMG. For a v*
+# self-test mode (window, page, menu-bar icon, hide/reopen, keyboard shortcut, floating button,
+# voicestream:// links, Spotlight launcher, microphone probe, quit) and uploads the DMG. For a v*
 # tag, or a manual run (Actions → mac app → Run workflow) given a release tag, it also publishes
 # the DMG as a GitHub release (the README's download link for people without a GitHub account).
 # Everything it runs is in packaging/mac/build.sh, so a Mac can do the same by hand.

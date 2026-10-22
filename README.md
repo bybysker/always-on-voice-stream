@@ -65,15 +65,24 @@ For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. No terminal 
    permission tests so macOS asks for **Microphone** and **System Audio Recording**. Allow both.
    If you keep **Apple Reminders** on, macOS then asks whether Voicestream may control Reminders:
    click **OK**, or your to-dos can't reach Reminders.
-5. Voicestream now lives in the menu bar (the microphone icon). Closing the window doesn't stop
-   it listening: click the icon → **Open Voicestream** to bring the window back, or **Quit
-   Voicestream** to stop. **Open at login** in the same menu starts it with your Mac.
-6. Press **⌥⌘R** (Option-Command-R) in any app, window open or not, to start or stop listening
-   (when paused, it resumes); a short sound says it worked, and a different one that listening
-   couldn't start. Stopping this way wraps the meeting up and writes its notes, like **Stop listening**.
+5. Voicestream now lives in the menu bar (the microphone icon), and records only once you start a
+   meeting: **Start meeting** in the window, **Start Meeting** in the menu-bar menu, the small
+   floating button that stays above your apps (drag it anywhere; Control-click it to hide it), or
+   Spotlight: press ⌘Space, type "voicestream" and choose **Voicestream – New Meeting**. **Stop**
+   wraps the meeting up, writes its notes and lets go of the microphone. After 15 minutes without
+   speech the floating button asks **Still in a meeting?** (**Keep** or **End**); after 60 the
+   meeting ends by itself. When another app starts a call (Zoom, Teams, FaceTime, Meet…), the
+   floating button offers **Call detected — start notes?**: nothing starts unless you click
+   **Start**. **Settings → General → Starting meetings** changes all this, or makes Voicestream
+   listen all the time again. Closing the window doesn't quit: click the icon → **Open
+   Voicestream** to bring it back, or **Quit Voicestream** to stop. **Open at Login** in the same
+   menu starts it with your Mac.
+6. Press **⌥⌘R** (Option-Command-R) in any app, window open or not, to start or stop a meeting
+   (when paused, it resumes); a short sound says it worked, and a different one that it couldn't
+   start. Stopping this way wraps the meeting up and writes its notes, like **Stop Meeting**.
    Change the shortcut, turn it off or mute the sound in **Settings → General → Keyboard shortcut**
-   (it needs no extra permission); the menu-bar menu shows it next to **Start listening** (**Resume
-   listening** when paused). In Safari ⌥⌘R also reloads a page: pick another shortcut if you use that.
+   (it needs no extra permission); the menu-bar menu shows it next to **Start Meeting** (**Resume
+   Meeting** when paused). In Safari ⌥⌘R also reloads a page: pick another shortcut if you use that.
 
 **After an update**, install the new DMG the same way (step 3 again). macOS ties permissions to
 each build of an app that isn't notarized, so they may have to be granted again, even when System
@@ -112,16 +121,25 @@ Pour un Mac Apple Silicon (M1 ou plus récent) sous macOS 14.2 ou plus. Aucun te
    **Micro** et à l'**Enregistrement audio du système**. Autorisez les deux. Si vous gardez
    **Rappels Apple**, macOS demande ensuite si Voicestream peut contrôler Rappels : cliquez sur
    **OK**, sinon vos tâches ne pourront pas y arriver.
-5. Voicestream vit ensuite dans la barre des menus (l'icône de micro). Fermer la fenêtre ne coupe
-   pas l'écoute : cliquez sur l'icône → **Ouvrir Voicestream** pour retrouver la fenêtre, ou
-   **Quitter Voicestream** pour arrêter. **Ouvrir à la connexion**, dans le même menu, le lance
-   avec votre Mac.
+5. Voicestream vit ensuite dans la barre des menus (l'icône de micro) et n'enregistre qu'une fois
+   une réunion démarrée : **Démarrer une réunion** dans la fenêtre ou dans le menu de la barre des
+   menus, le petit bouton flottant qui reste au-dessus de vos apps (déplacez-le où vous voulez ;
+   Contrôle-clic pour le masquer), ou Spotlight : ⌘Espace, tapez « voicestream » et choisissez
+   **Voicestream – Nouvelle réunion**. **Arrêter** clôture la réunion, rédige ses notes et libère le
+   micro. Après 15 minutes sans parole, le bouton flottant demande **Toujours en réunion ?**
+   (**Continuer** ou **Terminer**) ; après 60, la réunion se termine d'elle-même. Quand une autre
+   app démarre un appel (Zoom, Teams, FaceTime, Meet…), le bouton flottant propose **Appel détecté —
+   prendre des notes ?** : rien ne démarre sans que vous cliquiez sur **Démarrer**. **Réglages →
+   Général → Démarrer les réunions** permet de tout changer, ou de revenir à l'écoute permanente.
+   Fermer la fenêtre ne quitte pas l'app : cliquez sur l'icône → **Ouvrir Voicestream** pour la
+   retrouver, ou **Quitter Voicestream** pour arrêter. **Ouvrir à la connexion**, dans le même
+   menu, le lance avec votre Mac.
 6. Appuyez sur **⌥⌘R** (Option-Commande-R) dans n'importe quelle app, fenêtre ouverte ou non, pour
-   démarrer ou arrêter l'écoute (en pause, il la reprend) ; un petit son le confirme, un autre
-   signale que l'écoute n'a pas pu démarrer. Arrêter ainsi clôture la réunion et rédige ses notes,
-   comme **Arrêter l'écoute**. Modifiez le raccourci, désactivez-le ou coupez le son dans **Réglages
-   → Général → Raccourci clavier** (aucune autorisation supplémentaire) ; le menu de la barre des
-   menus l'affiche à côté de **Démarrer l'écoute** (de **Reprendre l'écoute** en pause). Dans
+   démarrer ou arrêter une réunion (en pause, il la reprend) ; un petit son le confirme, un autre
+   signale qu'elle n'a pas pu démarrer. Arrêter ainsi clôture la réunion et rédige ses notes, comme
+   **Arrêter la réunion**. Modifiez le raccourci, désactivez-le ou coupez le son dans **Réglages →
+   Général → Raccourci clavier** (aucune autorisation supplémentaire) ; le menu de la barre des
+   menus l'affiche à côté de **Démarrer une réunion** (de **Reprendre la réunion** en pause). Dans
    Safari, ⌥⌘R recharge aussi la page : choisissez un autre raccourci si vous vous en servez.
 
 **Après une mise à jour**, installez le nouveau DMG de la même façon (étape 3 à refaire). macOS
