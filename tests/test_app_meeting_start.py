@@ -930,6 +930,36 @@ async def test_a_call_is_suggested_once_and_never_starts_anything(tmp_path: Path
     assert host.state()["suggestion"] is None and not host.suggest_meeting("Google Meet")
 
 
+async def test_start_on_a_suggestion_during_a_wrap_up_takes_it_down_at_once(tmp_path: Path,
+                                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    """A call begins while the last meeting is wrapped up, and you press Start on its suggestion: the start waits
+    for the wrap-up, but the suggestion goes away at once wherever it is shown — the floating button and the
+    window show what is published, and a "Not now" left there would do nothing while the recording still starts."""
+    gate = _slow_wrap_up(monkeypatch)
+    built: list[Assistant] = []
+    host = _manual(tmp_path, built=built, setup_done=True)
+    seen: list[dict[str, Any]] = []
+    host.add_state_listener(seen.append)
+    try:
+        await host.meeting_start()
+        await built[-1]._route(seg("I'll send the deck to Sam by Friday.", "mic", t=1.0))
+        assert await host.meeting_stop() == "stop" and host.status == "stopping"
+        await _until(lambda: bool(_events(host, "meeting.ending")))
+        await asyncio.sleep(0.1)  # the wrap-up is at its summary: nothing else is published until it is done
+        assert host.suggest_meeting("zoom.us") and seen[-1]["suggestion"]["app"] == "zoom.us"
+        accept = asyncio.ensure_future(host.suggestion_accept())
+        await asyncio.sleep(0.2)
+        assert not accept.done() and host.status == "stopping"
+        assert seen[-1]["suggestion"] is None and seen[-1]["state"] == "stopping"
+        gate.set()  # the notes are written: the start you asked for goes on
+        assert await accept == "start" and host.in_meeting() and len(built) == 2
+        await host.meeting_stop()
+        await _until(lambda: host.status == "stopped")
+    finally:
+        gate.set()
+        await host.shutdown()
+
+
 def test_no_suggestion_before_the_setup_is_done(tmp_path: Path) -> None:
     host = _manual(tmp_path)
     assert not host.prefs.setup_done and host.suggest_meeting("zoom.us") is False

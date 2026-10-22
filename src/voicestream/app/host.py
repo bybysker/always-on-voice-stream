@@ -1222,11 +1222,11 @@ class AppHost:
     async def suggestion_accept(self) -> MeetingAction | None:
         """"Start" on the suggestion: :meth:`meeting_start` (also when it was taken down meanwhile: starting
         is what was asked)."""
-        self._withdraw_suggestion()
-        action = await self.meeting_start()
-        if action is None:
-            self._publish_state()  # nothing started (one is recorded already): the suggestion still goes away
-        return action
+        if self._withdraw_suggestion():
+            # said before the start, which may wait minutes for the last meeting's wrap-up: a suggestion still
+            # shown meanwhile would offer a "Not now" that takes back nothing
+            self._publish_state()
+        return await self.meeting_start()
 
     def suggestion_dismiss(self) -> bool:
         """(On the loop.) "Not now": the suggestion goes away; this call isn't suggested again."""
