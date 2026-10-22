@@ -37,7 +37,10 @@ def _keys(model: PanelModel) -> list[str]:
 
 def test_idle_shows_start_meeting() -> None:
     m = floating.panel_model(_st(), "en", NOW)
-    assert m.kind == "idle" and _keys(m) == ["start"] and not m.text and not m.symbol
+    assert m.kind == "idle" and _keys(m) == ["start"] and not m.text
+    # a mark to drag it by: otherwise only an 8-point rim moves it, and grabbing the button starts a meeting
+    assert (m.symbol, m.tint, m.symbol_label) == ("waveform", "secondary", "")  # decorative: VoiceOver skips it
+    assert floating.panel_model(_st(mode="automatic"), "en", NOW).symbol == "waveform"
     start = m.buttons[0]
     assert (start.title, start.symbol, start.tint, start.icon_only) == ("Start meeting", "record.circle", "red", False)
     assert start.tooltip == "Start a meeting: Voicestream records until you stop it"
@@ -523,6 +526,10 @@ def test_the_panel_never_takes_the_focus_and_floats_on_every_space(appkit: Any) 
     for b in p._buttons:
         assert b.acceptsFirstMouse_(None) is True  # the first click acts: the panel is never key
     assert p._views["text"].mouseDownCanMoveWindow() is True  # dragged by its labels too
+    # … and by its symbol (an NSImageView is a control: it wouldn't move the window by itself), shown when idle
+    icon = p._views["icon"]
+    assert icon.mouseDownCanMoveWindow() is True and icon.values["hidden"] is False
+    assert icon.values["image"] is p._images[("waveform", "", 15.0)] and icon.values["accessibilityElement"] is False
 
 
 def test_the_panel_follows_the_state(appkit: Any) -> None:

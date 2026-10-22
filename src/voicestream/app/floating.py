@@ -3,7 +3,7 @@
 It is an ``NSPanel`` that never takes the focus: borderless and non-activating (clicking it leaves the
 app you are typing in active, with your cursor where it was), at the floating window level, on every
 Space and next to full-screen apps (``canJoinAllSpaces`` + ``fullScreenAuxiliary``), not hidden when
-Voicestream isn't the active app. It is moved by dragging its background; where you leave it is
+Voicestream isn't the active app. It is moved by dragging its background, its symbol or its text; where you leave it is
 remembered (``prefs.floating_position``: the frame's origin and the screen's name) and kept on a
 screen when displays come and go. Its own context menu hides it, opens Voicestream or its Settings.
 Hidden, it still appears for a call suggestion, "Still in a meeting?" or a meeting that ended by itself
@@ -14,7 +14,7 @@ AppKit's own controls: a vibrant HUD background (``NSVisualEffectView``) and sem
 reads in light and dark mode; SF Symbols; push buttons at least 28 points tall (the HIG's minimum
 pointer target on a Mac), each with a VoiceOver label and a tooltip:
 
-* idle: Start meeting (Start listening when meetings start automatically);
+* idle: the app's mark, to drag it by, and Start meeting (Start listening when meetings start automatically);
 * recording: a red dot that breathes (still, with Reduce Motion on), the time since the meeting
   started, Pause / Resume and Stop;
 * a call another app started: "Call detected — start notes?" with Start and Not now;
@@ -380,7 +380,9 @@ def panel_model(state: dict[str, Any], lang: str, now: datetime | None = None, *
         return PanelModel("error", s["problem"], "exclamationmark.triangle.fill", "yellow", tooltip=_short(state.get("error")),
                           buttons=(PanelButton("show", s["show"], s["show"]),
                                    PanelButton("retry", s["retry"], s["retry"], tooltip=tip(s["retry"]))))
-    return PanelModel("idle", buttons=(start,))
+    # the app's mark at the leading edge, something to drag it by (12 + 18 + 8 points): without it only an 8-point
+    # rim around Start moves the panel, and grabbing the button itself starts a meeting
+    return PanelModel("idle", symbol="waveform", buttons=(start,))
 
 
 def sample_states() -> dict[str, dict[str, Any]]:
@@ -482,7 +484,7 @@ _CLASSES: dict[str, Any] = {}
 def _classes() -> dict[str, Any]:
     if not _CLASSES:
         import objc
-        from AppKit import NSButton, NSTextField
+        from AppKit import NSButton, NSImageView, NSTextField
         from Foundation import NSObject
 
         class VoicestreamPanelButton(NSButton):
@@ -492,6 +494,10 @@ def _classes() -> dict[str, Any]:
 
         class VoicestreamPanelLabel(NSTextField):
             def mouseDownCanMoveWindow(self):  # the panel is dragged by its labels too
+                return True
+
+        class VoicestreamPanelImage(NSImageView):
+            def mouseDownCanMoveWindow(self):  # … and by its symbol: an image view is a control, which wouldn't
                 return True
 
         class VoicestreamPanelTarget(NSObject):
@@ -515,7 +521,8 @@ def _classes() -> dict[str, Any]:
             def savePosition_(self, timer):
                 _guard(self.panel.save_position)
 
-        _CLASSES.update(button=VoicestreamPanelButton, label=VoicestreamPanelLabel, target=VoicestreamPanelTarget)
+        _CLASSES.update(button=VoicestreamPanelButton, label=VoicestreamPanelLabel, image=VoicestreamPanelImage,
+                        target=VoicestreamPanelTarget)
     return _CLASSES
 
 
@@ -620,7 +627,7 @@ class FloatingPanel:
             layer.setCornerCurve_("continuous")
         panel.setContentView_(effect)
 
-        icon = AppKit.NSImageView.alloc().initWithFrame_(((0.0, 0.0), (18.0, 18.0)))
+        icon = cls["image"].alloc().initWithFrame_(((0.0, 0.0), (18.0, 18.0)))
         text = cls["label"].labelWithString_("")
         text.setLineBreakMode_(TRUNCATE_TAIL)
         text.setMaximumNumberOfLines_(1)
