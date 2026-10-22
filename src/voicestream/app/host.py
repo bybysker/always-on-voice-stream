@@ -704,6 +704,10 @@ class AppHost:
             self.notice = None  # what ended the last one is old news
             self._publish_state()
         elif ev.type in ("assistant.paused", "assistant.resumed"):
+            if ev.type == "assistant.paused":
+                # its "ends at" no longer holds (time on Pause doesn't count), and paused, the floating button
+                # must offer Resume, not Keep/End: asked again after Resume, with the time it ends then
+                self.still_there = None
             self._publish_state()
         elif ev.type == "meeting.still_there":
             a = self._assistant
@@ -1352,7 +1356,8 @@ class AppHost:
                     hook(bool(changes["start_at_login"]))
                 except Exception as exc:  # noqa: BLE001 - e.g. needs approval in System Settings
                     raise HostError(f"could not change launch at login: {exc}") from None
-        mode = self.prefs.meeting_start
+        old = self.prefs
+        mode = old.meeting_start
         self.prefs = update_prefs(changes, self.prefs_path, layout=self.keyboard_layout)
         if "hotkey" in changes:
             # the shell registers it when it sees this state (the same one again: it tries again, as
@@ -1361,15 +1366,23 @@ class AppHost:
             self._end_hotkey_recording()
         if not self.prefs.call_suggestions:
             self._withdraw_suggestion()
+        to_manual = mode != "manual" and self.prefs.meeting_start == "manual"
+        limits = (old.silence_ask_minutes, old.silence_end_minutes) != (self.prefs.silence_ask_minutes,
+                                                                        self.prefs.silence_end_minutes)
         a = self._assistant
         if a is not None and not self._stop_requested:
             # the new way (and silence thresholds) apply to the meeting in progress too: to manual, it
             # becomes the one this listening records; to automatic, listening goes on after it
             self._apply_mode(a)
+            if limits:
+                # "Still in a meeting?" said when the meeting ends by itself: asked again with the new limits
+                # (or the meeting ends, or nothing is asked), as they and the silence so far say
+                a.ask_again()
+                self.still_there = None
             if self.prefs.meeting_start != mode and a.manual and not self.in_meeting():
                 # nothing may be captured without a meeting started by hand: always-on listening stops
                 self.track(asyncio.ensure_future(self.listen_stop()))
-        elif a is None and self._start_when_ready and mode != "manual" and self.prefs.meeting_start == "manual":
+        elif a is None and self._start_when_ready and to_manual:
             # always-on listening was waiting for the speech model: once it is in, it would open a meeting
             # nobody started. The start is dropped (the download goes on); one pressed in manual mode waits on
             self._done_waiting()

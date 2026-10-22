@@ -666,6 +666,7 @@ class Assistant:
             return False
         self._paused = True
         self._paused_at = self.wall()
+        self.ask_again()  # its "ends at" won't hold: time on Pause doesn't count
         log.info("paused: nothing is recorded until resumed")
         self.bus.publish("assistant.paused")
         return True
@@ -1017,6 +1018,14 @@ class Assistant:
         cur.asked = False
         self.bus.publish("meeting.kept", meeting_id=cur.meeting.id)
         return True
+
+    def ask_again(self) -> None:
+        """"Still in a meeting?" was asked with an end time that no longer holds (a pause, new silence
+        limits): the next idle look asks again with a new one — or ends the meeting, or asks nothing, as
+        the silence and the limits now say. The question shown is taken down by whoever calls this."""
+        cur = self.current
+        if cur is not None and not cur.finished:
+            cur.asked = False
 
     async def _screen(self) -> None:
         try:

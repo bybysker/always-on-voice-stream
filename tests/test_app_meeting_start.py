@@ -8,7 +8,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Callable, Iterator
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -214,6 +214,55 @@ async def test_a_long_silence_asks_whether_you_are_still_in_the_meeting(tmp_path
     await host.meeting_stop()
     await _until(lambda: host.status == "stopped")
     assert host.state()["still_there"] is None and await host.meeting_keep() is False
+
+
+async def test_still_in_a_meeting_is_asked_again_after_a_pause_or_new_limits(tmp_path: Path,
+                                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """"Still in a meeting?" says when the meeting ends by itself. Paused, that no longer holds (time on Pause
+    doesn't count) and the floating button must offer Resume rather than Keep/End: the question goes away,
+    and after Resume it is asked again with a new end time. New silence limits likewise."""
+    wall = Wall()
+
+    def now() -> datetime:
+        return datetime.fromtimestamp(wall.t, UTC)
+
+    monkeypatch.setattr(session_mod, "utcnow", now)  # what "ends at" is computed on, moved with the wall clock
+    built: list[Assistant] = []
+    host = _manual(tmp_path, wall, built)  # ask after 15 min, end after 60
+    try:
+        await host.meeting_start()
+        a = built[0]
+        wall.advance(16)
+        await _until(lambda: host.still_there is not None)
+        assert datetime.fromisoformat(host.state()["still_there"]["ends_at"]) == now() + timedelta(minutes=44)
+        await host.listen_pause()
+        assert host.status == "paused" and host.state()["still_there"] is None and not a.current.asked
+        wall.advance(120)  # lunch
+        await asyncio.sleep(0.2)
+        assert host.state()["still_there"] is None and host.in_meeting()
+        await host.listen_resume()
+        await _until(lambda: host.still_there is not None)  # 16 min of silence, the pause not counted
+        nudge = host.state()["still_there"]
+        assert nudge["silent_minutes"] == 16 and datetime.fromisoformat(nudge["ends_at"]) == now() + timedelta(minutes=44)
+
+        host.update_prefs({"silence_end_minutes": 0})  # never ends by itself now
+        assert host.state()["still_there"] is None
+        await _until(lambda: host.still_there is not None)
+        assert host.state()["still_there"]["ends_at"] is None
+        host.update_prefs({"silence_end_minutes": 20})
+        await _until(lambda: host.still_there is not None and host.still_there["ends_at"] is not None)
+        assert datetime.fromisoformat(host.state()["still_there"]["ends_at"]) == now() + timedelta(minutes=4)
+        host.update_prefs({"silence_end_minutes": 20, "floating_button": False})  # the same limits: it stays
+        await asyncio.sleep(0.2)
+        assert host.state()["still_there"] is not None and len(_events(host, "meeting.still_there")) == 4
+        host.update_prefs({"silence_ask_minutes": 30, "silence_end_minutes": 60})  # not that long a silence any more
+        await asyncio.sleep(0.2)
+        assert host.state()["still_there"] is None and host.in_meeting() and len(_events(host, "meeting.still_there")) == 4
+        host.update_prefs({"silence_end_minutes": 10})  # shorter than the silence so far: it ends
+        await _until(lambda: host.status == "stopped")
+        assert [e["reason"] for e in _events(host, "meeting.ending")] == ["silence"]
+    finally:
+        await host.shutdown()
 
 
 async def test_an_hour_without_speech_ends_the_meeting_and_says_why(tmp_path: Path) -> None:
