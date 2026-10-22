@@ -2270,6 +2270,68 @@ def test_a_meeting_that_ended_by_itself_says_while_its_notes_are_written(make_ap
         "Elle s’est terminée après 60 min sans parole : ses notes sont en cours de rédaction…")
 
 
+RECORDING_LOOK = """() => {
+  const style = (html) => {
+    const box = document.createElement('div');
+    box.innerHTML = html;
+    document.body.append(box);
+    const el = box.querySelector('[data-probe]'), cs = getComputedStyle(el);
+    const out = [cs.backgroundColor, cs.borderTopColor + ' ' + cs.borderTopWidth];
+    box.remove();
+    return out;
+  };
+  return {
+    clock: style('<div class="rec-clock listening"><span class="rec-dot" data-probe></span></div>'),
+    pill: style('<div class="state st-listening"><span class="dot-state" data-probe></span></div>'),
+    nav: style('<nav class="nav"><a><span class="live-dot" data-probe></span></a></nav>'),
+    hero: style('<div class="hero-icon listening" data-probe></div>'),
+    list: style('<span class="pill"><span class="dot-state" data-probe></span></span>'),
+    connected: style('<span class="conn live"><span class="dot" data-probe></span></span>'),
+    error: style('<div class="rec-clock error"><span class="rec-dot" data-probe></span></div>'),
+    errorPill: style('<div class="state st-error"><span class="dot-state" data-probe></span></div>'),
+    token: getComputedStyle(document.documentElement).getPropertyValue('--recording').trim(),
+  };
+}"""
+
+
+@pytest.mark.parametrize("scheme", ["light", "dark"])
+def test_recording_has_one_colour_and_its_clock_says_what_it_counts(make_app: Callable[..., UIApp],
+                                                                    open_page: Callable[..., Page], scheme: str) -> None:
+    """Recording is one colour everywhere in the window, red as on the floating button and as macOS
+    has it, and never the green of "Connected"; a problem is not that same dot. The meeting's clock
+    counts the meeting, pauses included, and is named so; a meeting stopped with nothing said is
+    "ended", not "in progress"."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    _mac_features(app)
+    p = open_page(app, scheme=scheme)
+    pg = p.page
+    look = pg.evaluate(RECORDING_LOOK)
+    assert look["token"], look
+    red = look["clock"][0]
+    assert red != "rgba(0, 0, 0, 0)" and all(look[k][0] == red for k in ("pill", "nav", "hero", "list")), look
+    assert look["connected"][0] != red, look
+    assert look["error"] != look["clock"] and look["errorPill"] != look["pill"], look
+
+    pg.click("#live-start")
+    _wait_state(app, "listening")
+    expect(pg.locator("#rec-clock .rec-time")).to_have_attribute("aria-label", "Meeting time")
+    assert pg.evaluate("getComputedStyle(document.querySelector('#rec-clock .rec-dot')).backgroundColor") == red
+    pg.click("#live-stop")  # nothing was said
+    toast = pg.locator(".toast", has_text="Nothing was said, so nothing was kept.")
+    expect(toast.locator("strong")).to_have_text("Meeting ended")
+    _wait_state(app, "stopped")
+
+    pg.evaluate("applyLanguage('fr')")
+    pg.click("#live-start")
+    _wait_state(app, "listening")
+    expect(pg.locator("#rec-clock .rec-time")).to_have_attribute("aria-label", "Durée de la réunion")
+    pg.click("#live-stop")
+    expect(pg.locator(".toast", has_text="Rien n’a été dit").locator("strong")).to_have_text("Réunion terminée")
+    _wait_state(app, "stopped")
+
+
 def test_google_bridge_script_route(tmp_path: Path) -> None:
     """Settings → Your tools → Google copies the bridge script from the app (needs the token)."""
     from test_app_host import _factory, _write_config

@@ -1913,14 +1913,14 @@ function liveEvent(type, d, ev) {
     case 'meeting.ended': {
       L.phase = 'ended';
       if (!d.dir && !d.notes) {  // nothing was said: nothing kept, no notes to open
-        toast(t('toast.meeting_empty'), 'info', d.title || L.meeting.title || t('live.untitled'));
+        toast(t('toast.meeting_empty'), 'info', d.title || L.meeting.title || t('toast.meeting_over'));  // not "in progress": it is over
         S.lastMeetingLoaded = false;
         refreshLast();
         break;
       }
       const folder = basename(d.dir) || L.meeting.folder;
       L.lastEnded = { id: d.meeting_id, title: d.title || L.meeting.title, folder, items: d.items || 0 };
-      toast(tp('toast.meeting_ended', d.items || 0), 'ok', d.title || L.meeting.title || t('live.untitled'),
+      toast(tp('toast.meeting_ended', d.items || 0), 'ok', d.title || L.meeting.title || t('meetings.untitled'),
         folder ? { label: t('live.open_notes'), run: () => go('#/meetings/' + enc(folder)) } : null);
       S.lastMeetingLoaded = false;
       refreshLast();
@@ -2415,7 +2415,7 @@ const refreshMeetingsSoon = debounce(() => {
 /** A meeting's state, when it needs saying: live, still recording elsewhere, interrupted, a short clip. */
 function meetingChips(m) {
   const chips = [];
-  if (m.live) chips.push(h('span', { class: 'pill ok' }, h('span', { class: 'dot-state', 'aria-hidden': 'true' }), t('meetings.live')));
+  if (m.live) chips.push(h('span', { class: 'pill' }, h('span', { class: 'dot-state', 'aria-hidden': 'true' }), t('meetings.live')));  // recording: its red dot
   else if (m.in_progress) chips.push(h('span', { class: 'pill warn' }, t('meetings.in_progress')));
   if (m.interrupted) chips.push(h('span', { class: 'pill warn', title: t('meetings.interrupted_note') }, t('meetings.interrupted')));
   if (m.short_clip) chips.push(h('span', { class: 'pill', title: t('meetings.short_clip_note') }, t('meetings.short_clip')));
@@ -4954,7 +4954,7 @@ const STRINGS = {
     'toast.push_failed': "Couldn't send to {tool}", 'toast.pushed': 'Sent', 'toast.pushed_item': '{id} → {tools}',
     'toast.no_tool_takes': 'None of your tools takes this kind of item ({kind}).',
     'toast.meeting_ended.one': '{n} item. The notes are ready.', 'toast.meeting_ended.other': '{n} items. The notes are ready.',
-    'toast.meeting_empty': 'Nothing was said, so nothing was kept.',
+    'toast.meeting_empty': 'Nothing was said, so nothing was kept.', 'toast.meeting_over': 'Meeting ended',
     'toast.notes_updated': 'Notes updated', 'toast.notes_updated_agents': 'The notes now include the agents’ results.',
     'toast.notes_pushed': 'Notes sent', 'toast.agent_budget_title': 'Daily agent budget reached',
     'toast.agent_budget': '{id} was not started automatically. Start it yourself if it’s worth it.',
@@ -4965,7 +4965,7 @@ const STRINGS = {
     'toast.rewrite_failed': "Couldn't rewrite the notes", 'toast.rewritten': 'The notes were rewritten.',
 
     'live.levels': 'Sound levels', 'live.extract': 'Update to-dos now', 'live.extract_short': 'Update now',
-    'live.clock_label': 'Time recorded',
+    'live.clock_label': 'Meeting time',
     'live.m.stopped': 'No meeting in progress', 'live.m.stopped_text': 'Nothing is recorded until you start one.',
     'live.m.starting': 'Starting the meeting…', 'live.m.recording': 'Recording', 'live.m.recording_text': 'Opening the meeting…',
     'live.m.paused_text': 'Nothing is recorded until you click Resume.',
@@ -5440,7 +5440,7 @@ const STRINGS = {
     'toast.push_failed': 'Envoi vers {tool} impossible', 'toast.pushed': 'Envoyé', 'toast.pushed_item': '{id} → {tools}',
     'toast.no_tool_takes': 'Aucun de vos outils ne reçoit ce type d’élément ({kind}).',
     'toast.meeting_ended.one': '{n} élément. Les notes sont prêtes.', 'toast.meeting_ended.other': '{n} éléments. Les notes sont prêtes.',
-    'toast.meeting_empty': 'Rien n’a été dit : rien n’a été gardé.',
+    'toast.meeting_empty': 'Rien n’a été dit : rien n’a été gardé.', 'toast.meeting_over': 'Réunion terminée',
     'toast.notes_updated': 'Notes mises à jour', 'toast.notes_updated_agents': 'Les notes incluent maintenant le travail des agents.',
     'toast.notes_pushed': 'Notes envoyées', 'toast.agent_budget_title': 'Budget quotidien des agents atteint',
     'toast.agent_budget': '{id} n’a pas été lancé automatiquement. Lancez-le vous-même si cela en vaut la peine.',
@@ -5451,7 +5451,7 @@ const STRINGS = {
     'toast.rewrite_failed': 'Impossible de réécrire les notes', 'toast.rewritten': 'Les notes ont été réécrites.',
 
     'live.levels': 'Niveaux sonores', 'live.extract': 'Mettre à jour les tâches', 'live.extract_short': 'Mettre à jour',
-    'live.clock_label': 'Durée enregistrée',
+    'live.clock_label': 'Durée de la réunion',
     'live.m.stopped': 'Aucune réunion en cours', 'live.m.stopped_text': 'Rien n’est enregistré tant que vous n’en démarrez pas une.',
     'live.m.starting': 'Démarrage de la réunion…', 'live.m.recording': 'Enregistrement', 'live.m.recording_text': 'Ouverture de la réunion…',
     'live.m.paused_text': 'Rien n’est enregistré tant que vous ne cliquez pas sur Reprendre.',
