@@ -25,6 +25,7 @@ from voicestream import stt_models
 from voicestream.app import host as host_mod
 from voicestream.app import prefs as prefs_mod
 from voicestream.app.host import AppHost, parse_url
+from voicestream.app.settings import save_changes
 from voicestream.audio.base import AudioSource
 from voicestream.config import Config
 from voicestream.dashboard.server import TOKEN_HEADER, create_app
@@ -647,6 +648,35 @@ async def test_switching_modes_applies_to_listening_in_progress(tmp_path: Path) 
     await a.end_meeting("manual")  # … and listening goes on after it, always-on
     assert host.status == "listening" and host.assistant is a and not host.in_meeting()
     host.update_prefs({"meeting_start": "manual"})
+    await _until(lambda: host.status == "stopped")
+
+
+async def test_a_restart_under_way_when_meetings_switch_to_manual_starts_nothing(tmp_path: Path) -> None:
+    """Always-on listening, no meeting: one Save changes a setting and picks "when I start one". The settings
+    restart listening; when the switch lands during that restart's stop, the restart mustn't start again in
+    manual mode, whose meeting opens at once with nobody having started it."""
+    built: list[Assistant] = []
+    host = _host(tmp_path, factory=_factory(built=built))  # automatic
+    await host.listen_start()
+    assert not host.in_meeting()
+    loop = asyncio.get_running_loop()
+    switched: list[str] = []
+
+    def on_state(state: dict[str, Any]) -> None:
+        if state["state"] == "stopping" and not switched:  # the prefs request arrives while it stops
+            switched.append("manual")
+            loop.call_soon(host.update_prefs, {"meeting_start": "manual"})
+
+    host.add_state_listener(on_state)
+    save_changes(host.config_path, {"user_name": "Sam"})
+    assert (await host.apply_settings(wait=False))["restarting"] is True
+    await _until(lambda: switched and host.prefs.meeting_start == "manual" and not host._background)
+    await asyncio.sleep(0.2)
+    assert host.status == "stopped" and host.assistant is None and len(built) == 1
+    assert not host.in_meeting() and list_sessions(host.cfg.data_path) == []
+    assert await host.meeting_start() == "start" and host.in_meeting()  # by hand, it starts with the new settings
+    assert host.assistant.cfg.user_name == "Sam"
+    await host.meeting_stop()
     await _until(lambda: host.status == "stopped")
 
 
