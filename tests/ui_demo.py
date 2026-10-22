@@ -3,10 +3,14 @@
     python tests/ui_demo.py                  # prints the address of each screen; Ctrl+C stops it
 
 It starts the same app host as the UI tests (``UIApp`` in tests/test_app_ui.py: the real HTTP API
-and event stream, scripted speech, fake model downloads and permission checks), four times over,
-because one app can only be in one state at a time: not listening, listening between meetings, in
-a meeting, and a new install on its first-run setup. Everything lives in a temporary folder that is
-removed on exit, with a temporary home too, so no real key, Keychain item or meeting is touched.
+and event stream, scripted speech, fake model downloads and permission checks) once for each state,
+because one app can only be in one state at a time. Meetings started by hand (the default): between
+meetings, in one, with a call detected; listening all the time (automatic): not listening, listening
+between meetings, in a meeting; and a new install on its first-run setup. The apps that start
+meetings by hand say they have what the Mac app has (its menu bar, the floating button, Spotlight,
+call detection and the keyboard shortcut), so their screens show all of it. Everything lives in a
+temporary folder that is removed on exit, with a temporary home too, so no real key, Keychain item or
+meeting is touched.
 
 The sample data holds together: the past meetings are imported from transcripts with the real
 ``voicestream import``, so their to-dos and decisions come from what was said; the spending on disk
@@ -37,7 +41,7 @@ os.environ["VOICESTREAM_SECRET_STORE"] = "file"  # never the real Keychain
 
 # imported once the home is private, so nothing below can reach the real ~/.voicestream
 import pytest
-from test_app_ui import UIApp
+from test_app_ui import UIApp, _mac_features
 
 from voicestream import stt_models
 
@@ -294,6 +298,8 @@ def start_meeting(app: DemoApp) -> None:
 
     from voicestream.models import TranscriptSegment
 
+    if app.host.prefs.meeting_start == "manual":  # nothing starts by itself: Start meeting, as the page does
+        app.host.call(app.host.meeting_start()).result(15)
     deadline = time.monotonic() + 15
     while app.host.status != "listening":
         if time.monotonic() > deadline:
@@ -335,14 +341,32 @@ def main() -> int:
         meeting = make(base / "meeting", mp, setup_done=True, listen_on_launch=True, meetings=True)
         apps.append(meeting)
         start_meeting(meeting)
-        setup = make(base / "setup", mp, setup_done=False, fresh=True)
+        setup = make(base / "setup", mp, setup_done=False, fresh=True, meeting_start="manual")
         apps.append(setup)
+        _mac_features(setup)
+        # meetings started by hand, with what the Mac app has
+        idle = make(base / "by-hand", mp, provider="anthropic", setup_done=True, meetings=True, meeting_start="manual")
+        apps.append(idle)
+        _mac_features(idle)
+        recording = make(base / "by-hand-meeting", mp, setup_done=True, meetings=True, meeting_start="manual")
+        apps.append(recording)
+        _mac_features(recording)
+        start_meeting(recording)
+        call = make(base / "by-hand-call", mp, setup_done=True, meetings=True, meeting_start="manual")
+        apps.append(call)
+        _mac_features(call)
+        assert call.host.loop is not None
+        call.host.loop.call_soon_threadsafe(call.host.suggest_meeting, "zoom.us")  # a call: suggested, never started
 
         budget = stopped.folder_of("Budget review")
         screens = [
-            ("Live, not listening", stopped, "#/live"),
-            ("Live, listening", listening, "#/live"),
-            ("Live, meeting in progress", meeting, "#/live"),
+            ("Live, no meeting in progress", idle, "#/live"),
+            ("Live, a meeting started by hand", recording, "#/live"),
+            ("Live, a call detected", call, "#/live"),
+            ("Settings: starting meetings", idle, "#/settings/general/starting"),
+            ("Live, automatic, not listening", stopped, "#/live"),
+            ("Live, automatic, listening", listening, "#/live"),
+            ("Live, automatic, meeting in progress", meeting, "#/live"),
             ("Meetings", stopped, "#/meetings"),
             *((f"Meeting: {tab}", stopped, f"#/meetings/{budget}/{tab}") for tab in ("notes", "actions", "transcript", "email")),
             ("Meeting in progress, its page", meeting, f"#/meetings/{meeting.host.state()['meeting']['folder']}"),
@@ -350,6 +374,7 @@ def main() -> int:
             *((f"Settings: {sec}", stopped, f"#/settings/{sec}") for sec in
               ("general", "stt", "claude", "audio", "tools", "agents", "advanced")),
             ("Setup wizard", setup, ""),
+            ("Setup: how you start a meeting", setup, "#/setup/start"),
         ]
         width = max(len(name) for name, *_ in screens)
         print("Voicestream UI demo — open these in a browser (Ctrl+C stops it):\n")
