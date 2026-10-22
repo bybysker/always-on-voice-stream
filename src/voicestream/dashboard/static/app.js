@@ -3639,6 +3639,12 @@ async function saveSettings() {
   // a value already shown as wrong under its field (minutes that aren't a whole number…): fix it first
   const wrong = Object.keys(S.fieldErrors).find((p) => p.startsWith('pref:'));
   if (wrong) return showSaveError(wrong, S.fieldErrors[wrong]);
+  // the meeting ends by itself only after "Still in a meeting?" is asked: the end is checked first, so
+  // an end at or before the question would end it without ever asking (0 is "never", for either)
+  const ask = pref('silence_ask_minutes'), end = pref('silence_end_minutes');
+  if (pref('meeting_start') !== 'automatic' && ask > 0 && end > 0 && ask >= end) {
+    return showSaveError('pref:silence_end_minutes', t('err.end_before_ask', { n: fmtNum(ask) }));
+  }
   const changes = { ...S.draft };
   const prefs = { ...S.prefsDraft };
   const held = holdUntilDownloaded(changes);
@@ -3770,7 +3776,18 @@ function startingSection() {
       choiceCards(t('start.how'), [
         { value: 'manual', title: t('start.manual'), desc: t('start.manual_desc') },
         { value: 'automatic', title: t('start.automatic'), desc: t('start.automatic_desc') },
-      ], manual ? 'manual' : 'automatic', (v) => { setPref('meeting_start', v); redrawSection(); }, { cols: 2 })),
+      ], manual ? 'manual' : 'automatic', (v) => {
+        setPref('meeting_start', v);
+        // automatically, the silence fields are not on screen: what was typed wrong in them is dropped
+        // (prefMinutes keeps it as typed, a string), or Save would fail on fields nobody can see
+        if (v === 'automatic') {
+          for (const k of SILENCES) {
+            if (typeof S.prefsDraft[k] !== 'number') delete S.prefsDraft[k];
+            delete S.fieldErrors['pref:' + k];
+          }
+        }
+        redrawSection();
+      }, { cols: 2 })),
     manual && prefMinutes('silence_ask_minutes', t('start.ask'), t('start.ask_help')),
     manual && prefMinutes('silence_end_minutes', t('start.end'), t('start.end_help')),
     !manual && field('always_on.idle_split_minutes', t('set.idle'), numberInput('always_on.idle_split_minutes', { min: 0, max: 240, step: 1 }),
@@ -3795,6 +3812,8 @@ function startingSummary() {
   return h('div', { class: 'summary', id: 'start-summary' }, t('start.summary'), on.map((text) => h('span', {}, icon('check'), text)));
 }
 
+const SILENCES = ['silence_ask_minutes', 'silence_end_minutes'];
+
 /** A number of minutes for a preference (0 to 600; 0: never), checked as you type: a value the app
  *  would refuse says so under the field, and Save says to fix it first. */
 function prefMinutes(key, label, help) {
@@ -3807,6 +3826,12 @@ function prefMinutes(key, label, help) {
     if (raw !== '' && Number.isInteger(n) && n >= 0 && n <= 600) {
       delete S.fieldErrors[path];
       markField(path, null);
+      // the other one's message was about the two together ("ask before the end"), unless its own value is wrong
+      const other = SILENCES.find((k) => k !== key);
+      if (typeof S.prefsDraft[other] !== 'string' && S.fieldErrors['pref:' + other]) {
+        delete S.fieldErrors['pref:' + other];
+        markField('pref:' + other, null);
+      }
       setPref(key, n);
     } else {
       S.fieldErrors[path] = t('err.minutes');
@@ -4846,6 +4871,7 @@ const STRINGS = {
 
     'err.unreachable': 'Can’t reach Voicestream: check that it is still open, then try again.',
     'err.minutes': 'Enter a whole number of minutes, from 0 to 600.',
+    'err.end_before_ask': 'Choose more minutes than for “Still in a meeting?” ({n}), or the question is never asked. To never ask, set that to 0.',
     'err.copy': "Couldn't copy to the clipboard.",
     'err.required': "This can't be empty.",
     'err.number': 'Enter a number.',
@@ -5332,6 +5358,7 @@ const STRINGS = {
 
     'err.unreachable': 'Impossible de joindre Voicestream : vérifiez qu’il est toujours ouvert, puis réessayez.',
     'err.minutes': 'Saisissez un nombre entier de minutes, de 0 à 600.',
+    'err.end_before_ask': 'Choisissez plus de minutes que pour « Toujours en réunion ? » ({n}), sinon la question n’est jamais posée. Pour ne jamais la poser, mettez-y 0.',
     'err.copy': 'Impossible de copier dans le presse-papiers.',
     'err.required': 'Ce champ ne peut pas être vide.',
     'err.number': 'Saisissez un nombre.',

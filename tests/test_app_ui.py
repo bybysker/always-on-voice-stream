@@ -2308,6 +2308,78 @@ def test_saving_settings_with_a_switch_to_by_hand_sends_the_switch_first(make_ap
     expect(pg.locator("#f-user_name")).to_have_value("Camille Y")
 
 
+def test_still_in_a_meeting_is_asked_before_the_meeting_ends(make_app: Callable[..., UIApp],
+                                                              open_page: Callable[..., Page]) -> None:
+    """The meeting can end by itself only after "Still in a meeting?" has been asked: Save refuses an end
+    at or before the question (it would never be asked), says so under the end's field and saves
+    nothing; 0 for the question (never ask) takes any end."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    _mac_features(app)
+    p = open_page(app)
+    pg = p.page
+    host = app.host
+    pg.goto(app.url + "#/settings/general/starting")
+    pg.locator('#boot').wait_for(state='hidden')
+    ask, end = pg.locator("#p-silence_ask_minutes"), pg.locator("#p-silence_end_minutes")
+    error = pg.locator("[data-path='pref:silence_end_minutes'] .field-error")
+
+    ask.fill("60")  # the end is 60 too
+    pg.click("#save-settings")
+    expect(error).to_have_text("Choose more minutes than for “Still in a meeting?” (60), or the question is never asked. "
+                               "To never ask, set that to 0.")
+    expect(end).to_be_focused()
+    expect(pg.locator("#savebar .msg.error")).to_contain_text("Nothing was saved")
+    assert (host.prefs.silence_ask_minutes, host.prefs.silence_end_minutes) == (15, 60)
+    p.shot("settings-ask-after-the-end")
+    ask.fill("0")  # never asked: any end will do, and the message goes
+    expect(error).to_have_text("")
+    pg.click("#save-settings")
+    _wait(lambda: host.prefs.silence_ask_minutes == 0)
+
+    ask.fill("20")
+    end.fill("10")
+    pg.click("#save-settings")
+    expect(error).to_contain_text("(20)")
+    end.fill("30")
+    pg.click("#save-settings")
+    _wait(lambda: (host.prefs.silence_ask_minutes, host.prefs.silence_end_minutes) == (20, 30))
+    expect(error).to_have_text("")
+
+    pg.evaluate("applyLanguage('fr')")
+    pg.locator("#p-silence_end_minutes").fill("20")
+    pg.click("#save-settings")
+    expect(error).to_have_text("Choisissez plus de minutes que pour « Toujours en réunion ? » (20), sinon la question "
+                               "n’est jamais posée. Pour ne jamais la poser, mettez-y 0.")
+
+
+def test_a_wrong_silence_left_behind_by_a_switch_to_automatic_is_dropped(make_app: Callable[..., UIApp],
+                                                                         open_page: Callable[..., Page]) -> None:
+    """Minutes typed wrong, then Automatically picked: the silence fields are gone from the screen, so
+    what was typed in them goes too — Save saves the switch instead of failing on a field nobody sees."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    _mac_features(app)
+    p = open_page(app)
+    pg = p.page
+    host = app.host
+    pg.goto(app.url + "#/settings/general/starting")
+    pg.locator('#boot').wait_for(state='hidden')
+    pg.fill("#p-silence_ask_minutes", "-3")
+    expect(pg.locator("[data-path='pref:silence_ask_minutes'] .field-error")).to_have_text(
+        "Enter a whole number of minutes, from 0 to 600.")
+    pg.get_by_label("Automatically", exact=True).check()
+    expect(pg.locator("#p-silence_ask_minutes")).to_have_count(0)
+    pg.click("#save-settings")
+    _wait(lambda: host.prefs.meeting_start == "automatic")
+    expect(pg.locator(".toast.ok", has_text="Saved").last).to_be_visible()
+    assert host.prefs.silence_ask_minutes == 15
+    assert pg.evaluate("[S.prefsDraft, S.fieldErrors]") == [{}, {}]
+    expect(pg.locator("#savebar .msg.error")).to_have_count(0)
+
+
 RECORDING_LOOK = """() => {
   const style = (html) => {
     const box = document.createElement('div');
