@@ -2192,6 +2192,42 @@ def test_banners_in_a_meeting_never_move_its_controls(make_app: Callable[..., UI
     expect(pg.locator(".frame > #notices")).to_have_count(1)
 
 
+def test_opening_the_app_again_keeps_what_you_were_typing(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """Opening the app again (the Dock, Spotlight, its menus) brings Live back with Start in focus —
+    unless something is being typed: a to-do being corrected, or Settings changed and not saved yet.
+    That stays as it is, in focus; nothing is lost."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual", meetings=True)
+    _mac_features(app)
+    p = open_page(app)
+    pg = p.page
+    host, loop = app.host, app.host.loop
+    assert loop is not None
+    hash_ = "#/meetings/" + app.folder_of("Budget review") + "/actions"
+    pg.evaluate("(h) => { location.hash = h; }", hash_)
+    pg.get_by_role("button", name="Edit").first.click()
+    title = pg.locator("form.edit input").first
+    title.fill("Half typed correc")
+    loop.call_soon_threadsafe(host.request_focus)
+    pg.wait_for_timeout(600)
+    assert pg.evaluate("location.hash") == hash_
+    expect(title).to_have_value("Half typed correc")
+    expect(title).to_be_focused()
+
+    pg.click("nav a[href='#/settings']")
+    pg.fill("#f-user_name", "Camille Z")
+    loop.call_soon_threadsafe(host.request_focus)
+    pg.wait_for_timeout(600)
+    assert pg.evaluate("location.hash").startswith("#/settings")
+    expect(pg.locator("#f-user_name")).to_have_value("Camille Z")
+    expect(pg.locator("#savebar")).to_be_visible()
+
+    pg.click("#discard-settings")  # nothing left unsaved: Live, Start in focus
+    loop.call_soon_threadsafe(host.request_focus)
+    expect(pg.locator("#live-start")).to_be_focused()
+
+
 def test_google_bridge_script_route(tmp_path: Path) -> None:
     """Settings → Your tools → Google copies the bridge script from the app (needs the token)."""
     from test_app_host import _factory, _write_config

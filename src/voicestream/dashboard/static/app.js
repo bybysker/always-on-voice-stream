@@ -1514,10 +1514,20 @@ document.addEventListener('pointerdown', () => { startParked = false; }, true);
 // a redraw that puts the focus back on a new Start (same id) keeps it parked; anywhere else, it is not
 document.addEventListener('focusin', (e) => { if (e.target.id !== 'live-start') startParked = false; });
 
+/** Something typed and not saved yet: a to-do being corrected or an agent's brief (their forms keep
+ *  nothing once the screen is drawn again), text in an "Add" or key field, Settings changed. */
+function workInProgress() {
+  const main = $('main');
+  if (main.querySelector('form.edit, form.prompt')) return true;
+  if ([...main.querySelectorAll('form.add input, form.entry input')].some((el) => el.value.trim())) return true;
+  return S.route.name === 'settings' && dirty();
+}
+
 /** The app was opened again (from Spotlight, the Dock, its menu): Live, with its Start control in
- *  focus, unless a dialog is open, or the setup: what you were doing there stays as it is. */
+ *  focus, unless a dialog is open, the setup, or something is being typed: what you were doing there
+ *  stays as it is (the window coming forward is enough). */
 function focusStart() {
-  if (S.setup || !S.app || $('ask').open || $('viewer').open) return;
+  if (S.setup || !S.app || $('ask').open || $('viewer').open || workInProgress()) return;
   if (S.route.name !== 'live') {
     S.focusStart = true;
     location.hash = '#/live';  // navigate() puts the focus on it
