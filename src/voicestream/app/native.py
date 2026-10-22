@@ -1,4 +1,5 @@
-"""The macOS shell around the app host: the window, the menu-bar icon and quitting.
+"""The macOS shell around the app host: the window, the menu-bar icon, the floating button, links
+and quitting.
 
 Imported only in native mode (macOS with pywebview and PyObjC). Every AppKit and pywebview
 import is inside a function, so the module also imports on Linux, where its pure helpers (what
@@ -15,7 +16,7 @@ delegate from the class attribute ``webview.platforms.cocoa.BrowserView.AppDeleg
 first window, so a subclass put there before ``webview.start()`` adds what that delegate lacks.
 
 * ``applicationShouldHandleReopen:hasVisibleWindows:``: clicking the Dock icon, or opening the
-  app again from Finder, shows the hidden window.
+  app again from Finder or Spotlight, shows the hidden window, its Start control focused.
 * ``applicationShouldTerminate:``: pywebview's own runs the window's ``closing`` handlers, and
   ours hides the window instead of closing it, so the app could never quit. Ours asks first
   while listening, then stops the host gracefully (``NSTerminateLater``, capped), then quits.
@@ -35,7 +36,23 @@ app has launched and again whenever the preference changes, the result told to t
 Settings page, with what the keys type on the current keyboard layout (:func:`.hotkey.current_layout`:
 the page can't tell with ⌥ held). A press is like a menu click (it only posts to the host); a short
 sound says it worked — once a start is known to have worked, another one when it failed — and the
-menu shows the same shortcut next to what a press does (Start/Stop listening, Resume while paused).
+menu shows the same shortcut next to what a press does (Start/Stop Meeting, Resume while paused).
+
+Meetings start when you start one (``prefs.meeting_start``, "manual" unless you chose "automatic"),
+and every way of starting and stopping goes through the host's meeting actions
+(``meeting_start``/``meeting_stop``/``meeting_toggle``): the window, the status item's menu, the
+"Meeting" menu this shell adds to the app's menu bar, the shortcut, and
+
+* the floating button (:mod:`.floating`): a small non-activating panel above every app, on every
+  Space, that follows the host's state (Start meeting; the time, Pause, Stop; a call suggestion;
+  "Still in a meeting?") and can be hidden from its own menu;
+* ``voicestream://`` links (the Info.plist's CFBundleURLTypes): Launch Services sends them as a "get
+  URL" Apple event, whose handler (registered before the run loop starts, for the link that launches
+  the app) hands them to the host's ``open_url``, which checks the key of the ones that may record;
+* the Spotlight launcher (:mod:`.spotlight`), "Voicestream – New Meeting" in ~/Applications, written
+  while its setting is on, which opens the keyed ``meeting/start`` link;
+* call suggestions (:mod:`.calls`): while nothing is recorded, a thread looks at whether another app
+  captures from the microphone, and the host suggests taking notes — it never starts anything.
 """
 
 from __future__ import annotations
@@ -672,7 +689,7 @@ class MacShell:
         self._layout: dict[str, str] | None = None  # what the keys type on the keyboard layout, as last read
         self._recording = False  # Settings was recording a shortcut at the last state
         self._probe: list[Any] | None = None  # the self-test's press: the host's answers, nothing done
-        self._main_menu: Any = None  # the "Meeting" menu in the app's menu bar
+        self._main_menu: tuple[Any, Any] | None = None  # the "Meeting" menu in the app's menu bar (its item, the menu)
         self._main_entries: dict[str, Any] = {}
         self._floating: floating.FloatingPanel | None = None
         self._floating_test: str | None = None  # the self-test shows this sample on it, whatever the state says
@@ -896,7 +913,7 @@ class MacShell:
         holder = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
         holder.setSubmenu_(menu)
         main.addItem_(holder)
-        self._main_menu = menu
+        self._main_menu = (holder, menu)
 
     def _image(self, symbol: str) -> Any:
         if symbol not in self._images:
@@ -943,6 +960,9 @@ class MacShell:
             self._update_entries(self._entries, menu_model(self.state, self.lang, self._login, now=now,
                                                            quitting=self.quitting))
         self._update_entries(self._main_entries, meeting_menu_model(self.state, self.lang, quitting=self.quitting))
+        if self._main_menu is not None:  # the language may have changed in Settings
+            for part in self._main_menu:
+                part.setTitle_(STRINGS[self.lang]["meeting_menu"])
         if self._floating is not None and self._floating.model is not None and self._floating_test is None:
             self._floating.tick(self._panel_model(now))
 
