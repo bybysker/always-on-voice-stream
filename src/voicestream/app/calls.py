@@ -21,7 +21,9 @@ needs no permission):
 A poll rather than a property listener: a listener is called on one of Core Audio's own threads,
 and other apps found that ``kAudioProcessPropertyIsRunningInput`` sends no notification anyway. The
 poll runs on a thread of its own (a Core Audio call can stall while ``coreaudiod`` restarts, which
-must not freeze the menu bar), and only while Voicestream records nothing and suggestions are on.
+must not freeze the menu bar), holding no lock while it asks Core Audio (starting the watcher again,
+on the main thread, never waits for a look under way), and only while Voicestream records nothing and
+suggestions are on.
 
 What counts as a call (:class:`CallWatcher`): an app people hold calls in that keeps capturing for
 :data:`START_AFTER_S` (a quick microphone check is not a call), any other app for
@@ -339,9 +341,10 @@ def probe(own_pid: int | None = None) -> MicUse:
 
 
 def available() -> bool:
-    """Core Audio can be read here (a Mac)."""
+    """Core Audio can be read here (a Mac): it loads. Nothing is asked of it — this runs on the main thread at
+    launch, where a call into a coreaudiod that is restarting would hold the app up."""
     try:
-        CoreAudioProbe().device_running()
+        _libs()
     except OSError as exc:
         log.debug("no call detection: %s", exc)
         return False
@@ -428,17 +431,16 @@ class CallWatcher:
             self._was_running = self._device_was_idle = False
             self._baseline = baseline
 
-    def _look(self, now: float) -> dict[str, Call]:
-        """What captures now: the device flag at each look, the processes only when it runs (see the module)."""
-        assert self.probe is not None
-        running = bool(self.probe.device_running())
+    def _look(self, now: float, running: bool, read: bool, captures: tuple[Capture, ...] | None) -> dict[str, Call]:
+        """What captures now, from what Core Audio just said (under the lock): the device flag at each look, the
+        processes only when it runs (``read``: they were read, see the module)."""
         if not running:
             self._device_was_idle = True
             self._was_running = False
             self._captures, self._read_at = (), None
             return {}
-        if not self._was_running or self._read_at is None or now - self._read_at >= ATTRIBUTE_S:
-            self._captures, self._read_at = self.probe.captures(), now
+        if read:
+            self._captures, self._read_at = captures, now
         self._was_running = True
         if self._captures is None and not self._device_was_idle:
             # no process information: the flag counts our own capture too, which may linger a moment after a
@@ -446,15 +448,27 @@ class CallWatcher:
             return {}
         return calls_in(self._captures, running)
 
-    def step(self) -> None:
-        """One look: announce the calls that have lasted long enough, end those gone for :data:`END_AFTER_S`."""
+    def step(self, stop: threading.Event | None = None) -> None:
+        """One look: announce the calls that have lasted long enough, end those gone for :data:`END_AFTER_S`.
+
+        Core Audio is asked with no lock held: a call into it can hang for seconds (coreaudiod restarting, a
+        Bluetooth headset switching profile), and :meth:`reset`, on the main thread when the watcher starts again,
+        must never wait for that. ``stop``: the run this look is part of; stopped meanwhile, the look changes and
+        says nothing (a new run may have started, with its own baseline)."""
         if self.probe is None:
             self.probe = CoreAudioProbe()
         now = self.clock()
+        with self._lock:
+            was_running, read_at = self._was_running, self._read_at
+        running = bool(self.probe.device_running())
+        read = running and (not was_running or read_at is None or now - read_at >= ATTRIBUTE_S)
+        captures = self.probe.captures() if read else None
         starts: list[Call] = []
         ends: list[Call] = []
         with self._lock:
-            current = self._look(now)
+            if stop is not None and stop.is_set():
+                return
+            current = self._look(now, running, read, captures)
             baseline, self._baseline = self._baseline, False
             for key, call in current.items():
                 seen = self._seen.get(key)
@@ -476,6 +490,8 @@ class CallWatcher:
                 elif now - seen.gone_since >= END_AFTER_S:
                     del self._seen[key]
                     ends.append(seen.call)
+        if stop is not None and stop.is_set():
+            return
         for call in starts:
             self.on_start(call)
         for call in ends:
@@ -505,7 +521,7 @@ class CallWatcher:
     def _loop(self, stop: threading.Event) -> None:
         while not stop.is_set():
             try:
-                self.step()
+                self.step(stop)
                 self.errors = 0
             except Exception:  # Core Audio away a moment (coreaudiod restarting): try again later
                 self.errors += 1

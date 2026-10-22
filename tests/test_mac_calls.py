@@ -7,6 +7,7 @@ the packaged app's ``--selftest`` (its mic-in-use probe must answer).
 from __future__ import annotations
 
 import ctypes
+import itertools
 import sys
 import threading
 import time
@@ -217,6 +218,69 @@ def test_the_thread_backs_off_and_stops() -> None:
     assert probe.reads <= reads + 1  # a look under way may finish, no more
 
 
+def _stuck_once() -> tuple[FakeProbe, threading.Event, threading.Event]:
+    """A probe whose first look at the device hangs until released, as Core Audio does while coreaudiod restarts
+    or a Bluetooth headset switches profile — and then says what was true when it was asked: nothing ran."""
+    entered, release = threading.Event(), threading.Event()
+    looks = itertools.count()
+
+    class Stuck(FakeProbe):
+        def device_running(self) -> bool | None:
+            if next(looks) == 0:
+                entered.set()
+                release.wait(5)
+                return False
+            return self.running
+
+    probe = Stuck()
+    probe.running, probe.caps = True, (ZOOM,)
+    return probe, entered, release
+
+
+def test_restarting_never_waits_for_a_look_stuck_in_core_audio() -> None:
+    """The shell stops the watcher when a start begins and starts it again, on the main thread, when the state goes
+    back to stopped or error: that must not wait for the old run's look, stuck in Core Audio — the menu bar, the
+    floating button and the window would freeze for as long."""
+    probe, entered, release = _stuck_once()
+    w = calls.CallWatcher(on_start=lambda c: None, on_end=lambda c: None, probe=probe, poll_s=0.01)
+    w.start(baseline=False)
+    try:
+        assert entered.wait(5)
+        w.stop()  # "starting": the look under way goes on, on its own thread
+        threading.Timer(1.5, release.set).start()
+        t0 = time.monotonic()
+        w.start(baseline=True)  # "error" (the start failed fast): started again at once
+        took = time.monotonic() - t0
+    finally:
+        release.set()
+        w.stop()
+    assert took < 0.5
+
+
+def test_a_stopped_runs_late_look_changes_nothing() -> None:
+    """That old look, once Core Audio answers, must not use up the new run's baseline nor fill in its calls: the call
+    just recorded would be suggested as a new one."""
+    probe, entered, release = _stuck_once()
+    seen: list[tuple[str, Call]] = []
+    clock = Clock()
+    w = calls.CallWatcher(on_start=lambda c: seen.append(("start", c)), on_end=lambda c: seen.append(("end", c)),
+                          probe=probe, clock=clock)
+    w.reset(baseline=False)
+    old = threading.Event()
+    look = threading.Thread(target=w.step, args=(old,), daemon=True)
+    look.start()
+    assert entered.wait(5)
+    old.set()  # that run was stopped …
+    w.reset(baseline=True)  # … and a new one started: Voicestream just stopped recording this very call
+    release.set()
+    look.join(5)
+    new = threading.Event()
+    for _ in range(30):
+        w.step(new)
+        clock.now += 2
+    assert seen == []
+
+
 def test_the_thread_announces_from_its_own_thread() -> None:
     probe = FakeProbe()
     probe.running, probe.caps = True, (ZOOM,)
@@ -243,6 +307,18 @@ def test_off_macos_there_is_no_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls.available() is False
     with pytest.raises(OSError):
         calls.probe()
+
+
+def test_launch_asks_core_audio_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """native.run reads available() on the main thread before the window shows: loading Core Audio says it is a Mac
+    where calls can be watched; a call into it there could stall the launch while coreaudiod restarts."""
+    monkeypatch.setattr(calls, "_libs", lambda: (object(), object()))
+
+    def asked(self: Any) -> bool | None:
+        raise AssertionError("Core Audio was called at launch")
+
+    monkeypatch.setattr(calls.CoreAudioProbe, "device_running", asked)
+    assert calls.available() is True
 
 
 def test_describe_keeps_pids_out() -> None:
