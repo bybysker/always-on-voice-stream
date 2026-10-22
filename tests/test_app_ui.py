@@ -2631,6 +2631,7 @@ RECORDING_LOOK = """() => {
     hero: style('<div class="hero-icon listening" data-probe></div>'),
     list: style('<span class="pill"><span class="dot-state" data-probe></span></span>'),
     connected: style('<span class="conn live"><span class="dot" data-probe></span></span>'),
+    lost: style('<span class="conn dead"><span class="dot" data-probe></span></span>'),
     error: style('<div class="rec-clock error"><span class="rec-dot" data-probe></span></div>'),
     errorPill: style('<div class="state st-error"><span class="dot-state" data-probe></span></div>'),
     token: getComputedStyle(document.documentElement).getPropertyValue('--recording').trim(),
@@ -2642,9 +2643,10 @@ RECORDING_LOOK = """() => {
 def test_recording_has_one_colour_and_its_clock_says_what_it_counts(make_app: Callable[..., UIApp],
                                                                     open_page: Callable[..., Page], scheme: str) -> None:
     """Recording is one colour everywhere in the window, red as on the floating button and as macOS
-    has it, and never the green of "Connected"; a problem is not that same dot. The meeting's clock
-    counts the meeting, pauses included, and is named so; a meeting stopped with nothing said is
-    "ended", not "in progress"."""
+    has it (in the dark, macOS's own lighter red), and never the green of "Connected"; a problem — the
+    connection lost included — is a ring, not that same dot. The meeting's clock counts the meeting,
+    pauses included, and is named so; a meeting that is over is "ended", or "untitled", never "in
+    progress"."""
     from playwright.sync_api import expect
 
     app = make_app(setup_done=True, meeting_start="manual")
@@ -2654,9 +2656,11 @@ def test_recording_has_one_colour_and_its_clock_says_what_it_counts(make_app: Ca
     look = pg.evaluate(RECORDING_LOOK)
     assert look["token"], look
     red = look["clock"][0]
-    assert red != "rgba(0, 0, 0, 0)" and all(look[k][0] == red for k in ("pill", "nav", "hero", "list")), look
+    assert red == {"light": "rgb(224, 53, 43)", "dark": "rgb(255, 69, 58)"}[scheme], look
+    assert all(look[k][0] == red for k in ("pill", "nav", "hero", "list")), look
     assert look["connected"][0] != red, look
     assert look["error"] != look["clock"] and look["errorPill"] != look["pill"], look
+    assert look["lost"] == look["errorPill"] and look["lost"][0] == "rgba(0, 0, 0, 0)", look
 
     pg.click("#live-start")
     _wait_state(app, "listening")
@@ -2665,6 +2669,14 @@ def test_recording_has_one_colour_and_its_clock_says_what_it_counts(make_app: Ca
     pg.click("#live-stop")  # nothing was said
     toast = pg.locator(".toast", has_text="Nothing was said, so nothing was kept.")
     expect(toast.locator("strong")).to_have_text("Meeting ended")
+    _wait_state(app, "stopped")
+    pg.click("#live-start")  # something said, and nothing to title the meeting (offline notes)
+    _wait_state(app, "listening")
+    app.say("I'll send the budget to Sam by Friday.")
+    expect(pg.locator("#lines .seg")).to_have_count(1)
+    pg.click("#live-stop")
+    toast = pg.locator(".toast", has_text="The notes are ready.")
+    expect(toast.locator("strong")).to_have_text("Untitled meeting")
     _wait_state(app, "stopped")
 
     pg.evaluate("applyLanguage('fr')")
