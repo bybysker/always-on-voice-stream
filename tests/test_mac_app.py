@@ -27,7 +27,15 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from voicestream import cli
-from voicestream.app import hotkey, launcher, native, native_hooks
+from voicestream.app import (
+    calls,
+    floating,
+    hotkey,
+    launcher,
+    native,
+    native_hooks,
+    spotlight,
+)
 
 TOKEN = "secret-token-123"
 
@@ -1477,3 +1485,461 @@ def test_half_installed_native_mode_falls_back_to_the_browser(monkeypatch: pytes
     data = json.loads(report.read_text())
     assert data["mode"] == "browser" and data["ok"] is False and data["checks"] == {"app_page": True, "api_app": True}
     assert data["errors"] == ["no native window (No module named 'webview'): fell back to the browser"]
+
+
+# ------------------------------------------------- native shell: meetings started by hand
+
+
+def _manual(state: str = "stopped", minutes: float | None = None, **extra: Any) -> dict[str, Any]:
+    """A set-up Mac app whose meetings start by hand; ``capabilities``: what the native shell has (none of the
+    floating button, call detection and the launcher unless a test says so: each would start real work)."""
+    prefs = {"ui_language": "auto", "floating_button": True, "call_suggestions": True, "spotlight_launcher": True,
+             **extra.pop("prefs", {})}
+    caps = {"floating_button": False, "call_detection": False, "spotlight": False, **extra.pop("capabilities", {})}
+    return _state(state, minutes, mode="manual", setup_done=True, prefs=prefs, capabilities=caps, **extra)
+
+
+class FakeFloatingPanel:
+    def __init__(self, on_action: Any, on_moved: Any) -> None:
+        self.on_action, self.on_moved = on_action, on_moved
+        self.model: floating.PanelModel | None = None
+        self.updates: list[tuple[Any, ...]] = []
+        self.ticks: list[floating.PanelModel] = []
+
+    def update(self, model: floating.PanelModel | None, *, saved: Any = None, lang: str = "en") -> None:
+        self.updates.append((model.kind if model is not None else None, saved, lang))
+        self.model = model
+
+    def tick(self, model: floating.PanelModel) -> None:
+        self.ticks.append(model)
+
+    def info(self) -> dict[str, Any]:
+        return {"created": True, "visible": self.model is not None, "on_active_space": True, "all_spaces": True,
+                "full_screen_auxiliary": True, "nonactivating": True, "floating": True, "can_become_key": False,
+                "hides_on_deactivate": False}
+
+    def drawn(self) -> dict[str, Any]:
+        n = len(self.model.buttons) if self.model is not None else 0
+        return {"size": [200.0, 44.0], "buttons": [{"height": 28.0, "width": 40.0, "label": "x"}] * n}
+
+
+@pytest.fixture
+def panels(monkeypatch: pytest.MonkeyPatch) -> list[FakeFloatingPanel]:
+    made: list[FakeFloatingPanel] = []
+
+    def make(on_action: Any, on_moved: Any) -> FakeFloatingPanel:
+        made.append(FakeFloatingPanel(on_action, on_moved))
+        return made[-1]
+
+    monkeypatch.setattr(native.floating, "FloatingPanel", make)
+    return made
+
+
+def test_the_floating_button_follows_the_state(host: FakeHost, appkit: Recorder, panels: list[FakeFloatingPanel]) -> None:
+    def st(*args: Any, **kw: Any) -> dict[str, Any]:
+        return _manual(*args, capabilities={"floating_button": True}, **kw)
+
+    shell = _shell(host)
+    shell.state = st()
+    shell._sync_floating()
+    assert panels == []  # not before the app has finished launching
+    shell._launched = True
+    shell.state = {**st(), "setup_done": False}
+    shell._sync_floating()
+    assert panels == []  # the setup first: nothing to hide either
+    shell.state = st(prefs={"floating_position": {"x": 10.0, "y": 20.0, "screen": None}})
+    shell._sync_floating()
+    (panel,) = panels
+    assert panel.updates[-1] == ("idle", {"x": 10.0, "y": 20.0, "screen": None}, "en")
+    shell.state = st("listening", minutes=3)
+    shell.apply_state(shell.state)  # a state from the host: every part follows
+    assert panel.updates[-1][0] == "recording"
+    shell.render()  # each second: the timer
+    assert panel.ticks and panel.ticks[-1].timer
+    shell.state = st(prefs={"floating_button": False})  # hidden from its menu, the status menu or Settings
+    shell._sync_floating()
+    assert panel.updates[-1][0] is None
+    shell._show_sample("suggestion")  # the self-test shows it whatever the state says
+    assert panel.updates[-1][0] == "suggestion"
+    ticks = len(panel.ticks)
+    shell.render()
+    assert len(panel.ticks) == ticks  # nor ticked by the state then
+    shell._show_sample(None)
+    assert panel.updates[-1][0] is None
+    shell.state = st()
+    shell.quitting = True
+    shell._sync_floating()
+    assert panel.updates[-1][0] is None and len(panels) == 1
+    # the shortcut, once macOS took it, is named in its tooltips
+    shell.quitting = False
+    shell.state = st(prefs={"hotkey": {"code": "KeyR", "mods": ["alt", "cmd"], "key": "R"}}, hotkey={"status": "ok"})
+    assert shell._panel_model().buttons[0].tooltip.endswith("(⌥⌘R)")
+    shell.state = st(prefs={"hotkey": {"code": "KeyR", "mods": ["alt", "cmd"], "key": "R"}}, hotkey={"status": "taken"})
+    assert "⌥⌘R" not in shell._panel_model().buttons[0].tooltip
+
+
+def test_floating_button_clicks_go_through_the_host_actions(host: FakeHost, appkit: Recorder) -> None:
+    host.thread.start()
+    shell = _shell(host)
+    ended: list[str] = []
+
+    async def end_meeting() -> str:
+        ended.append("end")
+        return "stop"
+
+    host.end_meeting = end_meeting  # type: ignore[attr-defined]
+    for key in ("start", "pause", "resume", "stop", "accept", "dismiss", "keep", "ok", "retry", "hide", "end"):
+        shell.on_floating(key)
+    shell._floating_moved({"x": 1.0, "y": 2.0, "screen": "Built-in Retina Display"})
+    assert _wait(lambda: len(host.calls) == 11 and ended == ["end"])
+    assert host.calls == [("meeting_start", None), ("listen_pause", None), ("listen_resume", None), ("meeting_stop", None),
+                          ("suggestion_accept", None), ("suggestion_dismiss", None), ("meeting_keep", None),
+                          ("dismiss_notice", None), ("meeting_start", None), ("update_prefs", {"floating_button": False}),
+                          ("update_prefs", {"floating_position": {"x": 1.0, "y": 2.0, "screen": "Built-in Retina Display"}})]
+    host.calls.clear()
+    appkit.calls.clear()
+    shell.on_floating("open")  # as opening Voicestream again: the window, the Start control focused
+    assert ("setActivationPolicy_", (native.POLICY_REGULAR,)) in appkit.calls
+    assert _wait(lambda: host.calls == [("request_focus", "start")])
+    ran: list[str] = []
+    shell.window = types.SimpleNamespace(native=Recorder(isMiniaturized=False), run_js=lambda js: ran.append(js))
+    shell.on_floating("settings")
+    assert _wait(lambda: ran == ['location.hash = "#/settings/general"'])  # from another thread: run_js waits on this one
+    shell.on_floating("nothing such")  # ignored
+
+
+class Descriptor:
+    def __init__(self, url: str | None) -> None:
+        self.url = url
+
+    def paramDescriptorForKeyword_(self, key: int) -> Any:
+        assert key == int.from_bytes(b"----", "big")
+        return None if self.url is None else types.SimpleNamespace(stringValue=lambda: self.url)
+
+
+@pytest.fixture
+def sounds(monkeypatch: pytest.MonkeyPatch, appkit: Recorder) -> list[str]:
+    played: list[str] = []
+    sound = types.SimpleNamespace(soundNamed_=lambda name: types.SimpleNamespace(play=lambda: played.append(name)))
+    monkeypatch.setitem(sys.modules, "AppKit", types.SimpleNamespace(NSApplication=sys.modules["AppKit"].NSApplication,
+                                                                    NSSound=sound))
+    return played
+
+
+def test_links_reach_the_host_and_say_what_they_did(host: FakeHost, appkit: Recorder, sounds: list[str]) -> None:
+    host.thread.start()
+    shell = _shell(host)
+    shell.state = _manual()
+    link = f"voicestream://meeting/start?key={host.url_key}"
+    shell.on_url_event(Descriptor(link))  # the Apple event handler's part
+    assert _wait(lambda: sounds == ["Tink"])  # like the shortcut: you are in another app
+    assert host.calls == [("open_url", link)] and shell._urls == 1
+    host.url_outcome = "refused"
+    shell.open_url("voicestream://meeting/start")
+    assert _wait(lambda: sounds == ["Tink", "Basso"])  # the floating button and the window say why
+    host.url_outcome = "stop"
+    shell.open_url("voicestream://meeting/stop")
+    assert _wait(lambda: sounds[-1] == "Pop")
+    host.url_outcome = "open"
+    shell.open_url("voicestream://open")
+    assert _wait(lambda: ("request_focus", "start") in host.calls)
+    host.url_outcome = "nothing"
+    shell.open_url("voicestream://meeting/toggle?key=x")
+    shell.on_url_event(Descriptor(None))  # an event without a link: given to the host as nothing
+    assert _wait(lambda: host.calls[-1] == ("open_url", ""))
+    time.sleep(0.1)
+    assert len(sounds) == 3
+
+
+def test_the_selftest_link_is_only_asked_about(host: FakeHost, appkit: Recorder) -> None:
+    host.thread.start()
+    shell = _shell(host)
+    answers: list[Any] = []
+    shell._url_probe = answers
+    for link in (f"voicestream://meeting/toggle?key={host.url_key}", "voicestream://meeting/toggle",
+                 "voicestream://meeting/toggle?key=" + "x" * 43, "voicestream://somewhere/else"):
+        shell.open_url(link)
+    results = [a.result(5) for a in answers]
+    assert results == [{"action": "toggle", "key_ok": True, "would": "start"},
+                       {"action": "toggle", "key_ok": False, "would": None},
+                       {"action": "toggle", "key_ok": False, "would": None},
+                       {"action": None, "key_ok": False, "would": None}]
+    assert not [c for c in host.calls if c[0] in ("open_url", "meeting_toggle", "meeting_start")]  # nothing done
+
+
+def test_the_link_handler_is_registered_before_the_run_loop(host: FakeHost, pyobjc: Any,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    registered: list[tuple[Any, ...]] = []
+    manager = types.SimpleNamespace(setEventHandler_andSelector_forEventClass_andEventID_=lambda *a: registered.append(a))
+    foundation = sys.modules["Foundation"]
+    monkeypatch.setattr(foundation, "NSAppleEventManager", types.SimpleNamespace(sharedAppleEventManager=lambda: manager),
+                        raising=False)
+    host.thread.start()
+    shell = native.MacShell(host, f"http://127.0.0.1:1/app?token={TOKEN}")
+    assert shell.run() == 0
+    ((target, selector, event_class, event_id),) = registered
+    assert (selector, event_class, event_id, target.shell) == ("handleURLEvent:withReplyEvent:", 0x4755524C, 0x4755524C, shell)
+    assert shell._url_handler == "registered"
+    assert native._menu_target_class().handleURLEvent_withReplyEvent_.signature == b"v@:@@"
+    seen: list[str] = []
+    monkeypatch.setattr(shell, "open_url", seen.append)
+    target.handleURLEvent_withReplyEvent_(Descriptor("voicestream://open"), None)
+    assert seen == ["voicestream://open"]
+
+    def broken(*a: Any) -> None:
+        raise RuntimeError("no Apple events here")
+
+    manager.setEventHandler_andSelector_forEventClass_andEventID_ = broken
+    other = native.MacShell(host, f"http://127.0.0.1:1/app?token={TOKEN}")
+    other._register_url_handler()
+    assert other._url_handler == "RuntimeError: no Apple events here"  # everything else works; the self-test says so
+
+
+def test_the_selftest_sends_links_as_apple_events(host: FakeHost, appkit: Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Through a stand-in Foundation whose Apple-event send calls the registered handler, as macOS does for an
+    event a process sends itself: the keyed toggle reaches the host, the keyless one is refused, nothing starts,
+    and the report holds neither link nor key."""
+    host.thread.start()
+    shell = _shell(host)
+    shell._url_handler = "registered"
+    shell.state = _manual()
+    sent: list[Any] = []
+
+    class Event:
+        def __init__(self) -> None:
+            self.params: dict[int, Any] = {}
+
+        def setParamDescriptor_forKeyword_(self, desc: Any, key: int) -> None:
+            self.params[key] = desc
+
+        def paramDescriptorForKeyword_(self, key: int) -> Any:
+            return self.params.get(key)
+
+        def sendEventWithOptions_timeout_error_(self, options: int, timeout: float, error: Any) -> tuple[Any, Any]:
+            sent.append((options, timeout))
+            shell.on_url_event(self)  # the handler, called by the Apple Event Manager
+            return None, None
+
+    descriptor = types.SimpleNamespace(
+        appleEventWithEventClass_eventID_targetDescriptor_returnID_transactionID_=lambda c, i, t, r, x: (
+            Event() if (c, i, t, r, x) == (native.URL_EVENT, native.URL_EVENT, "me", -1, 0) else None),
+        currentProcessDescriptor=lambda: "me",
+        descriptorWithString_=lambda s: types.SimpleNamespace(stringValue=lambda: s))
+    info = {"CFBundleURLTypes": [{"CFBundleURLName": "x", "CFBundleURLSchemes": ["voicestream"]}]}
+    foundation = types.SimpleNamespace(NSAppleEventDescriptor=descriptor,
+                                       NSBundle=types.SimpleNamespace(mainBundle=lambda: types.SimpleNamespace(
+                                           infoDictionary=lambda: info)),
+                                       NSURL=types.SimpleNamespace(URLWithString_=lambda s: s))
+    monkeypatch.setitem(sys.modules, "Foundation", foundation)
+    monkeypatch.setitem(sys.modules, "AppKit", types.SimpleNamespace(
+        NSApplication=sys.modules["AppKit"].NSApplication,
+        NSWorkspace=types.SimpleNamespace(sharedWorkspace=lambda: types.SimpleNamespace(URLForApplicationToOpenURL_=lambda u: None))))
+    out = shell._check_url()
+    assert out["registered"] and out["scheme_in_plist"] and out["default_handler"] is None
+    assert sent == [(native.SEND_NO_REPLY, native.URL_ANSWER_S)] * 2 and out["handled"] == 2
+    assert out["reaches_host"] is True and out["state_before"] == out["state_after"] == "stopped"
+    assert out["answers"] == [{"action": "toggle", "key_ok": True, "would": "start"},
+                              {"action": "toggle", "key_ok": False, "would": None}]
+    assert host.url_key not in json.dumps(out) and "voicestream://" not in json.dumps(out)
+    assert not [c for c in host.calls if c[0] in ("open_url", "meeting_toggle")]
+    info["CFBundleURLTypes"] = []
+    assert shell._check_url()["scheme_in_plist"] is False
+
+
+class FakeWatcher:
+    def __init__(self, on_start: Any, on_end: Any) -> None:
+        self.on_start, self.on_end = on_start, on_end
+        self.running = False
+        self.starts: list[bool] = []
+        self.stops = 0
+
+    def start(self, *, baseline: bool) -> None:
+        self.running = True
+        self.starts.append(baseline)
+
+    def stop(self) -> None:
+        self.running = False
+        self.stops += 1
+
+
+def test_calls_are_watched_only_while_nothing_is_recorded(host: FakeHost, appkit: Recorder,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    def st(*args: Any, **kw: Any) -> dict[str, Any]:
+        return _manual(*args, capabilities={"call_detection": True}, **kw)
+
+    host.thread.start()
+    made: list[FakeWatcher] = []
+    monkeypatch.setattr(native.calls, "CallWatcher", lambda on_start, on_end: made.append(FakeWatcher(on_start, on_end))
+                        or made[-1])
+    shell = _shell(host)
+    shell._launched = True
+    for state in ({**st(), "setup_done": False}, _manual(), st(prefs={"call_suggestions": False})):
+        shell.state = state
+        shell._sync_calls()
+    assert made == []
+    shell.state = st()
+    shell._sync_calls()
+    (w,) = made
+    assert w.starts == [False] and _wait(lambda: ("call_ended", (None, None)) in host.calls)  # the host forgets old calls
+    shell._sync_calls()
+    assert w.starts == [False]  # once
+    for current in ("starting", "listening", "paused", "stopping"):
+        shell.state = st(current, minutes=1)
+        shell._sync_calls()
+        assert not w.running
+    shell.state = st()
+    shell._sync_calls()
+    assert w.starts == [False, True]  # after a recording: the call recorded isn't new
+    shell.state = st(prefs={"call_suggestions": False})
+    shell._sync_calls()
+    assert not w.running
+    shell.state = st()
+    shell._sync_calls()
+    assert w.starts == [False, True, False]
+    shell.quitting = True
+    shell._sync_calls()
+    assert not w.running and len(made) == 1
+
+    # what the watcher sees, from its thread: named on the main thread, then given to the host
+    shell.quitting = False
+    shell._sync_calls()
+    assert _wait(lambda: host.calls.count(("call_ended", (None, None))) == 4)
+    host.calls.clear()
+    w.on_start(calls.Call("zoom", "Zoom", "us.zoom.xos", 501))
+    assert _wait(lambda: host.calls == [("suggest_meeting", ("Zoom", "zoom"))])
+    w.on_end(calls.Call("zoom", "Zoom", "us.zoom.xos", 501))
+    assert _wait(lambda: host.calls[-1] == ("call_ended", ("Zoom", "zoom")))
+    w.running = False  # recording started meanwhile: nothing suggested
+    w.on_start(calls.Call("zoom", "Zoom", "us.zoom.xos", 501))
+    time.sleep(0.1)
+    assert len(host.calls) == 2
+
+
+def test_calls_are_named_with_what_macos_says(monkeypatch: pytest.MonkeyPatch) -> None:
+    def running_app(pid: int) -> Any:
+        return types.SimpleNamespace(localizedName=lambda: "Loom") if pid == 77 else None
+
+    front = types.SimpleNamespace(bundleIdentifier=lambda: "com.google.Chrome")
+    ws = types.SimpleNamespace(frontmostApplication=lambda: front,
+                               runningApplications=lambda: [types.SimpleNamespace(bundleIdentifier=lambda: "us.zoom.xos")])
+    monkeypatch.setitem(sys.modules, "AppKit", types.SimpleNamespace(
+        NSRunningApplication=types.SimpleNamespace(runningApplicationWithProcessIdentifier_=running_app),
+        NSWorkspace=types.SimpleNamespace(sharedWorkspace=lambda: ws)))
+    assert native.call_name(calls.Call("zoom", "Zoom", "us.zoom.xos", 501)) == "Zoom"
+    assert native.call_name(calls.Call("com.loom.desktop", None, "com.loom.desktop", 77)) == "Loom"
+    assert native.call_name(calls.Call("pid 78", None, None, 78)) is None  # a process macOS has no app for
+    assert native.call_name(calls.Call("mic")) == "Google Chrome"  # no process information: the frontmost call app
+    monkeypatch.setitem(sys.modules, "AppKit", None)
+    assert native.call_name(calls.Call("mic")) is None  # said, not raised
+
+
+def test_the_spotlight_launcher_follows_the_setting(host: FakeHost, appkit: Recorder, monkeypatch: pytest.MonkeyPatch,
+                                                    tmp_path: Path) -> None:
+    def st(*args: Any, **kw: Any) -> dict[str, Any]:
+        return _manual(*args, capabilities={"spotlight": True}, **kw)
+
+    host.thread.start()
+    folder = tmp_path / "Applications"
+    monkeypatch.setattr(native.spotlight, "applications_dir", lambda: folder)
+    app = tmp_path / "Apps" / "Voicestream.app"
+    (app / "Contents" / "Resources").mkdir(parents=True)
+    (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIconFile": "Voicestream.icns"}))
+    (app / "Contents" / "Resources" / "Voicestream.icns").write_bytes(b"icon")
+    monkeypatch.setattr(native.native_hooks, "bundle_path", lambda: app)
+    synced: list[Any] = []
+    real_sync = spotlight.sync
+    monkeypatch.setattr(native.spotlight, "sync", lambda f, launcher: synced.append(launcher) or real_sync(f, launcher))
+    shell = _shell(host)
+    shell._launched = True
+    for state in ({**st(), "setup_done": False}, _manual()):
+        shell.state = state
+        shell._sync_spotlight()
+    shell.quitting = True
+    shell.state = st()
+    shell._sync_spotlight()
+    shell.quitting = False
+    time.sleep(0.1)
+    assert synced == []  # the setup asks first; a terminal install has no app to open the link with
+    shell._sync_spotlight()
+    bundle = folder / "Voicestream – New Meeting.app"
+    assert _wait(lambda: (bundle / "Contents" / "MacOS" / "new-meeting").is_file())
+    script = (bundle / "Contents" / "MacOS" / "new-meeting").read_text()
+    assert f"key={host.url_key}" in script and str(app) in script and "/usr/bin/open -g" in script
+    assert (bundle / "Contents" / "Resources" / "AppIcon.icns").read_bytes() == b"icon"
+    shell._sync_spotlight()
+    shell.apply_state(st())  # the same again: not written again
+    time.sleep(0.1)
+    assert len(synced) == 1
+    shell.state = st(prefs={"ui_language": "fr"})
+    shell.lang = "fr"
+    shell._sync_spotlight()
+    assert _wait(lambda: [p.name for p in folder.iterdir()] == ["Voicestream – Nouvelle réunion.app"])
+    shell.state = st(prefs={"ui_language": "fr", "spotlight_launcher": False})
+    shell._sync_spotlight()
+    assert _wait(lambda: list(folder.iterdir()) == [])  # turned off: removed
+
+    def unwritable(f: Path, launcher: Any) -> str:
+        raise PermissionError("~/Applications is read-only")
+
+    monkeypatch.setattr(native.spotlight, "sync", unwritable)
+    assert host.call(shell._write_launcher(True, "en", app)).result(5) == "failed"  # logged; the app goes on
+
+
+def test_the_selftest_writes_a_launcher_somewhere_else_and_probes_the_microphone(
+        host: FakeHost, appkit: Recorder, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    host.thread.start()
+    monkeypatch.setattr(native.spotlight, "applications_dir", lambda: pytest.fail("never ~/Applications"))
+    monkeypatch.setattr(native.native_hooks, "bundle_path", lambda: None)
+    made: list[Path] = []
+    real = native.spotlight.sync
+    monkeypatch.setattr(native.spotlight, "sync", lambda f, launcher: made.append(f) or real(f, launcher))
+    shell = _shell(host)
+    out = shell._check_spotlight(frozen=False)
+    assert out["ok"] is True and out["sync"] == "written" and out["removed"] == "removed" and out["check"]["ok"]
+    assert host.url_key not in json.dumps(out)
+    assert made and not made[0].exists()  # the temporary folder is gone too
+    assert shell._check_spotlight(frozen=True)["ok"] is False  # the packaged app's launcher carries its icon
+
+    monkeypatch.setattr(native.calls, "probe", lambda: calls.MicUse(False, ()))
+    mic = shell._check_mic_probe()
+    assert mic == {"in_use": False, "device_running": False, "processes_known": True, "others": [], "ok": True}
+    monkeypatch.setattr(native.calls, "probe", lambda: calls.MicUse(None, None))
+    assert shell._check_mic_probe()["ok"] is False  # macOS 14+ names the processes: it must here
+
+    def no_core_audio() -> Any:
+        raise OSError("call detection reads Core Audio, on a Mac")
+
+    monkeypatch.setattr(native.calls, "probe", no_core_audio)
+    assert shell._check_mic_probe() == {"ok": False, "error": "call detection reads Core Audio, on a Mac"}
+
+
+def test_the_selftest_checks_the_floating_button(host: FakeHost, appkit: Recorder, panels: list[FakeFloatingPanel],
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    shell = _shell(host)
+    shell._launched = True
+    shell.state = {**_manual(), "setup_done": False}  # CI: the state would hide it
+    monkeypatch.setattr(native, "time", types.SimpleNamespace(monotonic=time.monotonic, sleep=lambda s: None))
+    out = shell._check_floating()
+    assert out["wanted"] is False and out["ok"] is True and out["states_ok"] is True
+    assert set(out["states"]) == set(floating.sample_states())
+    assert out["states"]["suggestion"] == {"drawn": True, "kind": "suggestion", "size": [200, 44], "buttons": 2,
+                                           "expected_buttons": 2, "min_button_height": 28.0, "labelled": True}
+    assert panels[0].updates[-1][0] is None and shell._floating_test is None  # hidden again after the test
+
+    def short(self: Any) -> dict[str, Any]:
+        return {"size": [200.0, 44.0], "buttons": [{"height": 22.0, "width": 40.0, "label": ""}]}
+
+    monkeypatch.setattr(FakeFloatingPanel, "drawn", short)
+    assert shell._check_floating()["states_ok"] is False  # a 22-point button, unlabelled
+    monkeypatch.setattr(FakeFloatingPanel, "info", lambda self: {"created": True, "visible": True, "can_become_key": True})
+    assert shell._check_floating()["ok"] is False
+
+
+def test_the_native_capabilities(host: FakeHost, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(native.calls, "available", lambda: True)
+    monkeypatch.setattr(native.native_hooks, "bundle_path", lambda: None)  # a terminal install
+    monkeypatch.setattr(native.MacShell, "run", lambda self: 0)
+    assert native.run(host) == 0
+    caps = host.capabilities
+    assert caps["native_window"] and caps["floating_button"] and caps["call_detection"]
+    assert caps["spotlight"] is False  # the link needs the packaged app's Info.plist

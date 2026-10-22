@@ -58,6 +58,14 @@ def test_info_plist() -> None:
     assert ats["NSAllowsLocalNetworking"] is True
     assert set(ats["NSExceptionDomains"]) == {"127.0.0.1", "localhost"}
     assert all(d["NSExceptionAllowsInsecureHTTPLoads"] for d in ats["NSExceptionDomains"].values())
+    # voicestream:// links (the Spotlight launcher's) open in this app; the scheme is the one the host follows
+    (url_type,) = plist["CFBundleURLTypes"]
+    assert url_type["CFBundleURLSchemes"] == ["voicestream"] and url_type["CFBundleTypeRole"] == "Viewer"
+    assert url_type["CFBundleURLName"].startswith(plist["CFBundleIdentifier"])
+    from voicestream.app import host, spotlight
+
+    assert info.URL_SCHEME == host.URL_SCHEME and spotlight.APP_ID == info.BUNDLE_ID
+    assert spotlight.MIN_MACOS == info.MIN_MACOS
     assert plistlib.loads(plistlib.dumps(plist)) == plist  # everything is plist-serializable
 
 
@@ -286,6 +294,12 @@ def test_selftest_launches_without_the_build_trees_whisper_server() -> None:
     body = script[script.index("step_selftest() {"):script.index("step_dmg() {")]
     assert 'env -u VOICESTREAM_WHISPER_SERVER \\\n    "$APP/Contents/MacOS/Voicestream" --selftest' in body
     assert 'check_selftest.py "$SELFTEST_DIR/selftest.json" "$APP"' in body
+    # a screenshot at each phase the self-test writes, in the order it writes them (native.py MacShell._selftest)
+    phases = [line.split("wait_phase ")[1].split()[0] for line in body.splitlines() if line.strip().startswith("if wait_phase")]
+    assert phases == ["window", "floating", "menu"]
+    native = (ROOT / "src" / "voicestream" / "app" / "native.py").read_text(encoding="utf-8")
+    written = [native.index(f'write_phase(self.report_path, "{p}")') for p in phases]
+    assert written == sorted(written)
 
 
 check_selftest = _load("check_selftest")
@@ -349,6 +363,20 @@ def test_selftest_verdict(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     assert "keyboard_layout" in check_selftest.NATIVE_CHECKS
     no_layout = _native_report(app, checks={k: True for k in check_selftest.NATIVE_CHECKS if k != "keyboard_layout"})
     assert check_selftest.problems(no_layout, app) == ["checks that did not run: keyboard_layout"]
+    # meetings started by hand: the floating button, voicestream:// links, the Spotlight launcher, the microphone
+    # probe behind call suggestions — an app that predates them doesn't pass
+    new = ("floating_panel", "floating_panel_states", "url_handler", "url_reaches_host", "spotlight_launcher", "mic_probe")
+    assert set(new) <= set(check_selftest.NATIVE_CHECKS)
+    before = _native_report(app, checks={k: True for k in check_selftest.NATIVE_CHECKS if k not in new})
+    assert check_selftest.problems(before, app) == ["checks that did not run: " + ", ".join(new)]
+    panel = _native_report(app, ok=False, checks=dict.fromkeys(check_selftest.NATIVE_CHECKS, True) | {"floating_panel": False})
+    assert check_selftest.problems(panel, app) == ["failed checks: floating_panel"]
+    # the link test asks the host what a keyed toggle would do: it must not start a recording
+    recorded = _native_report(app, url={"state_before": "stopped", "state_after": "listening"})
+    assert check_selftest.problems(recorded, app) == ["the link test left the app listening"]
+    changed = _native_report(app, url={"state_before": "listening", "state_after": "stopped"})
+    assert check_selftest.problems(changed, app) == ["the link test changed the app's state (listening → stopped)"]
+    assert check_selftest.problems(_native_report(app, url={"state_before": "stopped", "state_after": "stopped"}), app) == []
 
     report = tmp_path / "selftest.json"
     report.write_text(json.dumps(browser), encoding="utf-8")

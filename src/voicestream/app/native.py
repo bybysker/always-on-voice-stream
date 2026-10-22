@@ -1262,6 +1262,8 @@ class MacShell:
             return
         on = bool((self.state.get("prefs") or {}).get("spotlight_launcher", True))
         app = native_hooks.bundle_path()
+        if app is None:  # a terminal install: no Info.plist, so nothing would open the launcher's link
+            return
         wanted = (on, self.lang, str(app))
         if wanted == self._spotlight:
             return
