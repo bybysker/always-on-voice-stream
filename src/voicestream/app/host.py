@@ -433,11 +433,12 @@ class AppHost:
         """Which action :attr:`_toggling` carries out."""
         self._start_queued = False
         """A start asked for while the last meeting is being wrapped up (state "stopping"): it starts once that
-        is done, unless Stop, Stop now, quitting or a switch to manual takes it back first (:meth:`_start_after_stop`,
-        :meth:`_take_back_start`). The state says so (``start_queued``)."""
+        is done, unless Stop, Stop now, quitting or a switch to manual takes it back first
+        (:meth:`_start_after_stop`, :meth:`_take_back_start`). The state says so (``start_queued``)."""
         self._queued_start: asyncio.Task[bool] | None = None
         self._stop_pressed_at: float | None = None
-        """When (:func:`time.monotonic`) the Stop that began the wrap-up under way was pressed (see :data:`DOUBLE_PRESS_S`)."""
+        """When (:func:`time.monotonic`) the Stop that began the wrap-up under way was pressed
+        (see :data:`DOUBLE_PRESS_S`)."""
         self._queued_after: asyncio.Task[Any] | None = None
         """The Stop the start waiting for the wrap-up waits for first (pressed just before it, not under way yet)."""
         self._status_changed = asyncio.Event()
@@ -1126,9 +1127,12 @@ class AppHost:
         """What the meeting action ``task`` carries out did, once it is done (the work isn't cancelled if the
         caller is): ``cancelled`` for a waiting start taken back, ``error`` for one that failed."""
         await asyncio.wait({task})
-        if task.cancelled() or (task.exception() is None and task.result() is False):
+        if task.cancelled():
             return "cancelled"
-        return "error" if task.exception() is not None or self.status == "error" else action
+        if (exc := task.exception()) is not None:
+            log.warning("could not %s: %s", action, exc, exc_info=exc)
+            return "error"
+        return "cancelled" if task.result() is False else "error" if self.status == "error" else action
 
     async def _queue_start(self) -> MeetingAction:
         """A start while the last meeting is being wrapped up: once that is done (:meth:`_start_after_stop`).
@@ -1433,7 +1437,7 @@ class AppHost:
             # a start waiting for the last meeting's wrap-up was asked for as always-on listening: carried out
             # now, it would open a manual meeting by itself once the notes are written
             self._take_back_start(publish=False)
-        limits =(old.silence_ask_minutes, old.silence_end_minutes) != (self.prefs.silence_ask_minutes,
+        limits = (old.silence_ask_minutes, old.silence_end_minutes) != (self.prefs.silence_ask_minutes,
                                                                         self.prefs.silence_end_minutes)
         a = self._assistant
         if a is not None and not self._stop_requested:

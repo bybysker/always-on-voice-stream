@@ -939,6 +939,22 @@ async def test_the_shortcut_after_a_failed_start_tries_again(tmp_path: Path) -> 
     await host.listen_stop()
 
 
+async def test_a_start_that_raises_says_it_failed_and_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                         caplog: pytest.LogCaptureFixture) -> None:
+    """A start that raises rather than going to the error state (a bug): the presses say it failed — the shell's
+    failure sound, not its "recording" one — and the log says why, not asyncio once the task is collected."""
+    caplog.set_level(logging.WARNING)
+    host = _host(tmp_path)
+
+    async def broken(paused: bool = False) -> None:
+        await asyncio.sleep(0)
+        raise RuntimeError("the start went wrong")
+
+    monkeypatch.setattr(host, "listen_start", broken)
+    assert await asyncio.gather(host.meeting_toggle(), host.meeting_start()) == ["error", "error"]
+    assert "could not start: the start went wrong" in caplog.text
+
+
 async def test_the_shortcut_preference_and_what_the_shell_says(tmp_path: Path) -> None:
     host = _host(tmp_path)
     seen: list[dict[str, Any]] = []
