@@ -1346,6 +1346,68 @@ def test_the_host_says_what_a_press_did_and_the_shell_adds_no_guess(
     assert native.sound_for("toggle", "something new") is None  # an answer this shell doesn't know: no sound
 
 
+async def test_two_presses_on_the_real_host_say_no_failure_for_a_recording(tmp_path: Path, appkit: Recorder,
+                                                                         sounds: list[str]) -> None:
+    """The real host, stopped: two presses of the shortcut in one turn of its loop (the second before the state says
+    "starting"). The second joins the first's start, and a recording follows: no failure sound, whatever the host
+    answers that second press (``start``, or nothing to do)."""
+    from test_app_host import _factory, _host, _prefs
+
+    built: list[Any] = []
+    _prefs(tmp_path, "manual", setup_done=True)
+    host = _host(tmp_path, factory=_factory(built=built), mode="manual")
+    await host.start()
+    shell = _shell(host)
+    shell.state = host.state()
+    try:
+        await asyncio.gather(shell._toggle(), shell._toggle())
+        assert host.status == "listening" and host.in_meeting() and len(built) == 1
+        assert sounds and set(sounds) == {"Tink"}
+    finally:
+        await host.shutdown()
+
+
+async def test_a_launcher_start_taken_back_on_the_real_host_says_nothing(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, appkit: Recorder, sounds: list[str]) -> None:
+    """The real host: Stop, then the Spotlight launcher's start while the notes are written (it waits for them),
+    then Stop again, which takes that start back. At that moment the launcher's start is answered as taken back:
+    no failure sound on top of the Stop, and nothing records."""
+    from helpers import seg
+    from test_app_host import _factory, _host, _prefs, _until
+
+    from voicestream import session as session_mod
+
+    gate = asyncio.Event()
+    summarize = session_mod.summarize
+
+    async def slow(*args: Any, **kw: Any) -> Any:
+        await gate.wait()
+        return await summarize(*args, **kw)
+
+    monkeypatch.setattr(session_mod, "summarize", slow)
+    built: list[Any] = []
+    _prefs(tmp_path, "manual", setup_done=True)
+    host = _host(tmp_path, factory=_factory(built=built), mode="manual")
+    await host.start()
+    shell = _shell(host)
+    shell.state = host.state()
+    try:
+        assert await host.meeting_start() == "start"
+        await built[-1]._route(seg("Let's stop here.", "mic", t=1.0))
+        assert await host.meeting_stop() == "stop" and host.status == "stopping"
+        shell.open_url(host.launcher_url())  # Spotlight → Voicestream – New Meeting: waits for the notes
+        await asyncio.sleep(0.2)
+        assert host.status == "stopping" and len(built) == 1
+        assert await host.meeting_stop() == "stop"  # Cancel Next Meeting
+        gate.set()
+        await _until(lambda: host.status == "stopped")
+        await asyncio.sleep(0.2)
+        assert sounds == [] and len(built) == 1 and not host.in_meeting()
+    finally:
+        gate.set()
+        await host.shutdown()
+
+
 def test_the_selftest_presses_the_shortcut_without_listening(host: FakeHost, appkit: Recorder,
                                                              hotkeys: list[FakeHotKeys]) -> None:
     """A synthetic press reaches the host, which only says what it would do: nothing is started."""
