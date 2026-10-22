@@ -2317,12 +2317,12 @@ def test_saving_settings_with_a_switch_to_by_hand_sends_the_switch_first(make_ap
 
     sent.clear()
     pg.fill("#f-user_name", "Camille Y")
-    pg.evaluate("setPref('silence_ask_minutes', 601)")  # one the app refuses (the page's own check is by-passed)
+    pg.evaluate("setPref('silence_end_minutes', 601)")  # one the app refuses (the page's own check is by-passed)
     p.allowed.add(400)
     pg.click("#save-settings")
-    expect(pg.locator("[data-path='pref:silence_ask_minutes'] .field-error")).not_to_be_empty()
+    expect(pg.locator("[data-path='pref:silence_end_minutes'] .field-error")).not_to_be_empty()
     assert sent == ["prefs"], sent
-    assert host.cfg.user_name == "Camille Z" and host.prefs.silence_ask_minutes == 15
+    assert host.cfg.user_name == "Camille Z" and host.prefs.silence_end_minutes == 60
     expect(pg.locator("#f-user_name")).to_have_value("Camille Y")
 
 
