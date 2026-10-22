@@ -130,7 +130,7 @@ Pour un Mac Apple Silicon (M1 ou plus récent) sous macOS 14.2 ou plus. Aucun te
    (**Continuer** ou **Terminer**) ; après 60, la réunion se termine d'elle-même. Quand une autre
    app démarre un appel (Zoom, Teams, FaceTime, Meet…), le bouton flottant propose **Appel détecté —
    prendre des notes ?** : rien ne démarre sans que vous cliquiez sur **Démarrer**. **Réglages →
-   Général → Démarrer les réunions** permet de tout changer, ou de revenir à l'écoute permanente.
+   Général → Démarrer une réunion** permet de tout changer, ou de revenir à l'écoute permanente.
    Fermer la fenêtre ne quitte pas l'app : cliquez sur l'icône → **Ouvrir Voicestream** pour la
    retrouver, ou **Quitter Voicestream** pour arrêter. **Ouvrir à la connexion**, dans le même
    menu, le lance avec votre Mac.
