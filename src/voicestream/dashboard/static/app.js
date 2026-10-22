@@ -4284,10 +4284,14 @@ function renderSetup() {
   }
   W.foot = h('div', { class: 'setup-foot', id: 'setup-foot' });
   W.errorBox = h('div', { id: 'setup-error-box' });
+  // a choice redraws the step it is on: its control keeps the focus (an arrow key goes on through a
+  // radio group); a new step's title takes it instead, below
+  const focused = document.activeElement && root.contains(document.activeElement) ? document.activeElement.id : null;
   fill(root, top,
     h('div', { class: 'setup-main' }, h('section', { class: 'card setup-card', 'aria-labelledby': 'setup-h', id: 'setup-' + step }, body, W.errorBox)),
     W.foot);
   renderSetupFoot();
+  if (W.shown === W.step && focused && $(focused)) $(focused).focus({ preventScroll: true });
   if (W.shown !== W.step) {
     W.shown = W.step;
     const heading = $('setup-h');
@@ -4529,17 +4533,21 @@ const SETUP_STEPS = {
           switchRow('setup-launch', t('set.listen_on_launch'), t('set.listen_on_launch_help'), c.listenOnLaunch, (on) => { c.listenOnLaunch = on; })));
         return parts;
       }
-      if (caps.hotkey) {
-        W.shortcut = W.shortcut || shortcutSetting({ prefix: 'setup-shortcut', variant: 'setup' });
-        W.shortcut.draw();
-        parts.push(h('div', { class: 'sub-card setup-shortcut' }, W.shortcut));
-      }
+      // first what puts something on screen, writes an app into ~/Applications or watches the
+      // microphone (all on unless turned off here), then the shortcut, which does none of that; the
+      // last step lists the ones on, as this one can be taller than the window
       if (caps.floating_button || caps.spotlight || caps.call_detection) {
         parts.push(h('div', { class: 'sub-card' },
           caps.floating_button && switchRow('setup-floating', t('start.floating'), t('start.floating_help'), c.floating, (on) => { c.floating = on; }),
           caps.spotlight && switchRow('setup-spotlight', t('start.spotlight'), t('start.spotlight_help'), c.spotlight, (on) => { c.spotlight = on; }),
           caps.call_detection && switchRow('setup-suggestions', t('start.suggest'), t('start.suggest_help'), c.suggestions, (on) => { c.suggestions = on; })));
-      } else if (!caps.hotkey) {  // the browser: none of these exist here
+      }
+      if (caps.hotkey) {
+        W.shortcut = W.shortcut || shortcutSetting({ prefix: 'setup-shortcut', variant: 'setup' });
+        W.shortcut.draw();
+        parts.push(h('div', { class: 'sub-card setup-shortcut' }, W.shortcut));
+      }
+      if (!caps.hotkey && !(caps.floating_button || caps.spotlight || caps.call_detection)) {  // the browser: none of these exist here
         parts.push(h('p', { class: 'help muted', id: 'setup-start-mac-only' }, t('setup.start.mac_only')));
       }
       return parts;
@@ -4572,6 +4580,12 @@ const SETUP_STEPS = {
       const hk = S.app.prefs.hotkey;
       const how = W.choice.mode === 'automatic' ? t('setup.done.automatic')
         : hk && caps.hotkey ? t('setup.done.manual_keys', { keys: shortcutText(hk) }) : t('setup.done.manual');
+      // by hand, what the start step turned on, said here in full: a floating button, an app in your
+      // Applications folder, the microphone watched for calls
+      const c = W.choice, manual = c.mode !== 'automatic';
+      const ways = [manual && caps.floating_button && c.floating && t('setup.done.floating'),
+        manual && caps.spotlight && c.spotlight && t('setup.done.spotlight'),
+        manual && caps.call_detection && c.suggestions && t('setup.done.suggest')].filter(Boolean);
       return [
         ...setupHead(t('setup.done.title', { name: v.user_name }), t('setup.done.lead')),
         h('div', { class: 'summary-list' },
@@ -4582,7 +4596,8 @@ const SETUP_STEPS = {
           rem ? row(!W.remindersCheck || W.remindersCheck.status === 'ok',
             t('setup.done.reminders', { list: savedVal('sinks.reminders.list_name') || '' })) : null,
           row(true, t('setup.done.files')),
-          row(true, how)),
+          row(true, how),
+          ways.map((text) => row(true, text))),
         caps.login_item ? h('div', { class: 'sub-card' },
           switchRow('setup-login', t('set.start_at_login'), t('set.login_help'), W.choice.startAtLogin, (on) => { W.choice.startAtLogin = on; })) : null,
       ];
@@ -5305,6 +5320,9 @@ const STRINGS = {
     'setup.done.manual': 'Meetings start when you start them',
     'setup.done.manual_keys': 'Meetings start when you start them, or with {keys} in any app',
     'setup.done.automatic': 'Meetings start by themselves when someone speaks',
+    'setup.done.floating': 'A floating button above every app starts and stops meetings',
+    'setup.done.spotlight': 'Spotlight starts a meeting: “Voicestream – New Meeting” is in your Applications folder',
+    'setup.done.suggest': 'Suggestions when a call starts: Voicestream sees which apps use the microphone',
     'setup.done.finish': 'Done',
     'setup.downloading': 'Downloading the speech model', 'setup.back': 'Back', 'setup.next': 'Continue',
     'setup.welcome.title': 'Welcome to Voicestream',
@@ -5789,6 +5807,9 @@ const STRINGS = {
     'setup.done.manual': 'Les réunions démarrent quand vous les lancez',
     'setup.done.manual_keys': 'Les réunions démarrent quand vous les lancez, ou avec {keys} dans n’importe quelle app',
     'setup.done.automatic': 'Les réunions démarrent d’elles-mêmes dès que quelqu’un parle',
+    'setup.done.floating': 'Un bouton flottant au-dessus de toutes les apps démarre et arrête les réunions',
+    'setup.done.spotlight': 'Spotlight démarre une réunion : « Voicestream – Nouvelle réunion » est dans votre dossier Applications',
+    'setup.done.suggest': 'Suggestions quand un appel commence : Voicestream voit quelles apps utilisent le micro',
     'setup.done.finish': 'Terminer',
     'setup.downloading': 'Téléchargement du modèle de transcription', 'setup.back': 'Retour', 'setup.next': 'Continuer',
     'setup.welcome.title': 'Bienvenue dans Voicestream',

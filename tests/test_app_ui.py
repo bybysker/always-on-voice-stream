@@ -2380,6 +2380,79 @@ def test_a_wrong_silence_left_behind_by_a_switch_to_automatic_is_dropped(make_ap
     expect(pg.locator("#savebar .msg.error")).to_have_count(0)
 
 
+def test_the_setup_choices_keep_the_keyboard_focus(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """The setup's choices (how you start a meeting, your languages) are radio groups: an arrow key
+    picks the next one and the focus stays on it, so the next arrow key goes on; Tab then leaves."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=False, meeting_start="manual")
+    _mac_features(app)
+    p = open_page(app)
+    pg = p.page
+    pg.goto(app.url + "#/setup/start")
+    pg.locator('#boot').wait_for(state='hidden')
+    manual = pg.locator("input[name='c-How you start a meeting'][value='manual']")
+    automatic = pg.locator("input[name='c-How you start a meeting'][value='automatic']")
+    manual.focus()
+    pg.keyboard.press("ArrowDown")
+    expect(automatic).to_be_checked()
+    expect(automatic).to_be_focused()
+    expect(pg.locator("#setup-launch")).to_be_visible()  # the step was drawn again for it
+    pg.keyboard.press("ArrowUp")
+    expect(manual).to_be_checked()
+    expect(manual).to_be_focused()
+    pg.keyboard.press("Tab")  # on to the step's next control, not back to the top of the page
+    assert pg.evaluate("""() => { const el = document.activeElement;
+      return $('setup-start').contains(el) && el.name !== 'c-How you start a meeting'; }""")
+
+    pg.click("#setup-back")  # a step change still puts the focus on the step's title
+    expect(pg.locator("#setup-h")).to_be_focused()
+
+
+def test_the_setup_says_what_it_turned_on(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """The ways of starting a meeting that put something on screen, in the Applications folder or watch
+    the microphone come first on their step, above the shortcut, and the last step lists the ones on,
+    the launcher by the name it has in the Applications folder."""
+    from playwright.sync_api import expect
+
+    from voicestream.app import spotlight
+    from voicestream.app.native import WINDOW_SIZE
+
+    app = make_app(setup_done=False, meeting_start="manual")
+    _mac_features(app)
+    p = open_page(app, size=WINDOW_SIZE)
+    pg = p.page
+    pg.goto(app.url + "#/setup/start")
+    pg.locator('#boot').wait_for(state='hidden')
+    expect(pg.locator("#setup-h")).to_have_text("How you start a meeting")
+    tops = pg.evaluate("""() => ['setup-floating', 'setup-spotlight', 'setup-suggestions', 'setup-shortcut-change']
+      .map((id) => document.getElementById(id).getBoundingClientRect().top)""")
+    assert tops[0] < tops[1] < tops[2] < tops[3], tops
+    foot = pg.locator("#setup-foot").bounding_box()
+    for switch in ("#setup-floating", "#setup-spotlight"):
+        box = pg.locator(switch).locator("xpath=..").bounding_box()
+        assert box and box["y"] + box["height"] <= foot["y"], (switch, box, foot)  # seen without scrolling
+    pg.click("#setup-next")
+    done = pg.locator(".summary-list")
+    expect(done).to_contain_text("A floating button above every app starts and stops meetings")
+    expect(done).to_contain_text(f"Spotlight starts a meeting: “{spotlight.NAMES['en']}” is in your Applications folder")
+    expect(done).to_contain_text("Suggestions when a call starts: Voicestream sees which apps use the microphone")
+    p.shot("setup-done-what-is-on")
+    pg.click("#setup-back")
+    pg.click("label[for=setup-spotlight]")
+    pg.click("label[for=setup-suggestions]")
+    pg.click("#setup-next")
+    expect(done).to_contain_text("A floating button")
+    expect(done).not_to_contain_text("Spotlight")
+    expect(done).not_to_contain_text("Suggestions")
+
+    pg.click("#setup-back")
+    pg.click("label[for=setup-spotlight]")
+    pg.evaluate("applyLanguage('fr')")
+    pg.click("#setup-next")
+    expect(done).to_contain_text(f"« {spotlight.NAMES['fr']} »")
+
+
 RECORDING_LOOK = """() => {
   const style = (html) => {
     const box = document.createElement('div');
