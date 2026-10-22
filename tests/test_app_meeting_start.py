@@ -830,6 +830,46 @@ async def test_a_start_waiting_for_the_speech_model_is_dropped_by_the_switch_to_
     await _until(lambda: host.status == "stopped")
 
 
+async def test_a_start_waiting_for_the_wrap_up_is_dropped_by_the_switch_to_manual(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Always-on listening, a meeting being wrapped up after a Stop, and a press meant to start listening again
+    once it is: switched to "when I start one" meanwhile, that start would open a meeting nobody started.
+    It is taken back (``cancelled``); one pressed in manual mode is a start by hand and still waits."""
+    gate = _slow_wrap_up(monkeypatch)
+    built: list[Assistant] = []
+    host = _host(tmp_path, idle=0, factory=_factory(built=built))  # automatic; idle 0: a meeting from the start
+    try:
+        await host.listen_start()
+        await _until(lambda: host.in_meeting())
+        await built[0]._route(seg("I'll send the deck to Sam by Friday.", "mic", t=1.0))
+        assert await host.meeting_stop() == "stop" and host.status == "stopping"
+        waiting = asyncio.ensure_future(host.meeting_start())
+        await asyncio.sleep(0.1)
+        assert not waiting.done() and host.state()["start_queued"] is True
+        host.update_prefs({"meeting_start": "manual"})
+        assert await asyncio.wait_for(waiting, 1) == "cancelled" and host.state()["start_queued"] is False
+        gate.set()
+        await _until(lambda: host.status == "stopped" and host.assistant is None)
+        await asyncio.sleep(0.2)
+        assert host.status == "stopped" and len(built) == 1 and not host.in_meeting()
+
+        assert await host.meeting_start() == "start" and built[-1].manual  # by hand, in manual mode
+        await built[-1]._route(seg("Budget review.", "mic", t=1.0))
+        gate.clear()
+        assert await host.meeting_stop() == "stop"
+        waiting = asyncio.ensure_future(host.meeting_start())
+        await asyncio.sleep(0.1)
+        host.update_prefs({"meeting_start": "manual", "silence_end_minutes": 30})  # not a switch to manual
+        assert not waiting.done() and host.state()["start_queued"] is True
+        gate.set()
+        assert await waiting == "start" and host.in_meeting() and len(built) == 3
+        await host.meeting_stop()
+        await _until(lambda: host.status == "stopped")
+    finally:
+        gate.set()
+        await host.shutdown()
+
+
 # ----------------------------------------------------------------------- links
 
 

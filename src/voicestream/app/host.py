@@ -1395,7 +1395,11 @@ class AppHost:
         if not self.prefs.call_suggestions:
             self._withdraw_suggestion()
         to_manual = mode != "manual" and self.prefs.meeting_start == "manual"
-        limits = (old.silence_ask_minutes, old.silence_end_minutes) != (self.prefs.silence_ask_minutes,
+        if to_manual:
+            # a start waiting for the last meeting's wrap-up was asked for as always-on listening: carried out
+            # now, it would open a manual meeting by itself once the notes are written
+            self._take_back_start(publish=False)
+        limits =(old.silence_ask_minutes, old.silence_end_minutes) != (self.prefs.silence_ask_minutes,
                                                                         self.prefs.silence_end_minutes)
         a = self._assistant
         if a is not None and not self._stop_requested:
