@@ -126,6 +126,12 @@ async def _missing(request: Request, exc: MeetingNotFound) -> JSONResponse:
     return _error(404, str(exc.args[0]) if exc.args else "not found")
 
 
+def _log_late_failure(task: asyncio.Task[Any]) -> None:
+    """A meeting action answered before it was done (:meth:`AppApi._in_time`) that then raised."""
+    if not task.cancelled() and (exc := task.exception()) is not None:
+        log.warning("a meeting start failed after it was answered: %s", exc, exc_info=exc)
+
+
 def _flag(request: Request, name: str) -> bool:
     return request.query_params.get(name, "").lower() in ("1", "true", "yes")
 
@@ -264,7 +270,10 @@ class AppApi:
         task = asyncio.ensure_future(action)
         self.host.track(task)
         done, _ = await asyncio.wait({task}, timeout=START_ANSWER_S)
-        return task.result() if done else "start"
+        if done:
+            return task.result()
+        task.add_done_callback(_log_late_failure)  # nobody awaits it any more: what goes wrong is said in the log
+        return "start"
 
     async def answer(self, request: Request) -> JSONResponse:
         """Start or Not now on "Call detected — start notes?", and OK on a notice. The reply is the app's

@@ -5,6 +5,7 @@ Start and Stop goes through, "Still in a meeting?", voicestream:// links and cal
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import threading
@@ -1145,6 +1146,29 @@ def test_a_start_waiting_for_the_wrap_up_is_answered_at_once(client: TestClient,
         _wait(client, lambda s: s["state"] == "stopped")
     finally:
         gate.set()
+
+
+def test_a_start_that_fails_after_it_was_answered_is_logged(client: TestClient, host: AppHost,
+                                                            monkeypatch: pytest.MonkeyPatch,
+                                                            caplog: pytest.LogCaptureFixture) -> None:
+    """A start answered before it was done (it waited for a wrap-up) that then raises: its error is in the log,
+    not asyncio's "Task exception was never retrieved" whenever the task happens to be collected."""
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr(app_routes, "START_ANSWER_S", 0.1)
+    raised = threading.Event()
+
+    async def failing() -> None:
+        await asyncio.sleep(0.3)
+        raised.set()
+        raise RuntimeError("the speech service went away")
+
+    monkeypatch.setattr(host, "meeting_start", failing)
+    assert client.post("/api/meeting/start").json()["action"] == "start"  # answered while it still waits
+    assert raised.wait(5)
+    _wait(client, lambda s: not host._background)
+    gc.collect()
+    assert "never retrieved" not in caplog.text
+    assert "the speech service went away" in caplog.text
 
 
 def test_meeting_preferences_over_http(client: TestClient, host: AppHost) -> None:
