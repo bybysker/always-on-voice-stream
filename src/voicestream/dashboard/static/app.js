@@ -842,7 +842,7 @@ function notice(kind, iconName, msg, ...actions) {
 }
 
 /** Shell-wide notices, on every screen: the connection, new settings waiting for the meeting to end, and
- *  what the app asks or tells from its state — a call that may want notes, "Still in a meeting?", a
+ *  what the app asks or tells from its state: a call that may want notes, "Still in a meeting?", a
  *  meeting that ended by itself. Inline, never a dialog: nothing takes the focus from what you are doing.
  *  A notice already on show is kept as it is (a screen reader hears it once, a focused button stays). */
 function renderNotices() {
@@ -878,7 +878,7 @@ function renderNotices() {
 
 const NOTICE_KINDS = ['ended_after_silence', 'link_refused'];
 
-/** "Call detected in Zoom — start notes for this call?": Start meeting / Not now. Never a start by itself. */
+/** "Call detected in Zoom. Start notes for this call?": Start meeting / Not now. Never a start by itself. */
 function suggestionBanner(s) {
   const title = s.app ? t('sug.title', { app: s.app }) : t('sug.title_any');
   return notice('info call', 'phone', h('span', {}, h('strong', {}, title), ' ', t('sug.text')),
@@ -908,10 +908,9 @@ function appNoticeBanner(n) {
   const mins = fmtNum(n.minutes || 0);
   const text = !n.folder ? t('notice.silence_empty', { n: mins })
     : n.title ? t('notice.silence_text', { title: n.title, n: mins }) : t('notice.silence_untitled', { n: mins });
-  const open = n.folder && btn(t('live.open_notes'), { cls: 'small ghost', id: 'notice-open', onclick: (e) => {
-    answer('notice/dismiss', null);
-    go('#/meetings/' + enc(n.folder));
-  } });
+  // a link (it opens a screen), which also puts the notice away
+  const open = n.folder && h('a', { class: 'btn small ghost', id: 'notice-open', href: '#/meetings/' + enc(n.folder),
+    onclick: () => { answer('notice/dismiss', null); } }, t('live.open_notes'));
   return notice('info', 'checkCircle', h('span', {}, h('strong', {}, t('notice.silence_title')), ' ', text),
     h('div', { class: 'notice-actions' }, open, ok));
 }
@@ -1463,7 +1462,7 @@ function liveFocusTarget() {
 }
 
 /** The app was opened again (from Spotlight, the Dock, its menu): Live, with its Start control in
- *  focus — unless a dialog is open, or the setup: what you were doing there stays as it is. */
+ *  focus, unless a dialog is open, or the setup: what you were doing there stays as it is. */
 function focusStart() {
   if (S.setup || !S.app || $('ask').open || $('viewer').open) return;
   if (S.route.name !== 'live') {
@@ -1614,7 +1613,7 @@ function setModeLine(text) {
 }
 
 /** Listening all the time (automatic): the state and what it means, as before, and that meetings
- *  start by themselves here — with the way to change it. Start and Resume are the recorder's. */
+ *  start by themselves here, with the way to change it. Start and Resume are the recorder's. */
 function renderListeningHero(st) {
   const minutes = S.settings ? S.settings.values.always_on.idle_split_minutes : 10;
   const views = {
@@ -3468,7 +3467,7 @@ function settingsAnchor() {
   return S.route.name === 'settings' && currentSection() === 'general' && S.route.parts[1] === 'starting' ? 'set-starting' : null;
 }
 
-/** That part, scrolled into view with its heading in focus — once the section is drawn (the settings
+/** That part, scrolled into view with its heading in focus, once the section is drawn (the settings
  *  may still be loading). */
 function focusSettingsAnchor() {
   const id = settingsAnchor();
@@ -4764,7 +4763,7 @@ const STRINGS = {
     'common.close': 'Close', 'common.ok': 'OK', 'common.cancel': 'Cancel', 'common.save': 'Save', 'common.open': 'Open',
     'common.loading': 'Loading…', 'common.skip': 'Skip to content', 'common.hide': 'Hide',
 
-    'err.unreachable': "Can't reach Voicestream: check that it is still open, then try again.",
+    'err.unreachable': 'Can’t reach Voicestream: check that it is still open, then try again.',
     'err.minutes': 'Enter a whole number of minutes, from 0 to 600.',
     'err.copy': "Couldn't copy to the clipboard.",
     'err.required': "This can't be empty.",
@@ -4796,12 +4795,12 @@ const STRINGS = {
 
     'sug.title': 'Call detected in {app}.', 'sug.title_any': 'Call detected.', 'sug.text': 'Start notes for this call?',
     'sug.dismiss': 'Not now',
-    'still.title': 'Still in a meeting?', 'still.text': 'Nothing has been said for {n} min.',
+    'still.title': 'Still in a meeting?', 'still.text': 'Nothing has been said for {n}\u00a0min.',
     'still.ends': 'Without an answer, the meeting ends by itself at {time}.', 'still.keep': 'Keep recording',
     'notice.silence_title': 'The meeting ended by itself.',
-    'notice.silence_text': '“{title}” ended after {n} min without speech: its notes are ready.',
-    'notice.silence_untitled': 'It ended after {n} min without speech: its notes are ready.',
-    'notice.silence_empty': 'It ended after {n} min without speech. Nothing had been said, so there are no notes.',
+    'notice.silence_text': '“{title}” ended after {n}\u00a0min without speech: its notes are ready.',
+    'notice.silence_untitled': 'It ended after {n}\u00a0min without speech: its notes are ready.',
+    'notice.silence_empty': 'It ended after {n}\u00a0min without speech. Nothing had been said, so there are no notes.',
     'notice.link_title': 'A link was ignored.',
     'notice.link_text': 'Something asked Voicestream to start recording without its key, so nothing was recorded. To start a meeting, use this window, the menu bar or Spotlight.',
 
@@ -4849,8 +4848,8 @@ const STRINGS = {
     'fix.open_mac_settings': 'Open System Settings', 'fix.stt_settings': 'Speech-to-text settings',
     'fix.tools_settings': 'Set up your tools', 'fix.claude_settings': 'Claude settings', 'fix.show_config': 'Show the settings file',
 
-    'dur.under_minute': 'under a minute', 'dur.minutes': '{n} min', 'dur.hours': '{h} h {m}',
-    'size.gb': '{n} GB', 'size.mb': '{n} MB',
+    'dur.under_minute': 'under a minute', 'dur.minutes': '{n}\u00a0min', 'dur.hours': '{h}\u00a0h\u00a0{m}',  // a figure and its unit never split over two lines
+    'size.gb': '{n}\u00a0GB', 'size.mb': '{n}\u00a0MB',
 
     'kind.action.one': 'To-do', 'kind.action.plural': 'To-dos',
     'kind.decision.one': 'Decision', 'kind.decision.plural': 'Decisions',
@@ -5011,7 +5010,7 @@ const STRINGS = {
     'set.app': 'The app', 'set.app_lead': 'How Voicestream opens, and its language.',
     'start.title': 'Starting meetings', 'start.lead': 'When Voicestream records, and how you start a meeting from any app.',
     'start.how': 'How meetings start',
-    'start.manual': 'When I start them (recommended)',
+    'start.manual': 'When you start them (recommended)',
     'start.manual_desc': 'Nothing is recorded until you start a meeting: from this window, the menu bar, the keyboard shortcut, the floating button or Spotlight.',
     'start.automatic': 'Automatically', 'start.automatic_desc': 'Voicestream listens all the time, and a meeting starts as soon as someone speaks.',
     'start.ask': 'Ask “Still in a meeting?” after', 'start.ask_help': 'Keep recording or end the meeting in one click. 0 = never ask.',
@@ -5049,7 +5048,7 @@ const STRINGS = {
     'shortcut.why.reserved_mac': 'macOS uses {keys} itself (switching apps or windows, Spotlight, input sources, screenshots, Force Quit…): choose another.',
     'shortcut.why.option_only': 'macOS 15 can refuse a shortcut held with ⌥ alone, or ⌥⇧ ({keys}): hold ⌘ or ⌃ too.',
     'shortcut.sound': 'Play a sound when the shortcut starts or stops listening', 'shortcut.sound_help': 'So you know it worked without looking — and another one when listening couldn’t start.',
-    'shortcut.sound_meeting': 'Play a sound when the shortcut starts or stops a meeting', 'shortcut.sound_help_meeting': 'So you know it worked without looking — and another one when the meeting couldn’t start.',
+    'shortcut.sound_meeting': 'Play a sound when the shortcut starts or stops a meeting', 'shortcut.sound_help_meeting': 'So you know it worked without looking, and another one when the meeting couldn’t start.',
     'shortcut.hint': 'You can also press {keys} in any app.',
 
     'lang.fr+en': 'French and English', 'lang.fr+en.desc': 'Either language, even both in one meeting.',
@@ -5085,7 +5084,7 @@ const STRINGS = {
 
     'key.saved_keychain': 'Saved in Keychain', 'key.saved_file': 'Saved on this computer', 'key.not_set': 'Not set',
     'key.kept_keychain': 'Kept in the macOS Keychain, never in a file.', 'key.kept_file': 'Kept in a private file on this computer.',
-    'key.paste': 'Paste it here', 'key.paste_named': 'Paste your {name}', 'key.save': 'Save key',
+    'key.paste': 'Paste it here…', 'key.paste_named': 'Paste your {name}', 'key.save': 'Save key',
     'key.saved_toast': '{name} saved.', 'key.replace': 'Replace', 'key.test': 'Test', 'key.remove': 'Remove',
     'key.testing': 'Checking…', 'key.remove_title': 'Remove the {name}?',
     'key.remove_body': 'Voicestream will stop using it until you add it again.',
@@ -5194,10 +5193,9 @@ const STRINGS = {
     'setup.start.title': 'How you start a meeting',
     'setup.start.lead': 'Choose when Voicestream records. You can change it later in Settings.',
     'setup.start.manual_desc': 'Nothing is recorded until you start a meeting. Start it when the call begins, stop it when it ends.',
-    'setup.start.shortcut_help': 'Press it in any app to start a meeting, and again to stop it.',
     'setup.start.mac_only': 'In the Voicestream app for Mac you can also start a meeting with a keyboard shortcut, from a floating button above every app, from Spotlight, and when a call starts.',
     'setup.done.manual': 'Meetings start when you start them',
-    'setup.done.manual_keys': 'Meetings start when you start them — or press {keys} in any app',
+    'setup.done.manual_keys': 'Meetings start when you start them, or with {keys} in any app',
     'setup.done.automatic': 'Meetings start by themselves when someone speaks',
     'setup.done.finish': 'Done',
     'setup.downloading': 'Downloading the speech model', 'setup.back': 'Back', 'setup.next': 'Continue',
@@ -5282,12 +5280,12 @@ const STRINGS = {
 
     'sug.title': 'Appel détecté dans {app}.', 'sug.title_any': 'Appel détecté.', 'sug.text': 'Prendre des notes de cet appel ?',
     'sug.dismiss': 'Pas maintenant',
-    'still.title': 'Toujours en réunion ?', 'still.text': 'Rien n’a été dit depuis {n} min.',
+    'still.title': 'Toujours en réunion ?', 'still.text': 'Rien n’a été dit depuis {n}\u00a0min.',
     'still.ends': 'Sans réponse, la réunion se termine d’elle-même à {time}.', 'still.keep': 'Continuer l’enregistrement',
     'notice.silence_title': 'La réunion s’est terminée d’elle-même.',
-    'notice.silence_text': '« {title} » s’est terminée après {n} min sans parole : ses notes sont prêtes.',
-    'notice.silence_untitled': 'Elle s’est terminée après {n} min sans parole : ses notes sont prêtes.',
-    'notice.silence_empty': 'Elle s’est terminée après {n} min sans parole. Rien n’avait été dit, il n’y a donc pas de notes.',
+    'notice.silence_text': '« {title} » s’est terminée après {n}\u00a0min sans parole : ses notes sont prêtes.',
+    'notice.silence_untitled': 'Elle s’est terminée après {n}\u00a0min sans parole : ses notes sont prêtes.',
+    'notice.silence_empty': 'Elle s’est terminée après {n}\u00a0min sans parole. Rien n’avait été dit, il n’y a donc pas de notes.',
     'notice.link_title': 'Un lien a été ignoré.',
     'notice.link_text': 'Quelque chose a demandé à Voicestream d’enregistrer sans sa clé : rien n’a été enregistré. Pour démarrer une réunion, utilisez cette fenêtre, la barre des menus ou Spotlight.',
 
@@ -5335,8 +5333,8 @@ const STRINGS = {
     'fix.open_mac_settings': 'Ouvrir les Réglages Système', 'fix.stt_settings': 'Réglages de transcription',
     'fix.tools_settings': 'Configurer vos outils', 'fix.claude_settings': 'Réglages de Claude', 'fix.show_config': 'Afficher le fichier de réglages',
 
-    'dur.under_minute': 'moins d’une minute', 'dur.minutes': '{n} min', 'dur.hours': '{h} h {m}',
-    'size.gb': '{n} Go', 'size.mb': '{n} Mo',
+    'dur.under_minute': 'moins d’une minute', 'dur.minutes': '{n}\u00a0min', 'dur.hours': '{h}\u00a0h\u00a0{m}',
+    'size.gb': '{n}\u00a0Go', 'size.mb': '{n}\u00a0Mo',
 
     'kind.action.one': 'Tâche', 'kind.action.plural': 'Tâches',
     'kind.decision.one': 'Décision', 'kind.decision.plural': 'Décisions',
@@ -5497,7 +5495,7 @@ const STRINGS = {
     'set.app': 'L’application', 'set.app_lead': 'Comment Voicestream s’ouvre, et sa langue.',
     'start.title': 'Démarrer une réunion', 'start.lead': 'Quand Voicestream enregistre, et comment démarrer une réunion depuis n’importe quelle app.',
     'start.how': 'Comment les réunions démarrent',
-    'start.manual': 'Quand je les démarre (recommandé)',
+    'start.manual': 'Quand vous les démarrez (recommandé)',
     'start.manual_desc': 'Rien n’est enregistré tant que vous ne démarrez pas une réunion : depuis cette fenêtre, la barre des menus, le raccourci clavier, le bouton flottant ou Spotlight.',
     'start.automatic': 'Automatiquement', 'start.automatic_desc': 'Voicestream écoute en permanence, et une réunion démarre dès que quelqu’un parle.',
     'start.ask': 'Demander « Toujours en réunion ? » après', 'start.ask_help': 'Continuer l’enregistrement ou terminer la réunion en un clic. 0 = ne jamais demander.',
@@ -5535,7 +5533,7 @@ const STRINGS = {
     'shortcut.why.reserved_mac': 'macOS utilise lui-même {keys} (changer d’app ou de fenêtre, Spotlight, sources de saisie, captures d’écran, Forcer à quitter…) : choisissez-en un autre.',
     'shortcut.why.option_only': 'macOS 15 peut refuser un raccourci avec ⌥ seule, ou ⌥⇧ ({keys}) : maintenez aussi ⌘ ou ⌃.',
     'shortcut.sound': 'Jouer un son quand le raccourci démarre ou arrête l’écoute', 'shortcut.sound_help': 'Pour savoir que c’est fait sans regarder — et un autre son si l’écoute n’a pas pu démarrer.',
-    'shortcut.sound_meeting': 'Jouer un son quand le raccourci démarre ou arrête une réunion', 'shortcut.sound_help_meeting': 'Pour savoir que c’est fait sans regarder — et un autre son si la réunion n’a pas pu démarrer.',
+    'shortcut.sound_meeting': 'Jouer un son quand le raccourci démarre ou arrête une réunion', 'shortcut.sound_help_meeting': 'Pour savoir que c’est fait sans regarder, et un autre son si la réunion n’a pas pu démarrer.',
     'shortcut.hint': 'Vous pouvez aussi appuyer sur {keys} dans n’importe quelle app.',
 
     'lang.fr+en': 'Français et anglais', 'lang.fr+en.desc': 'L’une ou l’autre, même les deux dans une réunion.',
@@ -5571,7 +5569,7 @@ const STRINGS = {
 
     'key.saved_keychain': 'Enregistrée dans le trousseau', 'key.saved_file': 'Enregistrée sur cet ordinateur', 'key.not_set': 'Non renseignée',
     'key.kept_keychain': 'Gardée dans le trousseau macOS, jamais dans un fichier.', 'key.kept_file': 'Gardée dans un fichier privé sur cet ordinateur.',
-    'key.paste': 'Collez-la ici', 'key.paste_named': 'Collez votre {name}', 'key.save': 'Enregistrer la clé',
+    'key.paste': 'Collez-la ici…', 'key.paste_named': 'Collez votre {name}', 'key.save': 'Enregistrer la clé',
     'key.saved_toast': '{name} enregistrée.', 'key.replace': 'Remplacer', 'key.test': 'Tester', 'key.remove': 'Supprimer',
     'key.testing': 'Vérification…', 'key.remove_title': 'Supprimer la {name} ?',
     'key.remove_body': 'Voicestream cessera de l’utiliser jusqu’à ce que vous l’ajoutiez à nouveau.',
@@ -5677,10 +5675,9 @@ const STRINGS = {
     'setup.start.title': 'Comment démarrer une réunion',
     'setup.start.lead': 'Choisissez quand Voicestream enregistre. Vous pourrez le changer plus tard dans les Réglages.',
     'setup.start.manual_desc': 'Rien n’est enregistré tant que vous ne démarrez pas une réunion. Démarrez-la quand l’appel commence, arrêtez-la quand il se termine.',
-    'setup.start.shortcut_help': 'Appuyez dessus dans n’importe quelle app pour démarrer une réunion, et à nouveau pour l’arrêter.',
     'setup.start.mac_only': 'Dans l’application Voicestream pour Mac, vous pouvez aussi démarrer une réunion avec un raccourci clavier, depuis un bouton flottant au-dessus de toutes les apps, depuis Spotlight, et quand un appel commence.',
     'setup.done.manual': 'Les réunions démarrent quand vous les lancez',
-    'setup.done.manual_keys': 'Les réunions démarrent quand vous les lancez — ou appuyez sur {keys} dans n’importe quelle app',
+    'setup.done.manual_keys': 'Les réunions démarrent quand vous les lancez, ou avec {keys} dans n’importe quelle app',
     'setup.done.automatic': 'Les réunions démarrent d’elles-mêmes dès que quelqu’un parle',
     'setup.done.finish': 'Terminer',
     'setup.downloading': 'Téléchargement du modèle de transcription', 'setup.back': 'Retour', 'setup.next': 'Continuer',
@@ -5772,8 +5769,10 @@ async function boot() {
   else {
     $('shell').hidden = false;
     navigate(false);
-    const start = liveFocusTarget();  // the window opens on Live with Start meeting in focus: Return starts one
-    if (start && start.tagName === 'BUTTON') start.focus({ preventScroll: true });
+    // the window opens on Live with Start meeting in focus: Return starts one (not under a finger: a
+    // focused button there only draws a ring)
+    const start = liveFocusTarget();
+    if (start && start.tagName === 'BUTTON' && !matchMedia('(pointer: coarse)').matches) start.focus({ preventScroll: true });
   }
   connect();
   loadSettings().then(() => { if (S.route.name === 'live' && !S.setup) renderLive(); }).catch(() => { /* loaded again by Settings */ });

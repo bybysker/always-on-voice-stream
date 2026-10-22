@@ -1897,14 +1897,14 @@ def test_setup_step_how_you_start_a_meeting(make_app: Callable[..., UIApp], open
     pg.get_by_label("Automatically", exact=True).check()
     expect(pg.locator("#setup-launch")).to_be_visible()
     expect(pg.locator("#setup-floating")).to_have_count(0)
-    pg.get_by_label("When I start them (recommended)", exact=True).check()
+    pg.get_by_label("When you start them (recommended)", exact=True).check()
     expect(pg.locator("#setup-spotlight")).not_to_be_checked()
     pg.click("#setup-next")
 
     expect(pg.locator("#setup-h")).to_have_text(re.compile("You’re all set"))
     prefs = app.host.prefs
     assert (prefs.meeting_start, prefs.floating_button, prefs.spotlight_launcher, prefs.call_suggestions) == ("manual", True, False, True)
-    expect(pg.locator(".summary-list")).to_contain_text("Meetings start when you start them — or press ⌃⌥K in any app")
+    expect(pg.locator(".summary-list")).to_contain_text("Meetings start when you start them, or with ⌃⌥K in any app")
     expect(pg.locator("#setup-next")).to_have_text("Done")
     expect(pg.locator("#setup-secondary")).to_have_count(0)
     p.shot("setup-done-manual")
