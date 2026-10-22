@@ -583,6 +583,8 @@ def test_the_panel_never_takes_the_focus_and_floats_on_every_space(appkit: Any) 
 
 def test_the_panel_follows_the_state(appkit: Any) -> None:
     p, actions, moves = _panel()
+    now = [0.0]
+    p.clock = lambda: now[0]
     p.update(floating.panel_model(_st(), "en", NOW), lang="en")
     idle_frame = floating._rect(p.panel.frame())
     p.update(floating.panel_model(_st("listening", **_meeting(2)), "en", NOW), lang="en")
@@ -609,11 +611,71 @@ def test_the_panel_follows_the_state(appkit: Any) -> None:
     assert p._views["effect"].values["toolTip"] == "Zoom is using the microphone"
     accept, dismiss = _visible_buttons(p)
     assert accept.values["bezelColor"] == "color:accent" and dismiss.values["bezelColor"] is None  # one primary
+    now[0] += floating.CLICK_GUARD_S  # it came up by itself: its buttons wait a moment (see below)
     p.clicked(1)
     assert actions[-1] == "dismiss"
     p.update(None)
     assert p.panel.values["isVisible"] is False and p.model is None
     assert moves == []
+
+
+def test_new_buttons_ignore_clicks_for_a_moment(appkit: Any) -> None:
+    """A question comes up by itself (hidden, the panel pops up at its place ~3 s into a call — where you may be
+    clicking in the meeting app; shown, its look changes under the pointer), and its buttons take the first click
+    (the panel is never key). A click meant for what was there must not start a recording, keep or end a meeting,
+    or cancel the next one: those buttons ignore clicks for CLICK_GUARD_S once they appear. Everything else keeps
+    acting on the first click, and the context menu is never held back."""
+    now = [100.0]
+    p, actions, _ = _panel()
+    p.clock = lambda: now[0]
+
+    def show(st: dict[str, Any]) -> None:
+        p.update(floating.panel_model(st, "en", NOW), lang="en")
+
+    def click(index: int = 0) -> list[str]:
+        before = len(actions)
+        p._target.panelAction_(types.SimpleNamespace(tag=lambda: index))  # as AppKit sends the button's action
+        return actions[before:]
+
+    def first_mouse() -> bool:
+        return all(b.acceptsFirstMouse_(None) for b in _visible_buttons(p))
+
+    show(_st())
+    assert click() == ["start"] and first_mouse()  # the idle look: at once, as before
+    sug = _st(suggestion={"app": "Zoom", "at": "t1"})
+    show(sug)
+    assert click() == [] and not first_mouse()  # just appeared: neither the press nor the action goes through
+    now[0] += floating.CLICK_GUARD_S - 0.01
+    assert click(1) == []
+    now[0] += 0.02
+    assert click() == ["accept"] and first_mouse()
+    show(_st(suggestion={"app": "Teams", "at": "t2"}))  # another call: the same buttons, where they were
+    assert click(1) == ["dismiss"]
+    p._target.contextAction_(types.SimpleNamespace(representedObject=lambda: "hide"))
+    assert actions[-1] == "hide"
+    show(_st("listening", **_meeting(1)))  # recording: Pause / Stop act at once
+    assert click(1) == ["stop"]
+    show(_st("listening", **_meeting(20), still_there={"meeting_id": "m1", "silent_minutes": 15}))
+    assert click() == [] and click(1) == []  # Keep / End where Pause / Stop just were
+    now[0] += floating.CLICK_GUARD_S
+    assert click() == ["keep"]
+    show(_st("stopping"))
+    show(_st("stopping", start_queued=True))  # Cancel appears where there was no button
+    assert click() == []
+    now[0] += floating.CLICK_GUARD_S
+    assert click() == ["cancel"]
+    writing = {"kind": "ended_after_silence", "minutes": 60, "pending": True}
+    show(_st(notice=writing))  # a notice: Start meeting next to OK, moved by its text
+    assert click() == []
+    now[0] += floating.CLICK_GUARD_S
+    show(_st(notice={**writing, "pending": False, "folder": "f"}))  # the same buttons, new words: not again
+    assert click(1) == ["ok"]
+    p.update(None)  # hidden, then up again for a question: held back again
+    now[0] += 60
+    show(sug)
+    assert click() == []
+    show(_st())  # gone before the moment is over: the idle Start is not held back
+    assert click() == ["start"]
 
 
 def test_reduce_motion_keeps_the_dot_still(appkit: Any) -> None:

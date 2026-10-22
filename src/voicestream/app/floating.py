@@ -28,7 +28,9 @@ pointer target on a Mac), each with a VoiceOver label and a tooltip:
 
 It acts only through the shell (``on_action(key)``), which calls the host's meeting actions: the same
 ones as the window, the menu bar and the keyboard shortcut. A suggestion or a nudge appearing is also
-said to VoiceOver (it appears without the focus, so it would go unheard otherwise).
+said to VoiceOver (it appears without the focus, so it would go unheard otherwise). Its buttons act on
+the first click (it is never key), except, for a moment (:data:`CLICK_GUARD_S`), those of a look that
+came up by itself, under a pointer that may be clicking something else.
 
 AppKit on the main thread only. Every AppKit import is inside a function, so the module imports on
 Linux. The AppKit values used are spelled out below, from the macOS SDK headers quoted by name
@@ -41,6 +43,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -93,6 +96,15 @@ TOP_GAP = 96.0
 """By default it sits at the right, this far below the menu bar: notification banners show at the very top."""
 SAVE_AFTER_S = 0.6
 """A drag ends, then the place is saved (once, not at every point of the drag)."""
+CLICK_GUARD_S = 0.8
+"""New buttons of a look that comes up by itself ignore clicks this long (as browsers hold back the buttons of a
+permission prompt): the panel is never key, so its buttons act on the first click, and a click meant for the app
+underneath — or for the button that was there a moment ago — would start a recording, end a meeting or cancel
+the next one. Longer than a double click, shorter than reading the words and moving to a button."""
+GUARDED_LOOKS = frozenset({"suggestion", "still_there", "notice", "queued"})
+"""The looks that come up without being asked for (a call, a long silence, a meeting that ended by itself, a start
+that waits for the last meeting's notes): their buttons are held back for :data:`CLICK_GUARD_S`. The others follow
+a click of yours (Start, Pause, Stop) and keep acting on the first click."""
 MENU_KEYS = ("hide", "sep", "open", "settings")
 
 STRINGS: dict[str, dict[str, str]] = {
@@ -536,8 +548,13 @@ def _classes() -> dict[str, Any]:
 
         class VoicestreamPanelButton(NSButton):
             # no typedSelector on these overrides: PyObjC keeps the encodings of the methods they override
-            def acceptsFirstMouse_(self, event):  # the first click acts: the panel is never key
-                return True
+            def acceptsFirstMouse_(self, event):  # the first click acts: the panel is never key …
+                panel = getattr(self, "panel", None)
+                try:  # … except on buttons that just came up by themselves (CLICK_GUARD_S): not even pressed
+                    return panel is None or bool(panel.accepts_clicks())
+                except Exception:  # never into AppKit; the action is held back all the same (clicked)
+                    log.exception("floating button: could not tell whether a click may act")
+                    return True
 
         class VoicestreamPanelLabel(NSTextField):
             def mouseDownCanMoveWindow(self):  # the panel is dragged by its labels too
@@ -633,6 +650,9 @@ class FloatingPanel:
     _observer: bool = False
     _animating: bool = False
     _images: dict[tuple[str, str, float], Any] = field(default_factory=dict)
+    clock: Callable[[], float] = field(default=time.monotonic, repr=False)
+    _armed_at: float = 0.0
+    """When the buttons on show may act (:data:`CLICK_GUARD_S` after new ones of a :data:`GUARDED_LOOKS` look)."""
 
     # ------------------------------------------------------------ building
 
@@ -692,6 +712,7 @@ class FloatingPanel:
             b.setButtonType_(BUTTON_MOMENTARY_PUSH_IN)
             with contextlib.suppress(Exception):
                 b.setControlSize_(CONTROL_LARGE)
+            b.panel = self  # for acceptsFirstMouse_
             b.setTarget_(target)
             b.setAction_("panelAction:")
             b.setTag_(i)
@@ -777,6 +798,10 @@ class FloatingPanel:
             self._build()
         self._context_menu()
         appears = self.model is None or self.model.kind != model.kind
+        keys = [b.key for b in model.buttons]
+        if first or not self.panel.isVisible() or self.model is None or [b.key for b in self.model.buttons] != keys:
+            # new buttons, maybe right where a click is on its way: held back a moment if they came up by themselves
+            self._armed_at = self.clock() + CLICK_GUARD_S if model.kind in GUARDED_LOOKS else 0.0
         self._render(model)
         size = self._fitting_size()
         if first or not self.panel.isVisible():
@@ -888,7 +913,14 @@ class FloatingPanel:
 
     # ------------------------------------------------------------ events
 
+    def accepts_clicks(self) -> bool:
+        """The buttons on show may act (not in the :data:`CLICK_GUARD_S` after new ones came up by themselves)."""
+        return self.clock() >= self._armed_at
+
     def clicked(self, index: int) -> None:
+        if not self.accepts_clicks():  # AppKit may deliver the click anyway: the action is what must not happen
+            log.debug("floating button: a click as its buttons came up, ignored")
+            return
         if 0 <= index < len(self._keys):
             self.on_action(self._keys[index])
 
