@@ -1286,6 +1286,11 @@ class AppHost:
             if self.prefs.meeting_start != mode and a.manual and not self.in_meeting():
                 # nothing may be captured without a meeting started by hand: always-on listening stops
                 self.track(asyncio.ensure_future(self.listen_stop()))
+        elif a is None and self._start_when_ready and mode != "manual" and self.prefs.meeting_start == "manual":
+            # always-on listening was waiting for the speech model: once it is in, it would open a meeting
+            # nobody started. The start is dropped (the download goes on); one pressed in manual mode waits on
+            self._done_waiting()
+            self.status, self.error = "stopped", None
         if self.prefs.meeting_start != "manual":
             self.still_there = None
         self._publish_state()

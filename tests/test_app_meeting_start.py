@@ -17,9 +17,10 @@ import pytest
 from helpers import seg
 from pydantic import ValidationError
 from starlette.testclient import TestClient
-from test_app_host import _factory, _host, _prefs, _until
+from test_app_host import _factory, _gated_download, _host, _on_this_mac, _prefs, _until
 from test_session import IdleSource
 
+from voicestream import stt_models
 from voicestream.app import host as host_mod
 from voicestream.app import prefs as prefs_mod
 from voicestream.app.host import AppHost, parse_url
@@ -433,6 +434,39 @@ async def test_switching_modes_applies_to_listening_in_progress(tmp_path: Path) 
     await a.end_meeting("manual")  # … and listening goes on after it, always-on
     assert host.status == "listening" and host.assistant is a and not host.in_meeting()
     host.update_prefs({"meeting_start": "manual"})
+    await _until(lambda: host.status == "stopped")
+
+
+async def test_a_start_waiting_for_the_speech_model_is_dropped_by_the_switch_to_manual(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Always-on listening asked for while the speech model downloads (at launch, after a quit during the
+    first download) waits for it. Switched to "when I start one" meanwhile, it mustn't open a meeting by
+    itself once the model is in; a Start pressed in manual mode during the download still waits for it."""
+    gate, calls = asyncio.Event(), []
+    monkeypatch.setattr(stt_models, "download", _gated_download(gate, calls))
+    built: list[Assistant] = []
+    host = _host(tmp_path, factory=_factory(built=built))  # automatic
+    _on_this_mac(host, tmp_path, "base")
+    await host.listen_start()
+    assert host.status == "starting" and host.awaiting_model == "base"
+    await _until(lambda: calls == ["base"])
+    host.update_prefs({"meeting_start": "manual"})
+    assert host.status == "stopped" and host.awaiting_model is None and host.error is None
+    assert host.state()["state"] == "stopped"
+    gate.set()  # the download goes on and finishes: nothing starts
+    await _until(lambda: not host._downloads)
+    await asyncio.sleep(0.2)
+    assert host.status == "stopped" and built == [] and host.assistant is None
+
+    stt_models.remove(host.cfg, "base")
+    gate.clear()
+    assert await host.meeting_start() == "start" and host.status == "starting"  # pressed by hand, in manual
+    host.update_prefs({"meeting_start": "manual", "silence_end_minutes": 30})  # not a switch to manual
+    assert host.status == "starting" and host.awaiting_model == "base"
+    gate.set()
+    await _until(lambda: host.in_meeting())
+    assert len(built) == 1 and built[0].manual
+    await host.meeting_stop()
     await _until(lambda: host.status == "stopped")
 
 
