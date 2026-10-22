@@ -448,6 +448,9 @@ def test_setup_wizard_end_to_end(make_app: Callable[..., UIApp], open_page: Call
     expect(pg.locator("#setup")).to_be_visible()
     expect(pg.locator("#shell")).to_be_hidden()
     expect(pg.locator("#setup-h")).to_have_text("Welcome to Voicestream")
+    # true whichever way meetings will start (chosen later): nothing promises to listen by itself
+    expect(pg.locator("#setup-welcome .lead")).to_have_text(
+        "Start a meeting when you want: Voicestream turns it into clear notes and to-do lists, in French and in English.")
     p.shot("setup-1-welcome")
     pg.click("#setup-next")
 
@@ -1577,7 +1580,7 @@ def _mac_features(app: UIApp) -> None:
 
 NEW_STRINGS = ("state.m.", "action.start_meeting", "where.", "sug.", "still.", "notice.silence", "notice.link", "live.m.",
                "live.mode.", "live.shortcut.", "live.clock", "live.extract_short", "start.", "setup.start.", "setup.done.",
-               "setup.nav.", "shortcut.", "err.minutes")
+               "setup.nav.", "shortcut.", "err.minutes", "err.end_before_ask", "toast.meeting_over", "setup.welcome.")
 
 
 def test_a_meeting_started_by_hand_from_live(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
@@ -1780,6 +1783,7 @@ def test_starting_meetings_settings(make_app: Callable[..., UIApp], open_page: C
     suggestions, saved with Save; automatically, the always-on settings instead of the silences."""
     from playwright.sync_api import expect
 
+    from voicestream.app import spotlight
     from voicestream.app.native import WINDOW_SIZE
 
     app = make_app(setup_done=True, meeting_start="manual")
@@ -1802,6 +1806,12 @@ def test_starting_meetings_settings(make_app: Callable[..., UIApp], open_page: C
     for key in ("floating_button", "spotlight_launcher", "call_suggestions"):
         expect(pg.locator(f"#p-{key}")).to_be_checked()
         expect(pg.locator(f"#p-{key}")).to_be_enabled()
+    # where a call's suggestion shows: the floating button comes up for it even when hidden
+    expect(pg.locator("[data-path='pref:call_suggestions']")).to_contain_text(
+        "Voicestream offers to start, on the floating button (shown for the question even when it is hidden) and in this window.")
+    expect(pg.locator("[data-path='pref:floating_button']")).to_contain_text(
+        "Hidden, it still comes up to ask about a call or a long silence.")
+    expect(pg.locator("[data-path='pref:spotlight_launcher']")).to_contain_text(f"“{spotlight.NAMES['en']}”")
     expect(pg.locator("#start-summary")).to_contain_text("Meetings start when you start them")
     p.shot("settings-starting-meetings")
 
@@ -1841,11 +1851,13 @@ def test_starting_meetings_outside_the_mac_app(make_app: Callable[..., UIApp], o
     and say so, the shortcut says it is the Mac app's, and Live names only this window."""
     from playwright.sync_api import expect
 
+    from voicestream.app import spotlight
+
     app = make_app(setup_done=True, meeting_start="manual")
     p = open_page(app, locale="fr-FR")
     pg = p.page
     expect(pg.locator("#live-heading")).to_have_text("Aucune réunion en cours")
-    expect(pg.locator("#live-start")).to_have_text("Démarrer la réunion")
+    expect(pg.locator("#live-start")).to_have_text("Démarrer une réunion")  # as the menus and the floating button
     expect(pg.locator("#live-shortcut-text")).to_have_count(0)
     expect(pg.locator("#live-mode")).to_contain_text("Une réunion ne démarre que quand vous la lancez, depuis cette fenêtre.")
     pg.click("#live-mode-change")
@@ -1854,6 +1866,12 @@ def test_starting_meetings_outside_the_mac_app(make_app: Callable[..., UIApp], o
     for key in ("floating_button", "spotlight_launcher", "call_suggestions"):
         expect(pg.locator(f"#p-{key}")).to_be_disabled()
         expect(pg.locator(f"[data-path='pref:{key}']")).to_contain_text("Disponible uniquement dans l’application Voicestream pour Mac.")
+    # the launcher by the name the Mac app gives it in French, in the Applications folder and Spotlight
+    expect(pg.locator("[data-path='pref:spotlight_launcher']")).to_contain_text(f"« {spotlight.NAMES['fr']} »")
+    expect(pg.locator("[data-path='pref:call_suggestions']")).to_contain_text(
+        "Voicestream propose de démarrer, sur le bouton flottant (affiché pour la question même s’il est masqué) et dans cette fenêtre.")
+    expect(pg.locator("[data-path='pref:floating_button']")).to_contain_text(
+        "Masqué, il réapparaît quand même pour une question : un appel, un long silence.")
     # every new word, in both languages
     keys = pg.evaluate("(prefixes) => [Object.keys(STRINGS.en), Object.keys(STRINGS.fr)].map((ks) => ks.filter("
                        "(k) => prefixes.some((p) => k.startsWith(p))).sort())", list(NEW_STRINGS))
@@ -2378,6 +2396,19 @@ def test_a_wrong_silence_left_behind_by_a_switch_to_automatic_is_dropped(make_ap
     assert host.prefs.silence_ask_minutes == 15
     assert pg.evaluate("[S.prefsDraft, S.fieldErrors]") == [{}, {}]
     expect(pg.locator("#savebar .msg.error")).to_have_count(0)
+
+
+def test_the_setup_welcome_in_french(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """The setup's first words, in French: meetings are started when you want, never "by itself"."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=False, user="Me")
+    p = open_page(app, locale="fr-FR")
+    pg = p.page
+    expect(pg.locator("#setup-h")).to_have_text("Bienvenue dans Voicestream")
+    expect(pg.locator("#setup-welcome .lead")).to_have_text(
+        "Démarrez une réunion quand vous le voulez : Voicestream en fait des notes claires et des listes de tâches, "
+        "en français et en anglais.")
 
 
 def test_the_setup_choices_keep_the_keyboard_focus(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
