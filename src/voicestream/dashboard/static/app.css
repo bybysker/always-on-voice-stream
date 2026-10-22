@@ -153,7 +153,7 @@ a:hover { text-decoration-color: currentColor; }
 button, input, select, textarea { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--hue); outline-offset: 2px; }
 /* a heading takes the focus only to say where you are (a screen reader reads it): it is not a control,
-   so it gets no ring — Tab goes on from it to the next control, which has one */
+   so it gets no ring: Tab goes on from it to the next control, which has one */
 :is(h1, h2)[tabindex="-1"]:focus-visible { outline: none; }
 ::selection { background: rgb(29 95 191 / 18%); }
 .num, td, th, output, .value, .pct, .ts, .when, .dur { font-variant-numeric: tabular-nums; }
