@@ -514,6 +514,18 @@ class CallWatcher:
             stop.wait(self.poll_s * min(MAX_BACKOFF, 2 ** max(0, self.errors - 1)))
 
 
+def name_call(call: Call, pid_name: str | None = None, frontmost: str | None = None,
+              running: Iterable[str | None] = ()) -> str | None:
+    """The name the suggestion shows: the app the bundle id says; else the name macOS gives the process
+    (``pid_name``: NSRunningApplication's ``localizedName``); only when Core Audio couldn't tell the process,
+    the likely one (:func:`likely_app`, from the frontmost and running apps' bundle ids)."""
+    if call.app:
+        return call.app
+    if call.pid is not None:
+        return pid_name or None
+    return likely_app(frontmost, running)
+
+
 def running_bundle_ids(apps: Iterable[Any]) -> list[str]:
     """The bundle ids of NSRunningApplication objects (main thread), for :func:`likely_app`."""
     out = []

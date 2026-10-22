@@ -53,7 +53,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import hotkey, launcher, native_hooks
+from . import calls, floating, hotkey, launcher, native_hooks, spotlight
+from .floating import format_elapsed, meeting_started
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +95,17 @@ WILL_TERMINATE = "NSApplicationWillTerminateNotification"
 # one of the method it overrides, whatever this PyObjC's metadata says.
 SIG_REOPEN = b"Z@:@Z"  # (BOOL)applicationShouldHandleReopen:(NSApplication *) hasVisibleWindows:(BOOL)
 SIG_WILL_TERMINATE = b"v@:@"  # (void)applicationWillTerminate:(NSNotification *)
+SIG_URL_EVENT = b"v@:@@"  # (void)handleURLEvent:(NSAppleEventDescriptor *) withReplyEvent:(NSAppleEventDescriptor *)
+
+# voicestream:// links reach the app as a "get URL" Apple event (CFBundleURLTypes in its Info.plist)
+URL_EVENT = int.from_bytes(b"GURL", "big")
+"""HIServices' InternetConfig.h: ``kInternetEventClass = 'GURL'`` and ``kAEGetURL = 'GURL'``, the event's class and id."""
+DIRECT_OBJECT = int.from_bytes(b"----", "big")  # AE's AppleEvents.h keyDirectObject = '----': the link
+AUTO_RETURN_ID, ANY_TRANSACTION = -1, 0  # AE's AEDataModel.h kAutoGenerateReturnID = -1, kAnyTransactionID = 0
+SEND_NO_REPLY = 1  # NSAppleEventDescriptor.h NSAppleEventSendNoReply = kAENoReply (AEDataModel.h: 0x00000001)
+URL_ANSWER_S = 5.0  # the self-test's wait for the host's answer to a link
+SETTINGS_PAGE = "#/settings/general"
+"""Settings… in the floating button's menu opens the window there (Settings → General → Starting meetings)."""
 
 SOUNDS = {"start": "Tink", "restart": "Tink", "resume": "Tink", "stop": "Pop", "error": "Basso"}
 """What the keyboard shortcut plays (macOS's own sounds, /System/Library/Sounds) for what it did;
@@ -111,23 +123,32 @@ SYMBOLS = {
 }
 
 STRINGS: dict[str, dict[str, str]] = {
+    # menu items in title case (the macOS convention for menus in English), the state line as a sentence
     "en": {
         "listening": "Listening",
         "meeting": "Meeting in progress · {minutes} min",
         "paused": "Paused — nothing is being recorded",
         "stopped": "Not listening",
+        "idle": "No meeting in progress",
         "starting": "Starting…",
         "stopping": "Stopping…",
+        "saving": "Saving the meeting…",
         "error": "Problem: {error}",
         "quitting": "Quitting — saving your meeting…",
         "open": "Open Voicestream",
         "pause": "Pause",
-        "resume": "Resume listening",
-        "start": "Start listening",
-        "stop": "Stop listening",
-        "end_meeting": "End meeting now",
-        "login": "Open at login",
-        "login_approval": "Open at login (allow it in System Settings)",
+        "resume": "Resume Listening",
+        "resume_meeting": "Resume Meeting",
+        "start": "Start Listening",
+        "stop": "Stop Listening",
+        "start_meeting": "Start Meeting",
+        "stop_meeting": "Stop Meeting",
+        "end_meeting": "End Meeting Now",
+        "show_floating": "Show Floating Button",
+        "hide_floating": "Hide Floating Button",
+        "meeting_menu": "Meeting",
+        "login": "Open at Login",
+        "login_approval": "Open at Login (Allow in System Settings)",
         "quit": "Quit Voicestream",
         "quit_title": "Stop listening and quit Voicestream?",
         "quit_detail": "Voicestream won't hear your meetings until you open it again.",
@@ -141,16 +162,24 @@ STRINGS: dict[str, dict[str, str]] = {
         "meeting": "Réunion en cours · {minutes} min",
         "paused": "En pause — rien n'est enregistré",
         "stopped": "Écoute arrêtée",
+        "idle": "Aucune réunion en cours",
         "starting": "Démarrage…",
         "stopping": "Arrêt…",
+        "saving": "Enregistrement de la réunion…",
         "error": "Problème : {error}",
         "quitting": "Fermeture — enregistrement de la réunion…",
         "open": "Ouvrir Voicestream",
         "pause": "Mettre en pause",
         "resume": "Reprendre l'écoute",
+        "resume_meeting": "Reprendre la réunion",
         "start": "Démarrer l'écoute",
         "stop": "Arrêter l'écoute",
+        "start_meeting": "Démarrer une réunion",
+        "stop_meeting": "Arrêter la réunion",
         "end_meeting": "Terminer la réunion",
+        "show_floating": "Afficher le bouton flottant",
+        "hide_floating": "Masquer le bouton flottant",
+        "meeting_menu": "Réunion",
         "login": "Ouvrir à la connexion",
         "login_approval": "Ouvrir à la connexion (à autoriser dans Réglages Système)",
         "quit": "Quitter Voicestream",
@@ -213,27 +242,6 @@ def pick_language(pref: str | None, preferred: Iterable[str] = ()) -> str:
     return "en"
 
 
-def meeting_started(state: dict[str, Any]) -> datetime | None:
-    if not state.get("in_meeting"):
-        return None
-    raw = (state.get("meeting") or {}).get("started_at") or state.get("meeting_started_at")
-    if not raw:
-        return None
-    try:
-        started = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw))
-    except ValueError:
-        return None
-    return started if started.tzinfo else started.replace(tzinfo=UTC)
-
-
-def format_elapsed(seconds: float) -> str:
-    """``4:05``, ``12:34``, ``1:02:03``."""
-    s = max(0, int(seconds))
-    h, rest = divmod(s, 3600)
-    m, s = divmod(rest, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-
-
 def status_symbol(state: dict[str, Any]) -> str:
     """The SF Symbol for the menu-bar icon."""
     return SYMBOLS.get(str(state.get("state") or "stopped"), "mic.slash")
@@ -263,7 +271,14 @@ def state_line(state: dict[str, Any], lang: str, now: datetime, *, quitting: boo
     started = meeting_started(state)
     if current == "listening" and started is not None:
         return s["meeting"].format(minutes=max(0, int((now - started).total_seconds() // 60)))
+    if is_manual(state) and current in ("stopped", "stopping"):
+        return s["idle" if current == "stopped" else "saving"]  # nothing is listened to between meetings
     return s.get(current, s["stopped"])
+
+
+def is_manual(state: dict[str, Any]) -> bool:
+    """Meetings start when you start one (the default), rather than whenever someone speaks."""
+    return floating.meeting_mode(state) == "manual"
 
 
 def hotkey_wanted(state: dict[str, Any], *, quitting: bool = False) -> tuple[str, tuple[str, ...]] | None:
@@ -292,33 +307,76 @@ def shortcut_entry(state: dict[str, Any]) -> str:
     return "pause" if hotkey.TOGGLE.get(str(state.get("state") or "stopped")) == "resume" else "listen"
 
 
+def _floating_entry(key: str, state: dict[str, Any], lang: str, *, quitting: bool) -> MenuEntry:
+    """Show / Hide Floating Button (``prefs.floating_button``), where the shell has one and the setup is done."""
+    s = STRINGS.get(lang, STRINGS["en"])
+    on = bool((state.get("prefs") or {}).get("floating_button", True))
+    there = bool((state.get("capabilities") or {}).get("floating_button")) and bool(state.get("setup_done"))
+    return MenuEntry(key, s["hide_floating"] if on else s["show_floating"], enabled=not quitting, visible=there)
+
+
 def menu_model(state: dict[str, Any], lang: str, login: str, *, now: datetime | None = None,
                quitting: bool = False) -> list[MenuEntry]:
     """The status item's menu for this state, always the same keys in the same order (the native
-    menu is built once and updated in place)."""
+    menu is built once and updated in place). Start/Stop Meeting when meetings start by hand (End
+    Meeting Now would be Stop again), Start/Stop Listening and End Meeting Now when automatically."""
     s = STRINGS.get(lang, STRINGS["en"])
     now = now or datetime.now(UTC)
     current = str(state.get("state") or "stopped")
+    manual = is_manual(state)
     busy = quitting or current in ("starting", "stopping")
     stopped = current in ("stopped", "error")
     login_on = login in ("enabled", "requires_approval")
     key, mods = listen_shortcut(state)
     shortcut: dict[str, Any] = {"shortcut": key, "modifiers": mods}
     on_pause, on_listen = (shortcut, {}) if shortcut_entry(state) == "pause" else ({}, shortcut)
+    start, stop = (s["start_meeting"], s["stop_meeting"]) if manual else (s["start"], s["stop"])
+    resume = s["resume_meeting"] if manual else s["resume"]
+    floating_item = _floating_entry("floating", state, lang, quitting=quitting)
     return [
         MenuEntry("status", state_line(state, lang, now, quitting=quitting), enabled=False),
         MenuEntry("sep1"),
         MenuEntry("open", s["open"], enabled=not quitting),
         MenuEntry("sep2"),
-        MenuEntry("pause", s["resume"] if current == "paused" else s["pause"], enabled=not busy,
+        MenuEntry("pause", resume if current == "paused" else s["pause"], enabled=not busy,
                   visible=current in ("listening", "paused"), **on_pause),
-        MenuEntry("listen", s["start"] if stopped else s["stop"], enabled=not busy, **on_listen),
-        MenuEntry("end_meeting", s["end_meeting"], enabled=not busy, visible=bool(state.get("in_meeting"))),
-        MenuEntry("sep3", visible=login != "unsupported"),
+        # Stop may cancel a start still under way (a speech model downloading), as the host allows
+        MenuEntry("listen", start if stopped else stop, enabled=not quitting and current != "stopping", **on_listen),
+        MenuEntry("end_meeting", s["end_meeting"], enabled=not busy, visible=bool(state.get("in_meeting")) and not manual),
+        MenuEntry("sep3", visible=login != "unsupported" or floating_item.visible),
+        floating_item,
         MenuEntry("login", s["login_approval"] if login == "requires_approval" else s["login"], enabled=not quitting,
                   visible=login != "unsupported", checked=login_on),
         MenuEntry("sep4"),
         MenuEntry("quit", s["quit"], enabled=not quitting, shortcut="q"),
+    ]
+
+
+def meeting_menu_model(state: dict[str, Any], lang: str, *, quitting: bool = False) -> list[MenuEntry]:
+    """The "Meeting" menu of the app's menu bar (shown while the window is in front): the same commands as
+    the status item's, each one always there and disabled when it can't be used (the convention for the
+    menu bar), the keyboard shortcut next to the one a press does now."""
+    s = STRINGS.get(lang, STRINGS["en"])
+    current = str(state.get("state") or "stopped")
+    manual = is_manual(state)
+    press = hotkey.TOGGLE.get(current)
+    key, mods = listen_shortcut(state)
+
+    def shortcut(on: bool) -> dict[str, Any]:
+        return {"shortcut": key, "modifiers": mods} if on else {}
+
+    recording = current in ("listening", "paused")
+    return [
+        MenuEntry("m_start", s["start_meeting"] if manual else s["start"], enabled=not quitting and current in ("stopped", "error"),
+                  **shortcut(press in ("start", "restart"))),
+        MenuEntry("m_stop", s["stop_meeting"] if manual else s["stop"],
+                  enabled=not quitting and current in ("starting", "listening", "paused"), **shortcut(press == "stop")),
+        MenuEntry("m_pause", (s["resume_meeting"] if manual else s["resume"]) if current == "paused" else s["pause"],
+                  enabled=not quitting and recording, **shortcut(press == "resume")),
+        MenuEntry("m_end", s["end_meeting"], enabled=not quitting and recording and bool(state.get("in_meeting")),
+                  visible=not manual),
+        MenuEntry("sep_m"),
+        _floating_entry("m_floating", state, lang, quitting=quitting),
     ]
 
 
@@ -374,7 +432,7 @@ def _app_delegate_class(base: Any) -> Any:
             def applicationShouldHandleReopen_hasVisibleWindows_(self, app, has_visible):  # noqa: ANN001, ANN202
                 shell = _SHELL
                 if shell is not None:
-                    _guard(shell.show_window)
+                    _guard(shell.reopened)
                 return False  # handled: AppKit has nothing more to do
 
             @objc.typedSelector(SIG_WILL_TERMINATE)
@@ -432,6 +490,10 @@ def _menu_target_class() -> Any:
             @objc.typedSelector(SIG_WILL_TERMINATE)
             def appWillTerminate_(self, notification):  # noqa: ANN001, ANN202
                 _guard(self.shell.will_terminate)
+
+            @objc.typedSelector(SIG_URL_EVENT)
+            def handleURLEvent_withReplyEvent_(self, event, reply):
+                _guard(lambda: self.shell.on_url_event(event))
 
         _TARGET_CLASS = VoicestreamMenuTarget
     return _TARGET_CLASS
@@ -520,6 +582,10 @@ def run(host: launcher.Host, *, selftest: float | None = None, report_path: Path
     if isinstance(caps, dict):
         caps["native_window"] = True
         caps["hotkey"] = hotkey.available()
+        caps["floating_button"] = True
+        # the launcher opens a voicestream:// link, which only the packaged app (with its Info.plist) handles
+        caps["spotlight"] = native_hooks.bundle_path() is not None
+        caps["call_detection"] = calls.available()
     try:
         url = host.run_in_thread()
     except Exception as exc:  # noqa: BLE001
@@ -530,6 +596,27 @@ def run(host: launcher.Host, *, selftest: float | None = None, report_path: Path
             _fatal_alert(str(exc))
         return 2
     return MacShell(host, url, selftest=selftest, report_path=report_path).run()
+
+
+def call_name(call: calls.Call) -> str | None:
+    """Main thread: the app a call is in, for "Call detected" (:func:`.calls.name_call`, with what NSWorkspace
+    says: the process's name, else the frontmost and running apps)."""
+    pid_name = front = None
+    running: list[str] = []
+    try:
+        import AppKit
+
+        if not call.app and call.pid is not None:
+            app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(call.pid)
+            pid_name = str(app.localizedName() or "") if app is not None else None
+        elif not call.app:
+            ws = AppKit.NSWorkspace.sharedWorkspace()
+            app = ws.frontmostApplication()
+            front = str(app.bundleIdentifier() or "") if app is not None else None
+            running = calls.running_bundle_ids(ws.runningApplications() or [])
+    except Exception:  # the suggestion just names no app
+        log.debug("could not name the app of a call", exc_info=True)
+    return calls.name_call(call, pid_name, front, running)
 
 
 def _fatal_alert(message: str) -> None:
@@ -585,6 +672,16 @@ class MacShell:
         self._layout: dict[str, str] | None = None  # what the keys type on the keyboard layout, as last read
         self._recording = False  # Settings was recording a shortcut at the last state
         self._probe: list[Any] | None = None  # the self-test's press: the host's answers, nothing done
+        self._main_menu: Any = None  # the "Meeting" menu in the app's menu bar
+        self._main_entries: dict[str, Any] = {}
+        self._floating: floating.FloatingPanel | None = None
+        self._floating_test: str | None = None  # the self-test shows this sample on it, whatever the state says
+        self._watcher: calls.CallWatcher | None = None
+        self._recorded = False  # something was recorded since the call watcher last started
+        self._spotlight: tuple[Any, ...] | None = None  # what the Spotlight launcher was last made for
+        self._url_handler: str | None = None  # "registered", or why the voicestream:// handler is not
+        self._urls = 0  # links received (the self-test's check)
+        self._url_probe: list[Any] | None = None  # the self-test's links: the host's answers, nothing done
 
     # ------------------------------------------------------------ startup
 
@@ -602,6 +699,7 @@ class MacShell:
             log.exception("could not install the app delegate")
             self.delegate_error = f"{type(exc).__name__}: {exc}"
         self._observe_termination()
+        self._register_url_handler()  # before the run loop starts: a link that launched the app is its first event
         self.state = launcher.safe_state(self.host)
         self.lang = self._language()
         self.window = webview.create_window(
@@ -661,11 +759,31 @@ class MacShell:
         except Exception:  # noqa: BLE001 - the delegate's applicationWillTerminate: still does it
             log.exception("could not watch for the app quitting")
 
+    def _register_url_handler(self) -> None:
+        """Hear ``voicestream://`` links: the "get URL" Apple event (NSAppleEventManager.h
+        ``setEventHandler:andSelector:forEventClass:andEventID:``), which Launch Services sends when a link
+        is opened — by the Spotlight launcher, a Shortcut, a link clicked somewhere — whether the app was
+        running or this is its launch. Registered before the run loop starts, as Apple's documentation asks
+        (applicationWillFinishLaunching: at the latest): the event that launched the app comes first."""
+        try:
+            import Foundation
+
+            Foundation.NSAppleEventManager.sharedAppleEventManager().setEventHandler_andSelector_forEventClass_andEventID_(
+                self._menu_target(), "handleURLEvent:withReplyEvent:", URL_EVENT, URL_EVENT)
+            self._url_handler = "registered"
+        except Exception as exc:  # links do nothing; everything else works (the self-test says so)
+            log.exception("could not listen for voicestream:// links")
+            self._url_handler = f"{type(exc).__name__}: {exc}"
+
     def _start_menu_bar(self) -> None:
         try:
             self._create_status_item()
         except Exception:  # noqa: BLE001 - the window still works without it
             log.exception("could not create the menu-bar icon")
+        try:
+            self._create_meeting_menu()
+        except Exception:  # the status item's menu has the same commands
+            log.exception("could not add the Meeting menu")
         self._launched = True  # the keyboard shortcut is registered by the apply_state below
         # read again: listening may have started before the state listener was added
         self.apply_state(launcher.safe_state(self.host))
@@ -740,11 +858,19 @@ class MacShell:
         button.setImagePosition_(IMAGE_LEFT)
         with contextlib.suppress(Exception):  # digits of equal width: the timer doesn't jiggle
             button.setFont_(AppKit.NSFont.monospacedDigitSystemFontOfSize_weight_(AppKit.NSFont.systemFontSize(), 0.0))
+        menu = self._new_menu("Voicestream", menu_model(self.state, self.lang, self._login), self._entries)
+        menu.setDelegate_(self._menu_target())
+        item.setMenu_(menu)
+        self._item, self._menu = item, menu
+
+    def _new_menu(self, title: str, entries: Iterable[MenuEntry], store: dict[str, Any]) -> Any:
+        """An NSMenu of these entries, each one kept in ``store`` by its key to be updated in place."""
+        import AppKit
+
         target = self._menu_target()
-        menu = AppKit.NSMenu.alloc().initWithTitle_("Voicestream")
+        menu = AppKit.NSMenu.alloc().initWithTitle_(title)
         menu.setAutoenablesItems_(False)
-        menu.setDelegate_(target)
-        for entry in menu_model(self.state, self.lang, self._login):
+        for entry in entries:
             if entry.separator:
                 mi = AppKit.NSMenuItem.separatorItem()
             else:
@@ -754,9 +880,23 @@ class MacShell:
                 mi.setTarget_(target)
                 mi.setRepresentedObject_(entry.key)
             menu.addItem_(mi)
-            self._entries[entry.key] = mi
-        item.setMenu_(menu)
-        self._item, self._menu = item, menu
+            store[entry.key] = mi
+        return menu
+
+    def _create_meeting_menu(self) -> None:
+        """The "Meeting" menu in the app's menu bar, after pywebview's own (which builds the menu bar once, before
+        the run loop starts, and builds it again only for a window given menus of its own: ours has none)."""
+        import AppKit
+
+        main = _app().mainMenu()
+        if main is None:
+            return
+        title = STRINGS[self.lang]["meeting_menu"]
+        menu = self._new_menu(title, meeting_menu_model(self.state, self.lang), self._main_entries)
+        holder = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
+        holder.setSubmenu_(menu)
+        main.addItem_(holder)
+        self._main_menu = menu
 
     def _image(self, symbol: str) -> Any:
         if symbol not in self._images:
@@ -772,7 +912,8 @@ class MacShell:
         """Main thread: a new host state."""
         self.state = state or {}
         self.lang = self._language()
-        for step in (self._update_activity, self._sync_hotkey, self._sync_layout, self.render, self._update_timer):
+        for step in (self._update_activity, self._sync_hotkey, self._sync_layout, self.render, self._update_timer,
+                     self._sync_floating, self._sync_calls, self._sync_spotlight):
             try:
                 step()
             except Exception:  # noqa: BLE001
@@ -785,28 +926,37 @@ class MacShell:
         AppHelper.callAfter(self.apply_state, dict(state or {}))
 
     def render(self) -> None:
-        if self._item is None:
-            return
+        """The menu-bar icon and its menu, the Meeting menu and the floating button's timer (each second
+        while a meeting is recorded, see :meth:`_update_timer`)."""
         now = datetime.now(UTC)
-        button = self._item.button()
-        self._symbol = status_symbol(self.state)
-        image = self._image(self._symbol)
-        title = status_title(self.state, now)
-        if image is not None:
-            button.setImage_(image)
-            button.setTitle_(f" {title}" if title else "")
-        else:  # no SF Symbols (shouldn't happen on macOS 11+): words instead of an icon
-            button.setTitle_(f"VS {title}".strip())
-        button.setToolTip_(state_line(self.state, self.lang, now, quitting=self.quitting))
-        for entry in menu_model(self.state, self.lang, self._login, now=now, quitting=self.quitting):
-            mi = self._entries.get(entry.key)
+        if self._item is not None:
+            button = self._item.button()
+            self._symbol = status_symbol(self.state)
+            image = self._image(self._symbol)
+            title = status_title(self.state, now)
+            if image is not None:
+                button.setImage_(image)
+                button.setTitle_(f" {title}" if title else "")
+            else:  # no SF Symbols (shouldn't happen on macOS 11+): words instead of an icon
+                button.setTitle_(f"VS {title}".strip())
+            button.setToolTip_(state_line(self.state, self.lang, now, quitting=self.quitting))
+            self._update_entries(self._entries, menu_model(self.state, self.lang, self._login, now=now,
+                                                           quitting=self.quitting))
+        self._update_entries(self._main_entries, meeting_menu_model(self.state, self.lang, quitting=self.quitting))
+        if self._floating is not None and self._floating.model is not None and self._floating_test is None:
+            self._floating.tick(self._panel_model(now))
+
+    @staticmethod
+    def _update_entries(store: dict[str, Any], entries: Iterable[MenuEntry]) -> None:
+        for entry in entries:
+            mi = store.get(entry.key)
             if mi is None:
                 continue
             if not entry.separator:
                 mi.setTitle_(entry.title)
                 mi.setEnabled_(entry.enabled)
                 mi.setState_(CONTROL_ON if entry.checked else CONTROL_OFF)
-                mi.setKeyEquivalent_(entry.shortcut)  # Start/Stop listening's follows the keyboard shortcut
+                mi.setKeyEquivalent_(entry.shortcut)  # Start/Stop's follows the keyboard shortcut
                 mi.setKeyEquivalentModifierMask_(entry.modifiers)
             mi.setHidden_(not entry.visible)
 
@@ -932,7 +1082,7 @@ class MacShell:
         "it worked" one must not play for a start that went to the error state."""
         from PyObjCTools import AppHelper
 
-        action = await self.host.listen_toggle()
+        action = await self.host.meeting_toggle()
         if action is not None:
             AppHelper.callAfter(_guard, lambda: self._feedback(action))
 
@@ -954,27 +1104,244 @@ class MacShell:
     # --------------------------------------------------------------- menu actions
 
     def on_menu(self, key: str) -> None:
-        """Main thread. Only posts work to the host loop: never waits for it."""
+        """Main thread. Only posts work to the host loop: never waits for it. Starting and stopping go through
+        the host's meeting actions, as the window, the shortcut, the floating button and links do (after a
+        problem, Start is a restart there: what failed may have left half the assistant running)."""
         current = self.state.get("state")
         if key == "open":
-            self.show_window()
-        elif key == "pause":
+            self.reopened()
+        elif key in ("pause", "m_pause"):
             self._post(self.host.listen_resume() if current == "paused" else self.host.listen_pause())
         elif key == "listen":
-            if current == "error":
-                # "error" can leave half the assistant running (the microphone gave up, meeting audio
-                # is still recorded): starting is then a no-op, a restart replaces it
-                self._post(self.host.listen_restart())
-            elif current == "stopped":
-                self._post(self.host.listen_start())
-            else:
-                self._post(self.host.listen_stop())
-        elif key == "end_meeting":
+            self._post(self.host.meeting_start() if current in ("stopped", "error") else self.host.meeting_stop())
+        elif key == "m_start":
+            self._post(self.host.meeting_start())
+        elif key == "m_stop":
+            self._post(self.host.meeting_stop())
+        elif key in ("end_meeting", "m_end"):
             self._post(self._end_meeting())
+        elif key in ("floating", "m_floating"):
+            on = bool((self.state.get("prefs") or {}).get("floating_button", True))
+            self._post(self._on_loop("update_prefs", {"floating_button": not on}))
         elif key == "login":
             self._toggle_login()
         elif key == "quit":
             self.quit()
+
+    def reopened(self) -> None:
+        """Main thread: Voicestream was opened again (the Dock, Finder, Spotlight, Open Voicestream): the window,
+        with the keyboard focus on its Start control (the host tells the page)."""
+        self.show_window()
+        self._post(self._on_loop("request_focus", "start"))
+
+    async def _on_loop(self, name: str, *args: Any) -> Any:
+        """Call one of the host's plain methods on its loop, as they ask (``suggestion_dismiss``, ``update_prefs``…);
+        a host without it does nothing."""
+        fn = getattr(self.host, name, None)
+        return fn(*args) if fn is not None else None
+
+    # ----------------------------------------------------------- floating button
+
+    def _panel_model(self, now: datetime | None = None) -> floating.PanelModel:
+        state = floating.sample_states()[self._floating_test] if self._floating_test else self.state
+        hk = (self.state.get("prefs") or {}).get("hotkey")
+        ok = bool(hk) and (self.state.get("hotkey") or {}).get("status") == "ok"
+        shortcut = hotkey.describe(str(hk["code"]), hk.get("mods") or (), str(hk.get("key") or "")) if ok else ""
+        return floating.panel_model(state, self.lang, now, shortcut=shortcut)
+
+    def _sync_floating(self) -> None:
+        """Main thread, at each host state: show the floating button as the state says (or hide it)."""
+        if not self._launched:
+            return
+        want = self._floating_test is not None or floating.wanted(self.state, quitting=self.quitting)
+        if not want and self._floating is None:
+            return
+        if self._floating is None:
+            self._floating = floating.FloatingPanel(on_action=self.on_floating, on_moved=self._floating_moved)
+        saved = (self.state.get("prefs") or {}).get("floating_position")
+        self._floating.update(self._panel_model() if want else None, saved=saved, lang=self.lang)
+
+    def on_floating(self, key: str) -> None:
+        """Main thread: a click on the floating button (or its context menu). Only posts to the host, through the
+        meeting actions every other way of starting and stopping uses."""
+        if key in ("start", "retry"):
+            self._post(self.host.meeting_start())
+        elif key == "pause":
+            self._post(self.host.listen_pause())
+        elif key == "resume":
+            self._post(self.host.listen_resume())
+        elif key == "stop":
+            self._post(self.host.meeting_stop())
+        elif key == "accept":
+            self._post(self.host.suggestion_accept())
+        elif key == "dismiss":
+            self._post(self._on_loop("suggestion_dismiss"))
+        elif key == "keep":
+            self._post(self.host.meeting_keep())
+        elif key == "end":
+            self._post(self._end_meeting())
+        elif key == "ok":
+            self._post(self._on_loop("dismiss_notice"))
+        elif key == "show":
+            self.show_window()
+        elif key == "open":
+            self.reopened()
+        elif key == "settings":
+            self.show_settings()
+        elif key == "hide":
+            self._post(self._on_loop("update_prefs", {"floating_button": False}))
+
+    def _floating_moved(self, position: dict[str, Any]) -> None:
+        """Main thread: you dragged the floating button somewhere: remembered for the next launch."""
+        self._post(self._on_loop("update_prefs", {"floating_position": position}))
+
+    def show_settings(self) -> None:
+        """Main thread: the window, on Settings → General (where Starting meetings is). The page is told from
+        another thread: pywebview's run_js waits for the page, which needs this one."""
+        self.show_window()
+        window = self.window
+
+        def go() -> None:
+            try:
+                _with_timeout(lambda: window.run_js(f"location.hash = {json.dumps(SETTINGS_PAGE)}"), MAIN_THREAD_TIMEOUT_S)
+            except (TimeoutError, RuntimeError) as exc:  # the window is open all the same
+                log.warning("could not open Settings: %s", exc)
+
+        threading.Thread(target=go, name="voicestream-settings", daemon=True).start()
+
+    # ----------------------------------------------------------- call suggestions
+
+    def _sync_calls(self) -> None:
+        """Main thread, at each host state: look for calls only while nothing is recorded, suggestions are on and
+        the setup is done (the host suggests nothing otherwise anyway)."""
+        if not self._launched:
+            return
+        current = str(self.state.get("state") or "stopped")
+        prefs = self.state.get("prefs") or {}
+        caps = self.state.get("capabilities") or {}
+        if current in ("starting", "listening", "paused", "stopping"):
+            self._recorded = True
+        want = (not self.quitting and bool(caps.get("call_detection")) and bool(prefs.get("call_suggestions", True))
+                and bool(self.state.get("setup_done")) and current in ("stopped", "error"))
+        if want and (self._watcher is None or not self._watcher.running):
+            if self._watcher is None:
+                self._watcher = calls.CallWatcher(on_start=self._call_seen, on_end=self._call_gone)
+            # the watcher is the memory of the calls under way from now on: the host forgets those it knew
+            self._post(self._on_loop("call_ended"))
+            self._watcher.start(baseline=self._recorded)  # the call just recorded is not a new one
+            self._recorded = False
+        elif not want and self._watcher is not None and self._watcher.running:
+            self._watcher.stop()
+
+    def _call_seen(self, call: calls.Call) -> None:
+        """The watcher's thread: a call started. Named on the main thread (NSWorkspace), then suggested."""
+        from PyObjCTools import AppHelper
+
+        AppHelper.callAfter(_guard, lambda: self._suggest(call))
+
+    def _call_gone(self, call: calls.Call) -> None:
+        from PyObjCTools import AppHelper
+
+        AppHelper.callAfter(_guard, lambda: self._post(self._on_loop("call_ended", call.app, call.key)))
+
+    def _suggest(self, call: calls.Call) -> None:
+        if self._watcher is None or not self._watcher.running:
+            return  # recording started meanwhile
+        self._post(self._on_loop("suggest_meeting", call_name(call), call.key))
+
+    # ----------------------------------------------------------- Spotlight launcher
+
+    def _sync_spotlight(self) -> None:
+        """Main thread, at each host state: keep "Voicestream – New Meeting" in ~/Applications as the preference
+        says, once the setup is done (it is one of its questions). Made again when the language or the app's
+        place changes, and at each launch (the app may have moved, or been replaced by a new version)."""
+        if not self._launched or self.quitting:
+            return
+        caps = self.state.get("capabilities") or {}
+        if not caps.get("spotlight") or not self.state.get("setup_done"):
+            return
+        on = bool((self.state.get("prefs") or {}).get("spotlight_launcher", True))
+        app = native_hooks.bundle_path()
+        wanted = (on, self.lang, str(app))
+        if wanted == self._spotlight:
+            return
+        self._spotlight = wanted
+        self._post(self._write_launcher(on, self.lang, app))
+
+    async def _write_launcher(self, on: bool, lang: str, app: Path | None) -> str:
+        """On the host's loop (the link's key is made and saved there), the files in a worker thread."""
+        import asyncio
+
+        from .. import __version__
+
+        made = None
+        if on:
+            get = getattr(self.host, "launcher_url", None)
+            if get is None:
+                return "unsupported"
+            made = spotlight.Launcher(url=get(), lang=lang, app=app, icon=spotlight.app_icon(app), version=__version__)
+        try:
+            result = await asyncio.to_thread(spotlight.sync, spotlight.applications_dir(), made)
+        except OSError as exc:
+            log.warning("could not update the Spotlight launcher in ~/Applications: %s", exc)
+            return "failed"
+        log.info("Spotlight launcher: %s", result)
+        return result
+
+    # ----------------------------------------------------------- voicestream:// links
+
+    def on_url_event(self, event: Any) -> None:
+        """Main thread (the Apple event handler): a ``voicestream://`` link was opened."""
+        param = event.paramDescriptorForKeyword_(DIRECT_OBJECT)
+        url = str(param.stringValue() or "") if param is not None else ""
+        self.open_url(url)
+
+    def open_url(self, url: str) -> None:
+        """Main thread. Only posts to the host, which checks the link's key (never logged here); the outcome is
+        said like a press of the shortcut: a sound, the window for ``voicestream://open``."""
+        self._urls += 1
+        if self._url_probe is not None:  # the self-test's link: ask the host what it would do, change nothing
+            try:
+                self._url_probe.append(self.host.call(self._ask_url(url)))
+            except RuntimeError:
+                log.exception("the app host is not running")
+            return
+        self._post(self._follow(url))
+
+    async def _follow(self, url: str) -> None:
+        from PyObjCTools import AppHelper
+
+        follow = getattr(self.host, "open_url", None)
+        outcome = await follow(url) if follow is not None else "unknown"
+        AppHelper.callAfter(_guard, lambda: self._url_done(str(outcome)))
+
+    def _url_done(self, outcome: str) -> None:
+        """Main thread: what a link did. The meeting actions sound as the shortcut's do (a link from Spotlight
+        leaves you in the app you were in, so the sound and the floating button are the feedback); a link
+        refused for its key sounds as a failure (the floating button and the window say why)."""
+        if outcome == "open":
+            self.reopened()
+        elif outcome in SOUNDS:
+            self._feedback(outcome)
+        elif outcome == "refused":
+            self._feedback("error")
+
+    async def _ask_url(self, url: str) -> dict[str, Any]:
+        """The self-test's link, on the loop: what it names, whether it carries the launcher's key (compared as
+        the host does, in constant time) and what the host would do — without doing it."""
+        import hmac
+
+        from .host import parse_url
+
+        parsed = parse_url(url)
+        if parsed is None:
+            return {"action": None, "key_ok": False, "would": None}
+        action, given = parsed
+        own = parse_url(self.host.launcher_url())
+        key = own[1] if own is not None else None
+        ok = bool(given and key) and hmac.compare_digest(str(given).encode(), str(key).encode())
+        ask = getattr(self.host, "meeting_action", None)
+        return {"action": action, "key_ok": ok, "would": ask(action) if ok and ask is not None else None}
 
     def quit(self) -> None:
         """Main thread: Quit in the menu (and the self-test's own quit)."""
@@ -1054,8 +1421,9 @@ class MacShell:
         self._terminating = True
         self.quitting = True
         self._quit_started = time.monotonic()
-        with contextlib.suppress(Exception):
-            self.render()
+        for step in (self.render, self._sync_floating, self._sync_calls):  # the floating button goes, calls aren't watched
+            with contextlib.suppress(Exception):
+                step()
         threading.Thread(target=self._shutdown_then_reply, name="voicestream-quit", daemon=True).start()
         return TERMINATE_LATER
 
@@ -1099,6 +1467,8 @@ class MacShell:
         if self._hotkeys is not None:
             with contextlib.suppress(Exception):  # macOS drops it with the process anyway
                 self._hotkeys.close()
+        if self._watcher is not None:
+            self._watcher.stop()
         if self.selftest is not None and self.report:
             self.report["quit"] = self._quit_info
             launcher.write_report(self.report_path, self.report)
@@ -1165,8 +1535,24 @@ class MacShell:
             report["keyboard_layout"] = layout = self._on_main(self._layout_info) or {}
             checks["keyboard_layout"] = (bool(layout.get("keys")) and layout.get("problem") is None
                                          and bool(layout.get("told_host")))
+            report["floating"] = panel = self._check_floating()
+            checks["floating_panel"] = bool(panel.get("ok"))
+            checks["floating_panel_states"] = bool(panel.get("states_ok"))
+            report["url"] = link = self._check_url()
+            checks["url_handler"] = bool(link.get("registered")) and (bool(link.get("scheme_in_plist"))
+                                                                      or not report["frozen"])
+            checks["url_reaches_host"] = bool(link.get("reaches_host"))
+            report["spotlight"] = launch = self._check_spotlight(frozen=bool(report["frozen"]))
+            checks["spotlight_launcher"] = bool(launch.get("ok"))
+            report["mic_probe"] = mic = self._check_mic_probe()
+            checks["mic_probe"] = bool(mic.get("ok"))
             launcher.write_phase(self.report_path, "window")
             time.sleep(SELFTEST_PAUSE_S)
+            # the floating button as a call shows it, for CI's screenshot (then back to what the state says)
+            self._on_main(lambda: self._show_sample("suggestion"))
+            launcher.write_phase(self.report_path, "floating")
+            time.sleep(SELFTEST_PAUSE_S)
+            self._on_main(lambda: self._show_sample(None))
             report["menu"] = self._check_menu()
             report["microphone"] = native_hooks.microphone_authorization()
             report["login_item"] = native_hooks.login_item_status()
@@ -1322,6 +1708,168 @@ class MacShell:
         ident, keys = hotkey.current_layout()  # an OSError goes in the report (_on_main)
         return {"id": ident, "keys": keys, "problem": hotkey.layout_problem(ident, keys),
                 "told_host": keys == (self.state.get("keyboard_layout") or {})}
+
+    def _show_sample(self, name: str | None) -> None:
+        """Main thread: show the floating button with one of :func:`.floating.sample_states` (``None``: as the
+        state says again, hidden if it says so)."""
+        self._floating_test = name
+        self._sync_floating()
+
+    def _focus_info(self) -> dict[str, Any]:
+        """Main thread: whether Voicestream is the active app, and which window has the keyboard."""
+        app = _app()
+        key = app.keyWindow()
+        return {"active": bool(app.isActive()), "key_window": int(key.windowNumber()) if key is not None else None}
+
+    def _draw_samples(self) -> dict[str, Any]:
+        """Main thread: draw every look of the floating button once, as the real panel draws it."""
+        out: dict[str, Any] = {}
+        for name in floating.sample_states():
+            self._show_sample(name)
+            panel = self._floating
+            if panel is None or panel.model is None:
+                out[name] = {"drawn": False}
+                continue
+            drawn = panel.drawn()
+            heights = [b["height"] for b in drawn["buttons"]]
+            out[name] = {"drawn": True, "kind": panel.model.kind, "size": [round(v) for v in drawn["size"]],
+                         "buttons": len(heights), "expected_buttons": len(panel.model.buttons),
+                         "min_button_height": min(heights) if heights else None,
+                         "labelled": all(b["label"] for b in drawn["buttons"])}
+        self._show_sample("idle")
+        return out
+
+    def _check_floating(self) -> dict[str, Any]:
+        """The floating button as macOS has it: on screen, on every Space and next to full-screen apps, at the
+        floating level, non-activating and never key — showing it changed neither the active app nor the key
+        window — and every look of it drawn with buttons at least 28 points tall, each with a VoiceOver label.
+        The setup isn't done on CI (the state hides it then): it is shown with its idle look for the test."""
+        out: dict[str, Any] = {"wanted": floating.wanted(self.state, quitting=self.quitting)}
+        try:
+            out["focus_before"] = before = self._on_main(self._focus_info) or {}
+            self._on_main(lambda: self._show_sample("idle"))
+            time.sleep(0.5)
+            out["panel"] = info = self._on_main(lambda: self._floating.info() if self._floating else {"created": False}) or {}
+            out["focus_after"] = after = self._on_main(self._focus_info) or {}
+            out["states"] = drawn = self._on_main(self._draw_samples, timeout=30) or {}
+        finally:
+            self._on_main(lambda: self._show_sample(None))
+        out["ok"] = bool(info.get("created") and info.get("visible") and info.get("all_spaces")
+                         and info.get("full_screen_auxiliary") and info.get("nonactivating") and info.get("floating")
+                         and info.get("can_become_key") is False and info.get("hides_on_deactivate") is False
+                         and "error" not in before and before == after)
+        samples = floating.sample_states()
+        out["states_ok"] = bool(drawn) and set(drawn) == set(samples) and all(
+            d.get("drawn") and d["buttons"] == d["expected_buttons"] and d["labelled"]
+            and (d["min_button_height"] is None or d["min_button_height"] >= floating.MIN_TARGET - 0.5)
+            and d["size"][1] >= floating.MIN_TARGET for d in drawn.values() if isinstance(d, dict))
+        return out
+
+    def _url_scheme_info(self) -> dict[str, Any]:
+        """Main thread: the app's Info.plist names the scheme (CFBundleURLTypes), and which app Launch Services
+        would open a link with (only said: a build run in place may not be registered yet)."""
+        import AppKit
+        import Foundation
+
+        info = Foundation.NSBundle.mainBundle().infoDictionary() or {}
+        schemes = [str(x) for t in (info.get("CFBundleURLTypes") or []) for x in (t.get("CFBundleURLSchemes") or [])]
+        handler = None
+        with contextlib.suppress(Exception):
+            app = AppKit.NSWorkspace.sharedWorkspace().URLForApplicationToOpenURL_(
+                Foundation.NSURL.URLWithString_("voicestream://open"))
+            handler = str(app.path()) if app is not None else None
+        return {"scheme_in_plist": "voicestream" in schemes, "default_handler": handler}
+
+    def _send_url_event(self, url: str) -> dict[str, Any]:
+        """Main thread: a "get URL" Apple event to this very process, as Launch Services sends one
+        (NSAppleEventDescriptor.h ``appleEventWithEventClass:eventID:targetDescriptor:returnID:transactionID:``,
+        ``currentProcessDescriptor``, ``sendEventWithOptions:timeout:error:``), with the link as its direct object."""
+        import Foundation
+
+        d = Foundation.NSAppleEventDescriptor
+        event = d.appleEventWithEventClass_eventID_targetDescriptor_returnID_transactionID_(
+            URL_EVENT, URL_EVENT, d.currentProcessDescriptor(), AUTO_RETURN_ID, ANY_TRANSACTION)
+        event.setParamDescriptor_forKeyword_(d.descriptorWithString_(url), DIRECT_OBJECT)
+        _reply, error = event.sendEventWithOptions_timeout_error_(SEND_NO_REPLY, URL_ANSWER_S, None)
+        return {"sent": error is None, "error": str(error.localizedDescription()) if error is not None else None}
+
+    def _check_url(self) -> dict[str, Any]:
+        """``voicestream://`` links: the handler is registered, the Info.plist names the scheme, and two links
+        delivered as Apple events reach the host — the launcher's keyed ``meeting/toggle``, which the host would
+        carry out as a press of the shortcut, and the same link without its key, which it would refuse. Like
+        the shortcut's test, the host is only asked: nothing starts. Neither the link nor its key is reported."""
+        out: dict[str, Any] = {"registered": self._url_handler == "registered", "handler": self._url_handler}
+        out.update(self._on_main(self._url_scheme_info) or {})
+        try:
+            own = str(self.host.call(self._on_loop("launcher_url")).result(URL_ANSWER_S) or "")
+        except Exception as exc:  # noqa: BLE001 - in the report
+            out["error"] = f"{type(exc).__name__}: {exc}"
+            return out
+        links = (own.replace("://meeting/start?", "://meeting/toggle?", 1), "voicestream://meeting/toggle")
+        before = launcher.safe_state(self.host).get("state")
+        answers: list[Any] = []
+        received = self._urls
+        self._url_probe = answers
+        results: list[Any] = []
+        try:
+            out["sent"] = [self._on_main(lambda u=u: self._send_url_event(u)) for u in links]
+            deadline = time.monotonic() + URL_ANSWER_S
+            while len(answers) < len(links) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            out["handled"] = self._urls - received
+            results = [a.result(URL_ANSWER_S) for a in answers]
+        except Exception as exc:  # noqa: BLE001 - in the report
+            out["error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            self._url_probe = None
+        after = launcher.safe_state(self.host).get("state")
+        out.update(state_before=before, state_after=after, expected=hotkey.TOGGLE.get(str(before)),
+                   answers=results)
+        keyed, keyless = (results + [{}, {}])[:2]
+        out["reaches_host"] = (out.get("handled") == len(links) and keyed.get("action") == "toggle"
+                               and keyed.get("key_ok") is True and out["expected"] is not None
+                               and keyed.get("would") == out["expected"] and keyless.get("key_ok") is False
+                               and keyless.get("would") is None and after == before)
+        return out
+
+    def _check_spotlight(self, *, frozen: bool) -> dict[str, Any]:
+        """The Spotlight launcher, written into a temporary folder (never ~/Applications here) as the setting
+        writes it: an Info.plist plutil reads, its own bundle id, LSUIElement, a script that may run (readable by
+        you only), the app's icon in the packaged app; then removed as turning the setting off removes it."""
+        import shutil
+        import tempfile
+
+        from .. import __version__
+
+        folder = Path(tempfile.mkdtemp(prefix="voicestream-launcher-test-"))
+        out: dict[str, Any] = {"ok": False}
+        try:
+            url = str(self.host.call(self._on_loop("launcher_url")).result(URL_ANSWER_S) or "")
+            app = native_hooks.bundle_path()
+            made = spotlight.Launcher(url=url, lang=self.lang, app=app, icon=spotlight.app_icon(app), version=__version__)
+            out["sync"] = spotlight.sync(folder, made)
+            bundle = folder / f"{made.name}.app"
+            out["check"] = check = spotlight.check(bundle)
+            out["icon"] = (bundle / "Contents" / "Resources" / spotlight.ICON).is_file()
+            out["removed"] = spotlight.sync(folder, None)
+            out["ok"] = (out["sync"] == "written" and bool(check.get("ok")) and (out["icon"] or not frozen)
+                         and out["removed"] == "removed" and not bundle.exists())
+        except Exception as exc:  # noqa: BLE001 - in the report
+            out["error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        return out
+
+    def _check_mic_probe(self) -> dict[str, Any]:
+        """The call detection's look at the microphone: Core Audio answers whether another app captures, and
+        which processes (macOS 14+). Only bundle ids are reported."""
+        try:
+            use = calls.probe()
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)}
+        out = calls.describe(use)
+        out["ok"] = isinstance(use.in_use, bool) and bool(out["processes_known"])
+        return out
 
     def _check_menu(self) -> dict[str, Any]:
         """Open the status item's menu for CI's screenshot, then close it again."""

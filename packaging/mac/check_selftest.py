@@ -15,7 +15,16 @@ The app's own report says ``ok`` when every check it ran passed, which is not en
   and change nothing, and the menu must show it;
 * the keyboard layout must be read from macOS (what each key types, by which Settings shows a
   shortcut recorded with ⌥ held): a character of its own for each letter key — on the CI runners'
-  US layout the US one, KeyQ typing q — and told to the host.
+  US layout the US one, KeyQ typing q — and told to the host;
+* the floating button must be on screen as an always-on-top, non-activating panel on every Space and
+  next to full-screen apps, never key; showing it must leave the active app and the key window as
+  they were, and every look of it must be drawn with buttons at least 28 points tall, labelled;
+* voicestream:// links: the Apple-event handler registered and the scheme in the Info.plist; a keyed
+  meeting/toggle link delivered as an Apple event must reach the host (which would carry it out),
+  the same link without the key must be refused, and, as for the shortcut, nothing is started;
+* the Spotlight launcher written into a temporary folder must be valid (plutil reads its Info.plist,
+  its script may run, the app's icon is in it) and removed again; the microphone probe behind call
+  suggestions must answer from Core Audio, naming the processes that capture.
 
 Prints the report and every problem; exits 1 when there is one. Standard library only.
 """
@@ -31,6 +40,7 @@ NATIVE_CHECKS = (
     "window_loaded", "page_rendered", "page_has_content", "app_page", "api_app", "status_item",
     "app_delegate_patched", "hide_on_close_and_reopen", "whisper_server_bundled",
     "hotkey_registered", "hotkey_reaches_host", "hotkey_in_menu", "keyboard_layout",
+    "floating_panel", "floating_panel_states", "url_handler", "url_reaches_host", "spotlight_launcher", "mic_probe",
 )  # fmt: skip
 """What native mode checks in the packaged app (voicestream/app/native.py MacShell._selftest)."""
 
@@ -65,6 +75,11 @@ def problems(report: dict[str, Any], app: Path) -> list[str]:
     if before != after:  # the test only asks the host what a press would do (set up, your Mac may be listening)
         out.append("the keyboard shortcut's test left the app listening" if after in ("starting", "listening", "paused")
                    else f"the keyboard shortcut's test changed the app's state ({before} → {after})")
+    link = report.get("url") or {}
+    before, after = link.get("state_before"), link.get("state_after")
+    if before != after:  # the links are only asked about too: a keyed toggle must not start a recording
+        out.append("the link test left the app listening" if after in ("starting", "listening", "paused")
+                   else f"the link test changed the app's state ({before} → {after})")
     if hk.get("wanted") and hk.get("register_result") == 0 and hk.get("host_status") != "ok":
         out.append(f"macOS took the keyboard shortcut, but the app's state says {hk.get('host_status')!r}: "
                    "the menu and Settings don't show it")

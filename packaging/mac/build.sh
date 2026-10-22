@@ -9,7 +9,8 @@
 #   icon           draw the app icon (packaging/mac/build/Voicestream.icns)
 #   app            PyInstaller -> dist/Voicestream.app (whisper-server bundled through the spec)
 #   verify         codesign --verify --deep --strict, Info.plist, architecture, bundled whisper-server runs
-#   selftest       launch the app with --selftest, take screenshots, check the JSON report
+#   selftest       launch the app with --selftest, take screenshots (window, floating button, menu),
+#                  check the JSON report
 #                  (packaging/mac/check_selftest.py: its own window, its own whisper-server)
 #   dmg            dist/Voicestream-<version>-arm64.dmg (the app + an Applications shortcut)
 #
@@ -124,6 +125,7 @@ step_selftest() {
     >"$SELFTEST_DIR/selftest.log" 2>&1 &
   local pid=$! status=0
   if wait_phase window 90; then screencapture -x "$SELFTEST_DIR/window.png" || echo "screenshot failed"; fi
+  if wait_phase floating 30; then screencapture -x "$SELFTEST_DIR/floating-button.png" || echo "screenshot failed"; fi
   if wait_phase menu 30; then screencapture -x "$SELFTEST_DIR/menu-bar.png" || echo "screenshot failed"; fi
   local deadline=$((SECONDS + SELFTEST_SECONDS + 120))
   while kill -0 "$pid" 2>/dev/null; do

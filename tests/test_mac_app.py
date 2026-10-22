@@ -113,11 +113,65 @@ class FakeHost:
     def toggle_action(self) -> str | None:
         return hotkey.TOGGLE.get(self._state["state"])
 
-    async def listen_toggle(self) -> str | None:
+    def meeting_action(self, what: str = "toggle") -> str | None:
+        start = {"stopped": "start", "error": "restart", "paused": "resume"}
+        if what == "stop":
+            return "stop" if self._state["state"] in ("starting", "listening", "paused", "error") else None
+        return (hotkey.TOGGLE if what == "toggle" else start).get(self._state["state"])
+
+    async def meeting_toggle(self) -> str | None:
         """As AppHost's: a start that went to the error state (``start_fails``) is said as ``error``."""
-        self.calls.append(("listen_toggle", None))
+        self.calls.append(("meeting_toggle", None))
         action = self.toggle_action()
         return "error" if action in ("start", "restart") and self.start_fails else action
+
+    async def listen_toggle(self) -> str | None:
+        return await self.meeting_toggle()
+
+    async def meeting_start(self) -> str | None:
+        self.calls.append(("meeting_start", None))
+        return self.meeting_action("start")
+
+    async def meeting_stop(self) -> str | None:
+        self.calls.append(("meeting_stop", None))
+        return self.meeting_action("stop")
+
+    async def meeting_keep(self) -> bool:
+        self.calls.append(("meeting_keep", None))
+        return True
+
+    async def suggestion_accept(self) -> str | None:
+        self.calls.append(("suggestion_accept", None))
+        return "start"
+
+    def suggestion_dismiss(self) -> bool:
+        self.calls.append(("suggestion_dismiss", None))
+        return True
+
+    def dismiss_notice(self) -> bool:
+        self.calls.append(("dismiss_notice", None))
+        return True
+
+    def suggest_meeting(self, app_name: str | None = None, call_id: str | None = None) -> bool:
+        self.calls.append(("suggest_meeting", (app_name, call_id)))
+        return True
+
+    def call_ended(self, app_name: str | None = None, call_id: str | None = None) -> None:
+        self.calls.append(("call_ended", (app_name, call_id)))
+
+    def request_focus(self, target: str = "start") -> None:
+        self.calls.append(("request_focus", target))
+
+    url_key = "K" * 43
+
+    def launcher_url(self) -> str:
+        return f"voicestream://meeting/start?key={self.url_key}"
+
+    async def open_url(self, url: str) -> str:
+        self.calls.append(("open_url", url))
+        return self.url_outcome
+
+    url_outcome = "start"
 
     def set_hotkey_status(self, status: str, error: int | None = None) -> None:
         self.calls.append(("set_hotkey_status", (status, error)))
@@ -353,11 +407,13 @@ NOW = datetime(2026, 10, 19, 15, 0, 0, tzinfo=UTC)
 
 
 def _state(state: str = "listening", minutes: float | None = None, **extra: Any) -> dict[str, Any]:
+    """A host state; meetings start automatically unless ``mode="manual"`` (what most of these tests are about:
+    the menu bar of always-on listening)."""
     meeting = None
     if minutes is not None:
         meeting = {"id": "m1", "title": "Sync", "started_at": (NOW - timedelta(minutes=minutes)).isoformat()}
     return {"state": state, "in_meeting": meeting is not None, "meeting": meeting, "error": None,
-            "prefs": {"ui_language": "auto"}, **extra}
+            "prefs": {"ui_language": "auto"}, "mode": "automatic", **extra}
 
 
 def test_native_modules_import_without_pyobjc() -> None:
@@ -424,6 +480,12 @@ def test_state_line_in_both_languages() -> None:
     assert err.startswith("Problem: Microphone permission is off") and err.endswith("…") and "\n" not in err
     assert native.state_line(_state("listening"), "en", NOW, quitting=True) == "Quitting — saving your meeting…"
     assert set(native.STRINGS["fr"]) == set(native.STRINGS["en"])
+    # meetings started by hand: nothing is listened to between them
+    assert native.state_line(_state("stopped", mode="manual"), "en", NOW) == "No meeting in progress"
+    assert native.state_line(_state("stopped", mode="manual"), "fr", NOW) == "Aucune réunion en cours"
+    assert native.state_line(_state("stopping", mode="manual"), "en", NOW) == "Saving the meeting…"
+    assert native.state_line(_state("listening", minutes=3, mode="manual"), "en", NOW) == "Meeting in progress · 3 min"
+    assert native.state_line({"state": "stopped"}, "en", NOW) == "No meeting in progress"  # manual: the default
 
 
 def _menu(state: dict[str, Any], login: str = "disabled", **kw: Any) -> dict[str, native.MenuEntry]:
@@ -436,19 +498,20 @@ def test_menu_model() -> None:
         assert [e.key for e in native.menu_model(st, "fr", "enabled", now=NOW)] == keys  # built once, updated in place
 
     stopped = _menu(_state("stopped"))
-    assert stopped["listen"].title == "Start listening" and not stopped["pause"].visible
+    assert stopped["listen"].title == "Start Listening" and not stopped["pause"].visible  # menus: title case
     assert not stopped["end_meeting"].visible and not stopped["status"].enabled
     assert stopped["quit"].shortcut == "q" and not stopped["login"].checked
 
     meeting = _menu(_state("listening", minutes=4))
     assert meeting["pause"].visible and meeting["pause"].title == "Pause"
-    assert meeting["listen"].title == "Stop listening" and meeting["end_meeting"].visible
+    assert meeting["listen"].title == "Stop Listening" and meeting["end_meeting"].visible
 
     paused = _menu(_state("paused", minutes=4))
-    assert paused["pause"].title == "Resume listening"
+    assert paused["pause"].title == "Resume Listening"
 
     starting = _menu(_state("starting"))
-    assert not starting["listen"].enabled
+    assert starting["listen"].title == "Stop Listening" and starting["listen"].enabled  # may cancel a start
+    assert not starting["pause"].visible and not _menu(_state("stopping"))["listen"].enabled
 
     assert not _menu(_state("stopped"), "unsupported")["login"].visible
     approval = _menu(_state("stopped"), "requires_approval")["login"]
@@ -471,7 +534,7 @@ def test_menu_model() -> None:
     # paused, a press resumes (hotkey.TOGGLE): the shortcut is shown next to Resume listening, not next to
     # Stop listening, where it would be read as a stop
     assert hotkey.TOGGLE["paused"] == "resume"
-    for lang, resume, stop in (("en", "Resume listening", "Stop listening"), ("fr", "Reprendre l'écoute", "Arrêter l'écoute")):
+    for lang, resume, stop in (("en", "Resume Listening", "Stop Listening"), ("fr", "Reprendre l'écoute", "Arrêter l'écoute")):
         paused = {e.key: e for e in native.menu_model(_state("paused", minutes=4, **shortcut), lang, "disabled", now=NOW)}
         assert (paused["pause"].title, paused["pause"].shortcut, paused["pause"].modifiers) == (resume, "r", 0x180000)
         assert (paused["listen"].title, paused["listen"].shortcut) == (stop, "")
@@ -481,6 +544,57 @@ def test_menu_model() -> None:
     for st in ("stopped", "error", "starting", "stopping", "listening"):
         assert native.shortcut_entry(_state(st)) == "listen"
     assert native.shortcut_entry(_state("paused")) == "pause"
+
+
+def test_menu_model_when_meetings_start_by_hand() -> None:
+    """Start/Stop Meeting; End Meeting Now would be Stop again, so it isn't there; Show/Hide Floating Button."""
+    there = {"setup_done": True, "capabilities": {"floating_button": True}}
+    stopped = _menu(_state("stopped", mode="manual", **there))
+    assert (stopped["listen"].title, stopped["status"].title) == ("Start Meeting", "No meeting in progress")
+    assert stopped["floating"].visible and stopped["floating"].title == "Hide Floating Button" and stopped["sep3"].visible
+    meeting = _menu(_state("listening", minutes=4, mode="manual", **there))
+    assert meeting["listen"].title == "Stop Meeting" and not meeting["end_meeting"].visible
+    assert _menu(_state("paused", minutes=4, mode="manual"))["pause"].title == "Resume Meeting"
+    hidden = _state("stopped", mode="manual", **there)
+    hidden["prefs"] = {"floating_button": False}
+    assert _menu(hidden)["floating"].title == "Show Floating Button"
+    # before the setup, or without a floating button (the browser), there is nothing to show or hide
+    assert not _menu(_state("stopped", mode="manual", capabilities={"floating_button": True}))["floating"].visible
+    assert not _menu(_state("stopped", mode="manual", setup_done=True))["floating"].visible
+    assert not _menu(_state("stopped", mode="manual"), "unsupported")["sep3"].visible
+    fr = {e.key: e for e in native.menu_model(_state("listening", minutes=4, mode="manual", **there), "fr", "disabled", now=NOW)}
+    assert (fr["listen"].title, fr["floating"].title) == ("Arrêter la réunion", "Masquer le bouton flottant")
+    assert not _menu(_state("stopped", mode="manual", **there), quitting=True)["floating"].enabled
+
+
+def test_meeting_menu_in_the_menu_bar() -> None:
+    """Each command always there, disabled when it can't be used; the shortcut next to what a press does."""
+    shortcut = {"prefs": {"hotkey": {"code": "KeyR", "mods": ["alt", "cmd"], "key": "R"}, "floating_button": True},
+                "hotkey": {"status": "ok"}, "setup_done": True, "capabilities": {"floating_button": True}}
+
+    def menu(st: dict[str, Any], **kw: Any) -> dict[str, native.MenuEntry]:
+        return {e.key: e for e in native.meeting_menu_model(st, "en", **kw)}
+
+    keys = [e.key for e in native.meeting_menu_model(_state("stopped"), "en")]
+    assert keys == ["m_start", "m_stop", "m_pause", "m_end", "sep_m", "m_floating"]
+    stopped = menu(_state("stopped", mode="manual", **shortcut))
+    assert stopped["m_start"].title == "Start Meeting" and stopped["m_start"].enabled and stopped["m_start"].shortcut == "r"
+    assert not stopped["m_stop"].enabled and not stopped["m_pause"].enabled and not stopped["m_end"].visible
+    assert stopped["m_floating"].title == "Hide Floating Button" and stopped["m_floating"].visible
+    rec = menu(_state("listening", minutes=2, mode="manual", **shortcut))
+    assert rec["m_stop"].enabled and rec["m_stop"].shortcut == "r" and rec["m_start"].shortcut == ""
+    assert not rec["m_start"].enabled and rec["m_pause"].enabled and rec["m_pause"].title == "Pause"
+    paused = menu(_state("paused", minutes=2, mode="manual", **shortcut))
+    assert paused["m_pause"].title == "Resume Meeting" and paused["m_pause"].shortcut == "r" and paused["m_stop"].shortcut == ""
+    assert menu(_state("error", mode="manual", **shortcut))["m_start"].shortcut == "r"  # a press restarts
+    starting = menu(_state("starting", mode="manual"))
+    assert starting["m_stop"].enabled and not starting["m_start"].enabled
+    auto = menu(_state("listening", minutes=2))
+    assert auto["m_start"].title == "Start Listening" and auto["m_end"].visible and auto["m_end"].enabled
+    assert not menu(_state("listening"))["m_end"].enabled  # no meeting yet
+    assert not any(e.enabled for e in menu(_state("listening", minutes=2), quitting=True).values() if not e.separator)
+    fr = {e.key: e for e in native.meeting_menu_model(_state("stopped", mode="manual"), "fr")}
+    assert fr["m_start"].title == "Démarrer une réunion" and native.STRINGS["fr"]["meeting_menu"] == "Réunion"
 
 
 def test_which_shortcut_the_shell_registers() -> None:
@@ -581,10 +695,22 @@ def test_menu_actions_only_post_to_the_host(host: FakeHost, appkit: Recorder) ->
         shell.state = _state(state)
         shell.on_menu(key)
     assert _wait(lambda: len(host.calls) == 5 and ended)
-    # "error" may leave half the assistant running (the microphone gave up, meeting audio still
-    # recorded): "Start listening" there restarts it, as starting would do nothing
-    assert host.calls == [("listen_pause", None), ("listen_resume", None), ("listen_start", None),
-                          ("listen_restart", False), ("listen_stop", False)]
+    # the host's meeting actions, as every way of starting does ("error" may leave half the assistant
+    # running: the host's start is a restart there)
+    assert host.calls == [("listen_pause", None), ("listen_resume", None), ("meeting_start", None),
+                          ("meeting_start", None), ("meeting_stop", None)]
+    host.calls.clear()
+    # the Meeting menu in the menu bar, and Show/Hide Floating Button
+    for state, key in (("stopped", "m_start"), ("listening", "m_stop"), ("listening", "m_pause"), ("paused", "m_pause")):
+        shell.state = _state(state)
+        shell.on_menu(key)
+    shell.state = _state("stopped", prefs={"floating_button": True})
+    shell.on_menu("floating")
+    shell.state = _state("stopped", prefs={"floating_button": False})
+    shell.on_menu("m_floating")
+    assert _wait(lambda: len(host.calls) == 6)
+    assert host.calls == [("meeting_start", None), ("meeting_stop", None), ("listen_pause", None), ("listen_resume", None),
+                          ("update_prefs", {"floating_button": False}), ("update_prefs", {"floating_button": True})]
     shell.on_menu("quit")
     assert appkit.names() == ["terminate_"]
     assert shell.quitting  # without our delegate, pywebview's quit asks the window: it must let go
@@ -717,6 +843,7 @@ def test_app_delegate_is_a_subclass_with_the_runtime_encodings(host: FakeHost, p
     pywebview's applicationShouldTerminate: is b"I@:@", ours said b"Q@:@"), so Dock-reopen and our quit
     were missing and the self-test hung on quitting. A subclass meets the same rule (the fake objc
     enforces it), so the override carries no encoding of its own: PyObjC copies pywebview's."""
+    host.thread.start()  # a reopen also asks the host to focus the page's Start control
     native.install_app_delegate(pyobjc.browser_view)
     cls = pyobjc.browser_view.AppDelegate
     assert cls is not pyobjc.base and issubclass(cls, pyobjc.base) and cls.__name__ == "VoicestreamAppDelegate"
@@ -738,6 +865,8 @@ def test_app_delegate_is_a_subclass_with_the_runtime_encodings(host: FakeHost, p
     assert delegate.applicationShouldHandleReopen_hasVisibleWindows_(None, False) is False
     delegate.applicationWillTerminate_(None)
     assert seen == ["terminate", "show", "will_terminate"] and delegate.voicestreamPatched()
+    # opened again (the Dock, Finder, Spotlight): the window, with the keyboard focus on the Start control
+    assert _wait(lambda: ("request_focus", "start") in host.calls)
 
 
 def test_the_delegate_is_in_place_before_the_window_opens(host: FakeHost, pyobjc: Any) -> None:
@@ -963,16 +1092,16 @@ def test_a_press_toggles_listening_and_plays_a_sound(host: FakeHost, appkit: Rec
         before = len(played)
         shell.on_hotkey()  # from Carbon's handler, on the main thread: only posts to the host
         assert _wait(lambda s=sound, n=before: len(played) == n + 1 and played[-1] == s)
-    assert [c for c in host.calls if c[0] == "listen_toggle"] == [("listen_toggle", None)] * 4
+    assert [c for c in host.calls if c[0] == "meeting_toggle"] == [("meeting_toggle", None)] * 4
     host._state["state"] = "starting"  # nothing to do: no sound either
     shell.on_hotkey()
-    assert _wait(lambda: len([c for c in host.calls if c[0] == "listen_toggle"]) == 5)
+    assert _wait(lambda: len([c for c in host.calls if c[0] == "meeting_toggle"]) == 5)
     time.sleep(0.1)
     assert len(played) == 4
     host._state["state"] = "stopped"
     shell.state = _hk_state("stopped", status="ok", sound=False)  # turned off in Settings
     shell.on_hotkey()
-    assert _wait(lambda: len([c for c in host.calls if c[0] == "listen_toggle"]) == 6)
+    assert _wait(lambda: len([c for c in host.calls if c[0] == "meeting_toggle"]) == 6)
     time.sleep(0.1)
     assert len(played) == 4
 
@@ -1006,7 +1135,7 @@ def test_the_selftest_presses_the_shortcut_without_listening(host: FakeHost, app
     assert out["registered"] == "⌥⌘R" and out["register_result"] == 0 and out["in_menu"] is True
     assert (out["send_result"], out["handled"], out["host_answer"], out["expected"]) == (0, 1, "start", "start")
     assert out["reaches_host"] is True and out["temporary"] is False
-    assert not [c for c in host.calls if c[0] == "listen_toggle"]  # asked, never pressed for real
+    assert not [c for c in host.calls if c[0] == "meeting_toggle"]  # asked, never pressed for real
     assert shell._probe is None
 
     listen.returns["keyEquivalent"] = ""  # the menu doesn't show it

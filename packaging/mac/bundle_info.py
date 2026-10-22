@@ -42,6 +42,10 @@ SYSTEM_AUDIO = (
     "Voicestream capte le son de votre Mac pendant les réunions pour transcrire les autres participants. — "
     "Voicestream captures your Mac's audio during meetings to transcribe the other participants."
 )
+URL_SCHEME = "voicestream"
+"""``voicestream://meeting/start?key=…`` (the Spotlight launcher), ``…/meeting/stop``, ``…/meeting/toggle`` and
+``…/open``: the app's Apple-event handler hands them to the host (voicestream/app/host.py ``open_url``)."""
+
 APPLE_EVENTS = (
     "Voicestream ajoute vos tâches dans Rappels et lance les raccourcis que vous avez choisis. — "
     "Voicestream adds your tasks to Reminders and runs the shortcuts you chose."
@@ -80,6 +84,13 @@ def info_plist(version: str) -> dict[str, Any]:
         "NSMicrophoneUsageDescription": MICROPHONE,
         "NSAudioCaptureUsageDescription": SYSTEM_AUDIO,
         "NSAppleEventsUsageDescription": APPLE_EVENTS,
+        # voicestream:// links open in this app (the Spotlight launcher, Shortcuts, a link clicked anywhere);
+        # starting a recording from one needs the key only the launcher holds
+        "CFBundleURLTypes": [{
+            "CFBundleURLName": f"{BUNDLE_ID}.link",
+            "CFBundleURLSchemes": [URL_SCHEME],
+            "CFBundleTypeRole": "Viewer",
+        }],
         # The window shows http://127.0.0.1:<port>: plain HTTP to an IP address needs these since macOS 14
         "NSAppTransportSecurity": {
             "NSAllowsLocalNetworking": True,
