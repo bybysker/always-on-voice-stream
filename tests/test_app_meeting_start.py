@@ -514,6 +514,43 @@ async def test_links_need_the_key_to_start_a_recording(tmp_path: Path, monkeypat
     assert json.loads(host.prefs_path.read_text(encoding="utf-8"))["url_key"] == key  # the private file has it
 
 
+async def test_a_link_that_launches_the_app_doesnt_start_listening(tmp_path: Path) -> None:
+    """Meetings start by themselves and "start listening when Voicestream opens" is on, but the app isn't
+    running: any web page can launch it with a voicestream:// link. The Mac app starts the host without
+    listening and asks for it only when no link launched it, so a link without the key records nothing."""
+    opened: list[str] = []
+    built: list[Assistant] = []
+    _prefs(tmp_path, "automatic", setup_done=True, listen_on_launch=True)
+    host = _host(tmp_path, factory=_factory(sources=lambda: [Tracked("mic", opened)], built=built), mode="automatic")
+    await host.start(auto_listen=False)
+    try:
+        assert host.status == "stopped" and _events(host, "app.state")[-1]["state"] == "stopped"
+        assert await host.open_url("voicestream://open") == "open"
+        assert await host.open_url("voicestream://meeting/start") == "refused"
+        assert await host.open_url("voicestream://whatever") == "unknown"
+        await asyncio.sleep(0.2)
+        assert host.status == "stopped" and built == [] and opened == []
+        assert await host.open_url(host.launcher_url()) == "start"  # the launcher's own link: on purpose
+        assert host.status == "listening" and await host.listen_on_launch() is False  # running already
+        await host.listen_stop()
+
+        assert await host.listen_on_launch() is True  # no link launched it: as it always did
+        assert host.status == "listening" and len(built) == 2
+        await host.listen_stop()
+        host.update_prefs({"listen_on_launch": False})
+        assert await host.listen_on_launch() is False
+        host.update_prefs({"listen_on_launch": True, "meeting_start": "manual"})
+        assert await host.listen_on_launch() is False
+        host.update_prefs({"meeting_start": "automatic"})
+        host.config_error = "Your settings file has a problem: line 3"
+        assert await host.listen_on_launch() is False
+        host.config_error = None
+        host.prefs = host.prefs.model_copy(update={"setup_done": False})
+        assert await host.listen_on_launch() is False and host.status == "stopped" and len(built) == 2
+    finally:
+        await host.shutdown()
+
+
 def test_parse_url() -> None:
     assert parse_url("voicestream://meeting/start?key=abc") == ("start", "abc")
     assert parse_url("voicestream://meeting/stop") == ("stop", None)

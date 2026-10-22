@@ -1455,8 +1455,10 @@ class AppHost:
             except OSError as exc:
                 log.warning("no log file: %s", exc)
 
-    async def start(self) -> str:
-        """Start the dashboard server (and listening, if set up to); returns the app page's URL with the token."""
+    async def start(self, *, auto_listen: bool = True) -> str:
+        """Start the dashboard server (and listening, if set up to: :meth:`listen_on_launch`); returns the app
+        page's URL with the token. ``auto_listen=False`` leaves listening to the caller: the Mac app asks
+        for it once it knows no ``voicestream://`` link launched it (any web page can open a link)."""
         from ..dashboard.server import serve
 
         self.loop = asyncio.get_running_loop()
@@ -1479,13 +1481,24 @@ class AppHost:
                 watch(lambda: loop.call_soon_threadsafe(self.audio_devices_changed))
             except Exception as exc:  # noqa: BLE001 - the periodic look still finds the microphone
                 log.debug("no audio device notifications: %s", exc)
-        p = self.prefs
-        # manual: nothing is captured until you start a meeting, whatever listen_on_launch says
-        if p.setup_done and p.meeting_start == "automatic" and p.listen_on_launch and not self.config_error:
-            await self.listen_start()
-        else:
+        if not (auto_listen and await self.listen_on_launch()):
             self._publish_state()
         return self.url
+
+    async def listen_on_launch(self) -> bool:
+        """"Start listening when Voicestream opens": always-on listening starts, if the setup is done, meetings
+        start by themselves, the preference is on, the settings file can be read and nothing runs yet (a link
+        that launched the app may have started a meeting). Returns whether listening started (or waits for
+        its speech model)."""
+        p = self.prefs
+        # manual: nothing is captured until you start a meeting, whatever listen_on_launch says
+        if not (p.setup_done and p.meeting_start == "automatic" and p.listen_on_launch) or self.config_error:
+            return False
+        busy = self._toggling is not None and not self._toggling.done()
+        if self._closing or busy or self._assistant is not None or self._start_when_ready or self.status != "stopped":
+            return False
+        await self.listen_start()
+        return self.status in ("starting", "listening", "paused")
 
     async def shutdown(self, force: bool = False) -> None:
         """Stop listening (a graceful wrap-up of up to :data:`GRACEFUL_SHUTDOWN_S`, then forced; at once
@@ -1522,15 +1535,15 @@ class AppHost:
 
     # ------------------------------------------------------- native shell glue
 
-    def run_in_thread(self, timeout: float = 60.0) -> str:
-        """Run the host's loop in a background thread, start it, and return the URL once the server
-        answers. Raises what :meth:`start` raised, or ``TimeoutError``."""
+    def run_in_thread(self, timeout: float = 60.0, *, auto_listen: bool = True) -> str:
+        """Run the host's loop in a background thread, start it (``auto_listen``: see :meth:`start`), and
+        return the URL once the server answers. Raises what :meth:`start` raised, or ``TimeoutError``."""
         ready = threading.Event()
         box: dict[str, Any] = {}
 
         async def main() -> None:
             try:
-                box["url"] = await self.start()
+                box["url"] = await self.start(auto_listen=auto_listen)
             except BaseException as exc:
                 box["error"] = exc
                 raise

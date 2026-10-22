@@ -526,6 +526,19 @@ def test_run_in_thread_call_and_shutdown(tmp_path: Path) -> None:
     assert not host.thread.is_alive() and host.assistant is None
 
 
+def test_the_mac_app_starts_the_host_and_asks_for_listening_itself(tmp_path: Path) -> None:
+    """The native shell starts the host with ``auto_listen=False`` and posts :meth:`AppHost.listen_on_launch`
+    once it knows no link launched the app (see test_app_meeting_start)."""
+    _prefs(tmp_path, "automatic", setup_done=True, listen_on_launch=True)
+    host = _host(tmp_path)
+    host.run_in_thread(auto_listen=False)
+    try:
+        assert host.status == "stopped" and host.assistant is None
+        assert host.call(host.listen_on_launch()).result(10) is True and host.status == "listening"
+    finally:
+        host.call(host.shutdown()).result(30)
+
+
 async def test_warnings_are_mirrored_to_the_app_once_a_second(tmp_path: Path) -> None:
     host = _host(tmp_path)
     await host.start()
