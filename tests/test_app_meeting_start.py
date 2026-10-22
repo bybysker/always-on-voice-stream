@@ -566,8 +566,16 @@ async def test_a_start_while_the_last_meeting_is_wrapped_up_waits_for_it(tmp_pat
         await host.listen_stop(force=True)
         assert await waiting is None and host.status == "stopped" and len(built) == 3
 
+        # Start, Stop, Start again during one wrap-up: the last word wins, and it is one start
+        waiting = await stopped_with_a_start_waiting(host.meeting_start)
+        assert await host.meeting_stop() == "stop"
+        again = asyncio.ensure_future(host.meeting_toggle())
+        await asyncio.sleep(0.1)
+        assert not again.done() and host.status == "stopping"
+        gate.set()
+        assert await again == "start" and await waiting == "start" and host.in_meeting() and len(built) == 5
+
         # two presses of the shortcut in a row while recording: the second comes before the stop says so
-        await host.meeting_start()
         await built[-1]._route(seg("Last point.", "mic", t=1.0))
         gate.clear()
         stop, start = asyncio.ensure_future(host.meeting_toggle()), asyncio.ensure_future(host.meeting_toggle())
@@ -575,7 +583,7 @@ async def test_a_start_while_the_last_meeting_is_wrapped_up_waits_for_it(tmp_pat
         await asyncio.sleep(0.1)
         assert host.status == "stopping" and not start.done()
         gate.set()
-        assert await start == "start" and host.in_meeting() and len(built) == 5
+        assert await start == "start" and host.in_meeting() and len(built) == 6
 
         # quitting while a start waits: nothing starts
         await built[-1]._route(seg("One more thing.", "mic", t=1.0))
@@ -587,7 +595,7 @@ async def test_a_start_while_the_last_meeting_is_wrapped_up_waits_for_it(tmp_pat
         await asyncio.sleep(0.1)
         gate.set()
         await quitting
-        assert await waiting is None and len(built) == 5 and host.assistant is None
+        assert await waiting is None and len(built) == 6 and host.assistant is None
     finally:
         gate.set()
         await host.shutdown()

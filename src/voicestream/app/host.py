@@ -1090,11 +1090,11 @@ class AppHost:
 
     async def _queue_start(self) -> MeetingAction | None:
         """A start while the last meeting is being wrapped up: once that is done (:meth:`_start_after_stop`).
-        Pressed again meanwhile, it is the same start."""
-        if not self._start_queued or self._queued_start is None or self._queued_start.done():
-            busy = self._toggling is not None and not self._toggling.done()
-            before = self._toggling if busy and self._toggled == "stop" else None
-            self._start_queued = True
+        Pressed again meanwhile, it is the same start (also after a Stop took it back: the last word wins)."""
+        busy = self._toggling is not None and not self._toggling.done()
+        before = self._toggling if busy and self._toggled == "stop" else None
+        self._start_queued = True
+        if self._queued_start is None or self._queued_start.done():
             self._queued_start = asyncio.ensure_future(self._start_after_stop(before))
             self.track(self._queued_start)
             log.info("the last meeting is being wrapped up: the next one starts as soon as it is")
