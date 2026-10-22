@@ -124,6 +124,28 @@ def test_a_notice_keeps_start_meeting_one_click_away() -> None:
             assert not any(b.prominent for b in m.buttons)  # neither is the one to press
 
 
+def test_a_meeting_that_ended_by_itself_says_its_notes_are_being_written() -> None:
+    """The host's notice says ``pending`` from the moment the meeting ends until its notes are written (a
+    summary takes tens of seconds): "its notes are saved" would be said of notes not there yet."""
+    writing = {"kind": "ended_after_silence", "minutes": 60, "pending": True, "title": None, "folder": None}
+    m = floating.panel_model(_st(notice=writing), "en", NOW)
+    assert m.text == "Meeting ended: its notes are being written…" and m.announce == m.text
+    assert m.tooltip == "It ended after 60 min of silence. Its notes are being written."
+    assert m.symbol == "square.and.arrow.down" and _keys(m) == ["start", "ok"]
+    fr = floating.panel_model(_st(notice=writing), "fr", NOW)
+    assert fr.text == "Réunion terminée : rédaction des notes…" and "60 min" in fr.tooltip
+    done = floating.panel_model(_st(notice={**writing, "pending": False, "folder": "2026-10-22_0900-sync"}), "en", NOW)
+    assert (done.text, done.tooltip, done.symbol) == ("Meeting ended after 60 min of silence",
+                                                     "Its notes are saved: Voicestream → Meetings", "checkmark.circle")
+    empty = floating.panel_model(_st(notice={**writing, "pending": False}), "en", NOW)  # nothing was said
+    assert empty.text == done.text and empty.tooltip == "Nothing had been said, so there are no notes"
+    assert floating.panel_model(_st(notice={**writing, "pending": False}), "fr", NOW).tooltip == (
+        "Rien n'avait été dit, il n'y a donc pas de notes")
+    # a notice without the field (as the samples build it) is a finished one, as before
+    legacy = floating.panel_model(_st(notice={"kind": "ended_after_silence", "minutes": 60}), "en", NOW)
+    assert (legacy.text, legacy.tooltip) == (done.text, done.tooltip)
+
+
 def test_paused_shows_resume_even_with_a_nudge_up() -> None:
     """Paused, nothing is recorded and paused time isn't silence: Resume must be there, not Keep / End."""
     nudge = {"meeting_id": "m1", "silent_minutes": 16}

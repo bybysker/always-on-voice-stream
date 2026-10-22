@@ -120,6 +120,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "end": "End",
         "ended_silence": "Meeting ended after {minutes} min of silence",
         "ended_tip": "Its notes are saved: Voicestream → Meetings",
+        "ended_writing": "Meeting ended: its notes are being written…",
+        "ended_writing_tip": "It ended after {minutes} min of silence. Its notes are being written.",
+        "ended_empty_tip": "Nothing had been said, so there are no notes",
         "link_refused": "A link tried to start recording — ignored",
         "link_tip": "Only Voicestream's own launcher can start a meeting from a link",
         "ok": "OK",
@@ -160,6 +163,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "end": "Terminer",
         "ended_silence": "Réunion terminée après {minutes} min de silence",
         "ended_tip": "Ses notes sont enregistrées : Voicestream → Réunions",
+        "ended_writing": "Réunion terminée : rédaction des notes…",
+        "ended_writing_tip": "Elle s'est terminée après {minutes} min de silence. Ses notes sont en cours de rédaction.",
+        "ended_empty_tip": "Rien n'avait été dit, il n'y a donc pas de notes",
         "link_refused": "Un lien voulait enregistrer — ignoré",  # one line of the panel: « ignoré » must show
         "link_tip": "Seul le lanceur de Voicestream peut démarrer une réunion depuis un lien",
         "ok": "OK",
@@ -306,9 +312,16 @@ def panel_model(state: dict[str, Any], lang: str, now: datetime | None = None, *
     # a notice stays until OK (for hours after a meeting forgotten overnight): Start stays one click away next to it
     after = (start, PanelButton("ok", s["ok"], s["ok"]))
     if notice.get("kind") == "ended_after_silence":
-        text = s["ended_silence"].format(minutes=int(notice.get("minutes") or 0))
-        return PanelModel("notice", text, "checkmark.circle", "secondary", tooltip=s["ended_tip"], buttons=after,
-                          announce=text)
+        minutes = int(notice.get("minutes") or 0)
+        # the host says ``pending`` until its notes are written (``is True``: a notice without the field is done)
+        if notice.get("pending") is True:
+            text, symbol = s["ended_writing"], "square.and.arrow.down"
+            tooltip = s["ended_writing_tip"].format(minutes=minutes)
+        else:
+            text, symbol = s["ended_silence"].format(minutes=minutes), "checkmark.circle"
+            # written, and no folder: nothing had been said (only a host that says pending says that much)
+            tooltip = s["ended_empty_tip"] if notice.get("pending") is False and not notice.get("folder") else s["ended_tip"]
+        return PanelModel("notice", text, symbol, "secondary", tooltip=tooltip, buttons=after, announce=text)
     if notice.get("kind") == "link_refused":
         return PanelModel("notice", s["link_refused"], "hand.raised", "secondary", tooltip=s["link_tip"], buttons=after,
                           announce=s["link_refused"])
@@ -335,6 +348,7 @@ def sample_states() -> dict[str, dict[str, Any]]:
         "suggestion": {**base, "suggestion": {"app": "Microsoft Teams", "at": "2026-01-01T09:00:00+00:00"}},
         "still_there": {**base, **meeting, "state": "listening", "still_there": {"meeting_id": "m", "silent_minutes": 15}},
         "notice": {**base, "notice": {"kind": "ended_after_silence", "minutes": 60}},
+        "notice_writing": {**base, "notice": {"kind": "ended_after_silence", "minutes": 60, "pending": True}},
         "link_refused": {**base, "notice": {"kind": "link_refused"}},
         "error": {**base, "state": "error", "error": "Microphone permission is off: System Settings → Privacy & Security"},
     }
