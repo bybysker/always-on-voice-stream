@@ -105,12 +105,23 @@ def test_call_suggestion_nudge_and_notices() -> None:
     auto = _st("listening", mode="automatic", **_meeting(20), still_there={"meeting_id": "m1", "silent_minutes": 15})
     assert floating.panel_model(auto, "en", NOW).kind == "recording"
     ended = floating.panel_model(_st(notice={"kind": "ended_after_silence", "minutes": 60}), "en", NOW)
-    assert ended.text == "Meeting ended after 60 min of silence" and _keys(ended) == ["ok"]
+    assert ended.text == "Meeting ended after 60 min of silence" and _keys(ended) == ["start", "ok"]
     refused = floating.panel_model(_st(notice={"kind": "link_refused"}), "fr", NOW)
-    assert refused.text.startswith("Un lien a tenté") and _keys(refused) == ["ok"]
+    assert refused.text == "Un lien voulait enregistrer — ignoré" and _keys(refused) == ["start", "ok"]
     assert floating.panel_model(_st(notice={"kind": "something new"}), "en", NOW).kind == "idle"
     # while recording, the recording is what shows
     assert floating.panel_model(_st("listening", **_meeting(1), suggestion={"app": "Zoom"}), "en", NOW).kind == "recording"
+
+
+def test_a_notice_keeps_start_meeting_one_click_away() -> None:
+    """A notice stays until OK, for hours after a forgotten meeting ended in the night: the floating button,
+    whose job is to start a meeting, keeps its Start next to it (starting clears the notice, host-side)."""
+    for mode in ("manual", "automatic"):
+        idle = floating.panel_model(_st(mode=mode), "en", NOW, shortcut="⌥⌘R").buttons[0]
+        for notice in ({"kind": "ended_after_silence", "minutes": 60}, {"kind": "link_refused"}):
+            m = floating.panel_model(_st(mode=mode, notice=notice), "en", NOW, shortcut="⌥⌘R")
+            assert m.kind == "notice" and m.buttons[0] == idle and m.buttons[1].key == "ok"
+            assert not any(b.prominent for b in m.buttons)  # neither is the one to press
 
 
 def test_paused_shows_resume_even_with_a_nudge_up() -> None:
@@ -149,7 +160,8 @@ def test_both_languages_say_everything() -> None:
             for b in m.buttons:
                 assert b.title and b.label, (lang, name, b)
                 assert len(b.title) <= 24, b.title  # a compact panel: short verbs
-            assert len(m.text) <= 60, m.text
+            # one line of at most TEXT_MAX_WIDTH (300 pt) at 13 pt, cut at its end otherwise: about 45 characters
+            assert len(m.text) <= 45, m.text
     assert sorted(set(floating.kinds(floating.sample_states().values()))) == sorted(
         {"idle", "recording", "paused", "listening", "starting", "stopping", "suggestion", "still_there", "notice", "error"})
 

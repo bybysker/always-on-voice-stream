@@ -17,7 +17,8 @@ pointer target on a Mac), each with a VoiceOver label and a tooltip:
   started, Pause / Resume and Stop;
 * a call another app started: "Call detected — start notes?" with Start and Not now;
 * a long silence: "Still in a meeting?" with Keep and End;
-* what happened by itself (a meeting ended after a long silence, a link refused), until OK;
+* what happened by itself (a meeting ended after a long silence, a link refused), until OK, with Start
+  meeting next to it;
 * a problem: what it is (in the tooltip), Show and Try again.
 
 It acts only through the shell (``on_action(key)``), which calls the host's meeting actions: the same
@@ -159,7 +160,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "end": "Terminer",
         "ended_silence": "Réunion terminée après {minutes} min de silence",
         "ended_tip": "Ses notes sont enregistrées : Voicestream → Réunions",
-        "link_refused": "Un lien a tenté de lancer un enregistrement — ignoré",
+        "link_refused": "Un lien voulait enregistrer — ignoré",  # one line of the panel: « ignoré » must show
         "link_tip": "Seul le lanceur de Voicestream peut démarrer une réunion depuis un lien",
         "ok": "OK",
         "problem": "Enregistrement impossible",
@@ -298,21 +299,23 @@ def panel_model(state: dict[str, Any], lang: str, now: datetime | None = None, *
                                                tooltip=tip(s["start_tip"])),
                                    PanelButton("dismiss", s["not_now"], s["not_now"])),
                           announce=s["suggestion"])
+    title = s["start_meeting"] if manual else s["start_listening"]
+    start = PanelButton("start", title, title, "record.circle" if manual else "mic", tint="red" if manual else "",
+                        tooltip=tip(s["start_tip"] if manual else s["start_tip_auto"]))
     notice = state.get("notice") or {}
-    ok = (PanelButton("ok", s["ok"], s["ok"]),)
+    # a notice stays until OK (for hours after a meeting forgotten overnight): Start stays one click away next to it
+    after = (start, PanelButton("ok", s["ok"], s["ok"]))
     if notice.get("kind") == "ended_after_silence":
         text = s["ended_silence"].format(minutes=int(notice.get("minutes") or 0))
-        return PanelModel("notice", text, "checkmark.circle", "secondary", tooltip=s["ended_tip"], buttons=ok, announce=text)
+        return PanelModel("notice", text, "checkmark.circle", "secondary", tooltip=s["ended_tip"], buttons=after,
+                          announce=text)
     if notice.get("kind") == "link_refused":
-        return PanelModel("notice", s["link_refused"], "hand.raised", "secondary", tooltip=s["link_tip"], buttons=ok,
+        return PanelModel("notice", s["link_refused"], "hand.raised", "secondary", tooltip=s["link_tip"], buttons=after,
                           announce=s["link_refused"])
     if current == "error":
         return PanelModel("error", s["problem"], "exclamationmark.triangle.fill", "yellow", tooltip=_short(state.get("error")),
                           buttons=(PanelButton("show", s["show"], s["show"]),
                                    PanelButton("retry", s["retry"], s["retry"], tooltip=tip(s["retry"]))))
-    title = s["start_meeting"] if manual else s["start_listening"]
-    start = PanelButton("start", title, title, "record.circle" if manual else "mic", tint="red" if manual else "",
-                        tooltip=tip(s["start_tip"] if manual else s["start_tip_auto"]))
     return PanelModel("idle", buttons=(start,))
 
 
