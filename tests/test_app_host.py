@@ -897,11 +897,12 @@ async def test_the_shortcut_starts_stops_resumes_and_restarts(tmp_path: Path) ->
     await host.listen_stop()
 
 
-async def test_the_shortcut_does_nothing_while_starting_stopping_or_quitting(tmp_path: Path) -> None:
+async def test_the_shortcut_does_nothing_while_starting_or_quitting(tmp_path: Path) -> None:
     host = _host(tmp_path)
-    for busy in ("starting", "stopping"):
-        host.status = busy
-        assert host.toggle_action() is None and await host.listen_toggle() is None
+    host.status = "starting"
+    assert host.toggle_action() is None and await host.listen_toggle() is None
+    host.status = "stopping"  # a start, once the last meeting is wrapped up (test_app_meeting_start)
+    assert host.toggle_action() == "start"
     host.status = "stopped"
     # two presses in a row (each its own call on the loop, as the shell posts them): the second comes
     # while the first one's start is being carried out, before it has changed the state

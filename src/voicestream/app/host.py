@@ -129,7 +129,8 @@ HOTKEY_RECORDING_S = 30.0
 reach the page); it is back on after this long even if the page never says it is done."""
 START = {"stopped": "start", "error": "restart", "paused": "resume"}
 """What starting a meeting does in each state (:meth:`AppHost.meeting_start`): after a problem, a restart
-as Start does then; paused, Resume. In the others nothing: one is recorded, about to be, or ending."""
+as Start does then; paused, Resume. Starting or listening, nothing: one is recorded or about to be. While
+the last one is wrapped up (stopping), the start waits for it (see :meth:`AppHost.meeting_action`)."""
 STOPPABLE = frozenset({"starting", "listening", "paused", "error"})
 """The states :meth:`AppHost.meeting_stop` stops (an error: Stop dismisses it, and stops what still runs)."""
 CALL_MEMORY_S = 4 * 3600.0
@@ -421,8 +422,16 @@ class AppHost:
         (``KeyboardEvent.code`` → character, :func:`.hotkey.current_layout`), as the native shell read it;
         empty elsewhere. A shortcut recorded with ⌥ held is shown and checked by it (the page can't tell)."""
         self._hotkey_recording: asyncio.TimerHandle | None = None
-        self._toggling: asyncio.Task[None] | None = None
+        self._toggling: asyncio.Task[Any] | None = None
         """What the last meeting action (the shortcut, the floating button…) started, while it is being carried out."""
+        self._toggled: MeetingAction | None = None
+        """Which action :attr:`_toggling` carries out."""
+        self._start_queued = False
+        """A start asked for while the last meeting is being wrapped up (state "stopping"): it starts once that
+        is done, unless Stop, Stop now or quitting comes first (:meth:`_start_after_stop`)."""
+        self._queued_start: asyncio.Task[bool] | None = None
+        self._status_changed = asyncio.Event()
+        """Set at every change of :attr:`status` (a start queued behind a stop waits for the stop to be over)."""
         self.suggestion: dict[str, Any] | None = None
         """"Call detected — start notes?" (:meth:`suggest_meeting`): ``{"app", "at"}`` until it is answered,
         the call ends or a recording starts."""
@@ -623,6 +632,7 @@ class AppHost:
 
     def _set_status(self, status: State, error: str | None = None) -> None:
         self.status, self.error = status, error
+        self._status_changed.set()
         self._publish_state()
 
     def add_warning(self, message: str) -> None:
@@ -920,7 +930,9 @@ class AppHost:
         """Stop listening and wait for it (``timeout``: give up waiting, the stop continues). The meeting
         in progress is wrapped up unless ``force``; a forced stop never takes more than ~:data:`FORCE_STOP_S`.
         Calling it with ``force`` while a normal stop is under way escalates that stop. A restart under
-        way (e.g. "apply now") then stays stopped."""
+        way (e.g. "apply now") then stays stopped, and so does a start waiting for the stop under way."""
+        if force or self._stop_requested:
+            self._start_queued = False  # Stop (now) while the last meeting is wrapped up: the next one doesn't start
         self._stop_pressed = True
         await self._stop(force, timeout)
         if not self._closing:
@@ -1002,16 +1014,27 @@ class AppHost:
 
     def meeting_action(self, what: Literal["start", "stop", "toggle"] = "toggle") -> MeetingAction | None:
         """What :meth:`meeting_start`, :meth:`meeting_stop` or :meth:`meeting_toggle` would do now, or
-        ``None``: nothing to do, or nothing while listening starts or stops, while the previous action is
-        still being carried out (the gap before the state says so) and once the app is quitting. A stop
-        is never held back by a start under way: Stop must always be able to end a recording."""
+        ``None``: nothing to do, or nothing while listening starts, while the previous action is still
+        being carried out (the gap before the state says so) and once the app is quitting. While the last
+        meeting is being wrapped up (``stopping``), a start waits for it (:meth:`_start_after_stop`): its
+        microphone is closed already, but the summary, pushes and agents can take minutes, and back-to-back
+        meetings mustn't lose the next one's start. A stop is never held back by a start under way: Stop
+        must always be able to end a recording, or take back a start that waits."""
         if self._closing:
             return None
         if what == "stop":
-            return "stop" if self.status in STOPPABLE else None
+            return "stop" if self.status in STOPPABLE or self._start_queued else None
+        if self._start_waits():
+            return "start"
         if self._toggling is not None and not self._toggling.done():
             return None
         return (TOGGLE if what == "toggle" else START).get(self.status)  # type: ignore[return-value]
+
+    def _start_waits(self) -> bool:
+        """A start now waits for the last meeting's wrap-up: a stop is under way (or was just asked for, and
+        the state doesn't say so yet), or a start waits for one already."""
+        busy = self._toggling is not None and not self._toggling.done()
+        return self._start_queued or self.status == "stopping" or (busy and self._toggled == "stop")
 
     def toggle_action(self) -> str | None:
         """What a press of the keyboard shortcut does now (:data:`.hotkey.TOGGLE`): :meth:`meeting_action`."""
@@ -1020,20 +1043,60 @@ class AppHost:
     async def _carry_out(self, action: MeetingAction | None) -> MeetingAction | None:
         """Do what a meeting action decided. A stop returns at once: wrapping a meeting up can take a while,
         and goes on in the background. A start, restart or resume once it is carried out (a start returns
-        once listening is up, or after :data:`START_WAIT_S`), or ``"error"`` when it failed — a missing key,
-        a permission, a microphone that gave up: those become state ``error`` rather than an exception, and
-        the shell's sound must not say it worked."""
+        once listening is up, or after :data:`START_WAIT_S`; one that waits for the last meeting's wrap-up,
+        after that too), or ``"error"`` when it failed — a missing key, a permission, a microphone that
+        gave up: those become state ``error`` rather than an exception, and the shell's sound must not say
+        it worked. ``None`` for a start taken back while it waited."""
         if action is None:
             return None
+        if action == "start" and self._start_waits():
+            return await self._queue_start()
+        if action == "stop":
+            self._start_queued = False  # a start waiting for the last meeting's wrap-up is taken back
         run = {"start": self.listen_start, "restart": self.listen_restart, "stop": self.listen_stop,
                "resume": self.listen_resume}[action]  # fmt: skip
         task = self._toggling = asyncio.ensure_future(run())
+        self._toggled = action
         self.track(task)
         if action == "stop":
             await asyncio.sleep(0)  # its first step: the state says "stopping" by the time this returns
             return action
         await asyncio.wait({task})  # the work isn't cancelled if this is
         return "error" if self.status == "error" else action
+
+    async def _queue_start(self) -> MeetingAction | None:
+        """A start while the last meeting is being wrapped up: once that is done (:meth:`_start_after_stop`).
+        Pressed again meanwhile, it is the same start."""
+        if not self._start_queued or self._queued_start is None or self._queued_start.done():
+            busy = self._toggling is not None and not self._toggling.done()
+            before = self._toggling if busy and self._toggled == "stop" else None
+            self._start_queued = True
+            self._queued_start = asyncio.ensure_future(self._start_after_stop(before))
+            self.track(self._queued_start)
+            log.info("the last meeting is being wrapped up: the next one starts as soon as it is")
+        task = self._toggling = self._queued_start
+        self._toggled = "start"
+        await asyncio.wait({task})  # the work isn't cancelled if this is
+        if task.cancelled() or task.exception() is not None or not task.result():
+            return None
+        return "error" if self.status == "error" else "start"
+
+    async def _start_after_stop(self, before: asyncio.Task[Any] | None) -> bool:
+        """Wait for the stop under way — ``before``, a Stop pressed just before that hasn't begun yet, then
+        the state ``stopping`` (the capture closed, the meeting wrapped up) — and start listening, unless the
+        start was taken back meanwhile (:attr:`_start_queued`: Stop, Stop now) or the app is quitting. Not
+        on the run task: it also waits for an ended meeting's agents, and is gone once the stop is over."""
+        if before is not None:
+            await asyncio.wait({before})
+        while self.status == "stopping" and not self._closing:
+            self._status_changed.clear()
+            await self._status_changed.wait()
+        queued, self._start_queued = self._start_queued, False
+        if not queued or self._closing:
+            log.info("the start waiting for the last meeting's wrap-up was taken back")
+            return False
+        await self.listen_start()
+        return True
 
     async def meeting_start(self) -> MeetingAction | None:
         """Start a meeting: every Start button (the window, the menu bar, the floating button, the Spotlight
