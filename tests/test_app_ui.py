@@ -2270,6 +2270,44 @@ def test_a_meeting_that_ended_by_itself_says_while_its_notes_are_written(make_ap
         "Elle s’est terminée après 60 min sans parole : ses notes sont en cours de rédaction…")
 
 
+def test_saving_settings_with_a_switch_to_by_hand_sends_the_switch_first(make_app: Callable[..., UIApp],
+                                                                         open_page: Callable[..., Page]) -> None:
+    """One Save with a setting and "When you start them": the switch goes first, so listening all the
+    time stops before the new settings arrive — sent the other way round, those settings restart
+    listening (or retry a failed start) in automatic mode, the microphone opens after "by hand" was
+    asked for, and the restart can open a meeting nobody started. A refused preference then saves
+    nothing else: the other changes stay on screen, unsaved."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, listen_on_launch=True)  # automatic, listening all the time
+    _wait_state(app, "listening")
+    p = open_page(app)
+    pg = p.page
+    host = app.host
+    sent: list[str] = []
+    pg.on("request", lambda r: sent.append(r.url.split("/api/")[1].split("?")[0]) if r.method == "PATCH" else None)
+    pg.click("nav a[href='#/settings']")
+    pg.fill("#f-user_name", "Camille Z")
+    pg.get_by_label("When you start them (recommended)", exact=True).check()
+    pg.click("#save-settings")
+    expect(pg.locator(".toast.ok", has_text="Saved").last).to_be_visible()
+    assert sent == ["prefs", "settings"], sent
+    _wait_state(app, "stopped")
+    pg.wait_for_timeout(500)
+    assert host.assistant is None and not host.in_meeting() and len(app.built) == 1
+    assert host.cfg.user_name == "Camille Z" and host.prefs.meeting_start == "manual"
+
+    sent.clear()
+    pg.fill("#f-user_name", "Camille Y")
+    pg.evaluate("setPref('silence_ask_minutes', 601)")  # one the app refuses (the page's own check is by-passed)
+    p.allowed.add(400)
+    pg.click("#save-settings")
+    expect(pg.locator("[data-path='pref:silence_ask_minutes'] .field-error")).not_to_be_empty()
+    assert sent == ["prefs"], sent
+    assert host.cfg.user_name == "Camille Z" and host.prefs.silence_ask_minutes == 15
+    expect(pg.locator("#f-user_name")).to_have_value("Camille Y")
+
+
 RECORDING_LOOK = """() => {
   const style = (html) => {
     const box = document.createElement('div');
