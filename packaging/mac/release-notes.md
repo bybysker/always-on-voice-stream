@@ -10,11 +10,21 @@ For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. You need a C
 
 ### New in this version
 
-- **A new look**, in light and dark: colour only where it means something (your to-dos, the
-  decisions, what was said that led to them), and *Who spoke when*, the meeting as two lanes,
-  you and the others, with each to-do at the moment it was said.
-- **⌥⌘R starts and stops recording from any app**, even with the window closed. A short sound
-  says it worked. Change it or turn it off in Settings → General.
+- **Meetings start when you say so.** Nothing is recorded until you start a meeting; Stop writes
+  its notes and lets go of the microphone. After 15 minutes without speech Voicestream asks
+  *Still in a meeting?*, and after 60 it ends the meeting and tells you. (The old always-on
+  listening is still there: Settings → General → Starting meetings.)
+- **Start a meeting from anywhere:** the big **Start meeting** button in the window (Return
+  starts it), a **floating button** above every app and every Space (drag it where you like,
+  hide it from its menu), **⌥⌘R** from any app (change it with *Choose a shortcut*),
+  **⌘Space → "voicestream" → Return**, or the menu bar.
+- **Call detected — start notes?** When Zoom, Teams, FaceTime or Meet starts using the
+  microphone, the floating button offers to take notes. It never starts by itself.
+- A setup step and a Settings section, *Starting meetings*, to choose all this; an easier
+  window from the keyboard, and the French wording made the same everywhere.
+
+**Upgrading from 0.2:** meetings now start by hand. To keep listening all the time, choose
+*Automatically* in Settings → General → Starting meetings.
 
 ### Install
 
@@ -29,8 +39,8 @@ For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. You need a C
    private; it downloads a 547 MB model), your Claude key (saved in the macOS Keychain), then
    allow **Microphone** and **System Audio Recording**.
 
-Voicestream then lives in the menu bar; press **⌥⌘R** to start or stop recording. After an update, macOS may ask for the permissions
-again: the [README](https://github.com/bybysker/always-on-voice-stream#install-the-app-mac)
+Voicestream then lives in the menu bar; press **⌥⌘R** (or the floating button) to start or stop a
+meeting. After an update, macOS may ask for the permissions again: the [README](https://github.com/bybysker/always-on-voice-stream#install-the-app-mac)
 says how.
 
 ### Installer (français)
@@ -47,8 +57,11 @@ says how.
    et privé ; un modèle de 547 Mo est téléchargé), votre clé Claude (enregistrée dans le
    trousseau de macOS), puis autorisez le **Micro** et l'**Enregistrement audio du système**.
 
-Voicestream vit ensuite dans la barre des menus ; **⌥⌘R** lance ou arrête l'enregistrement depuis
-n'importe quelle app (à changer dans Réglages → Général).
+Voicestream vit ensuite dans la barre des menus. Rien n'est enregistré tant que vous ne démarrez
+pas une réunion : **⌥⌘R** depuis n'importe quelle app, le bouton flottant, ⌘Espace →
+« voicestream », ou la barre des menus. « Appel détecté — prendre des notes ? » vous le propose
+quand un appel commence, sans jamais démarrer seul. Tout se règle dans Réglages → Général →
+Démarrer une réunion.
 
 ### Cost
 
