@@ -380,6 +380,39 @@ async def test_automatic_meetings_still_start_and_split_by_themselves(tmp_path: 
         await host.shutdown()
 
 
+async def test_an_automatic_meeting_is_over_as_soon_as_it_ends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A meeting that closes on a silence (or "End meeting now") is wrapped up in the background while
+    listening goes on: the state says at once that it is over, not once its notes are written. The floating
+    button and the menu bar (which only hear the state) showed it recording, timer ticking, meanwhile."""
+    gate = _slow_wrap_up(monkeypatch)
+    wall = Wall()
+    built: list[Assistant] = []
+    host = _host(tmp_path, factory=_clocked(wall, built), mode="automatic")  # meetings close after 10 min
+    seen: list[dict[str, Any]] = []
+    host.add_state_listener(seen.append)
+    try:
+        await host.listen_start()
+        a = built[0]
+        for split in ("idle", "End meeting now"):
+            await a._route(seg("Let's start.", "mic", t=1.0))
+            assert seen[-1]["in_meeting"] is True
+            gate.clear()
+            if split == "idle":
+                wall.advance(11)
+            else:
+                assert await host.end_meeting() == "end"
+            ended = len(_events(host, "meeting.ended"))
+            await _until(lambda: len(_events(host, "meeting.ending")) > ended)
+            await asyncio.sleep(0.1)
+            assert len(_events(host, "meeting.ended")) == ended, split  # still being wrapped up…
+            assert (seen[-1]["in_meeting"], seen[-1]["meeting"], seen[-1]["state"]) == (False, None, "listening"), split
+            gate.set()
+            await _until(lambda: len(_events(host, "meeting.ended")) > ended)
+    finally:
+        gate.set()
+        await host.shutdown()
+
+
 # ------------------------------------------------------------------ the actions
 
 

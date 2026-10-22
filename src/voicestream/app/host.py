@@ -720,7 +720,10 @@ class AppHost:
         elif ev.type == "meeting.ending":
             if self.still_there is not None and self.still_there.get("meeting_id") == ev.data.get("meeting_id"):
                 self.still_there = None
-                self._publish_state()
+            # it is over (no longer current) and wraps up in the background: an automatic one closed on a
+            # silence or by "End meeting now" says nothing else until its notes are written, and the shell's
+            # floating button and menu bar would show it recording meanwhile
+            self._publish_state()
         elif ev.type == "meeting.ended":
             note = self.notice
             if note is not None and note.get("meeting_id") == ev.data.get("meeting_id"):
