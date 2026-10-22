@@ -16,7 +16,8 @@ delegate from the class attribute ``webview.platforms.cocoa.BrowserView.AppDeleg
 first window, so a subclass put there before ``webview.start()`` adds what that delegate lacks.
 
 * ``applicationShouldHandleReopen:hasVisibleWindows:``: clicking the Dock icon, or opening the
-  app again from Finder or Spotlight, shows the hidden window, its Start control focused.
+  app again from Finder or Spotlight, shows the hidden window, its Start control focused (a window
+  already showing is only brought forward, the page left as it is).
 * ``applicationShouldTerminate:``: pywebview's own runs the window's ``closing`` handlers, and
   ours hides the window instead of closing it, so the app could never quit. Ours asks first
   while listening, then stops the host gracefully (``NSTerminateLater``, capped), then quits.
@@ -1160,9 +1161,15 @@ class MacShell:
 
     def reopened(self) -> None:
         """Main thread: Voicestream was opened again (the Dock, Finder, Spotlight, Open Voicestream): the window,
-        with the keyboard focus on its Start control (the host tells the page)."""
+        with the keyboard focus on its Start control (the host tells the page) — unless it was showing already:
+        a Dock click back into it only brings it forward, as it is (the page would leave what you were doing,
+        a to-do half edited, for Live). The main window itself is asked, not the delegate's has_visible: the
+        floating panel is a visible window too."""
+        native = self.window.native if self.window is not None else None
+        was_shown = native is not None and bool(native.isVisible()) and not bool(native.isMiniaturized())
         self.show_window()
-        self._post(self._on_loop("request_focus", "start"))
+        if not was_shown:
+            self._post(self._on_loop("request_focus", "start"))
 
     async def _on_loop(self, name: str, *args: Any) -> Any:
         """Call one of the host's plain methods on its loop, as they ask (``suggestion_dismiss``, ``update_prefs``…);

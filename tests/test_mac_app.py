@@ -685,6 +685,27 @@ def test_closing_the_window_hides_it_and_the_dock_icon(host: FakeHost, appkit: R
     assert shell._on_closing() is None  # pywebview's own quit (no delegate of ours) needs it to really close
 
 
+def test_reopening_the_window_already_showing_leaves_the_page_as_it_is(host: FakeHost, appkit: Recorder) -> None:
+    """A Dock click back into a window already on screen (or Open Voicestream from a menu or the floating button)
+    only brings it forward: sending the page to Live would drop a to-do being edited there. Closed, hidden with the
+    app or minimised, it comes back on Live with its Start control focused. The main window itself is looked at:
+    the floating panel is a visible window too, so the delegate's has_visible says nothing of it."""
+    host.thread.start()
+    shell = _shell(host)
+    shell.window = types.SimpleNamespace(native=Recorder(isVisible=True, isMiniaturized=False))
+    shell.reopened()
+    shell.on_menu("open")
+    shell.on_floating("open")
+    assert shell.window.native.names().count("makeKeyAndOrderFront_") == 3  # brought forward each time
+    time.sleep(0.1)
+    assert ("request_focus", "start") not in host.calls
+    for window in (Recorder(isVisible=False, isMiniaturized=False), Recorder(isVisible=True, isMiniaturized=True)):
+        host.calls.clear()
+        shell.window = types.SimpleNamespace(native=window)
+        shell.reopened()
+        assert _wait(lambda: host.calls == [("request_focus", "start")])
+
+
 def test_closing_the_window_while_our_delegate_wraps_up_a_quit_only_hides_it(
         host: FakeHost, appkit: Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
     """Closing the last window makes pywebview detach the app delegate: during our quit (up to ~35 s)
