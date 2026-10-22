@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,6 +29,7 @@ from voicestream.app.host import AppHost, parse_url
 from voicestream.app.settings import save_changes
 from voicestream.audio.base import AudioSource
 from voicestream.config import Config
+from voicestream.dashboard import app_routes
 from voicestream.dashboard.server import TOKEN_HEADER, create_app
 from voicestream.models import AudioFrame, TranscriptSegment
 from voicestream.session import Assistant
@@ -1075,6 +1077,36 @@ def test_answers_over_http(client: TestClient, host: AppHost) -> None:
     host.notice = {"kind": "ended_after_silence", "minutes": 60}
     body = client.post("/api/notice/dismiss").json()
     assert body["action"] == "dismiss" and body["notice"] is None
+
+
+def test_a_start_waiting_for_the_wrap_up_is_answered_at_once(client: TestClient, host: AppHost,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """Over HTTP (the window, Start on a call suggestion), a start that waits for the last meeting's
+    wrap-up is answered after a moment with what it will do, not minutes later once the notes are written."""
+    gate = threading.Event()
+    real = session_mod.summarize
+
+    async def slow(*args: Any, **kw: Any) -> Any:
+        await asyncio.to_thread(gate.wait, 5)
+        return await real(*args, **kw)
+
+    monkeypatch.setattr(session_mod, "summarize", slow)
+    monkeypatch.setattr(app_routes, "START_ANSWER_S", 0.3)
+    try:
+        assert client.post("/api/meeting/start").json()["action"] == "start"
+        assert client.post("/api/items", json={"kind": "action", "title": "Send the deck to Sam"}).status_code < 300
+        assert client.post("/api/meeting/stop").json()["state"] == "stopping"
+        body = client.post("/api/meeting/start").json()
+        assert (body["action"], body["state"], body["in_meeting"]) == ("start", "stopping", False)
+        host.suggest_meeting("zoom.us")
+        body = client.post("/api/suggestion/accept").json()
+        assert (body["action"], body["state"], body["suggestion"]) == ("start", "stopping", None)
+        gate.set()  # the notes are written: the start goes on
+        assert _wait(client, lambda s: s["in_meeting"])["state"] == "listening"
+        client.post("/api/meeting/stop")
+        _wait(client, lambda s: s["state"] == "stopped")
+    finally:
+        gate.set()
 
 
 def test_meeting_preferences_over_http(client: TestClient, host: AppHost) -> None:
