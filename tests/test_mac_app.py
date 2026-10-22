@@ -1950,13 +1950,16 @@ def test_calls_are_watched_only_while_nothing_is_recorded(host: FakeHost, appkit
     assert w.starts == [False] and _wait(lambda: ("call_ended", (None, None)) in host.calls)  # the host forgets old calls
     shell._sync_calls()
     assert w.starts == [False]  # once
-    for current in ("starting", "listening", "paused", "stopping"):
+    for current in ("starting", "listening", "paused"):
         shell.state = st(current, minutes=1)
         shell._sync_calls()
         assert not w.running
+    shell.state = st("stopping")  # Stop: watched again while the meeting is wrapped up
+    shell._sync_calls()
+    assert w.running and w.starts == [False, True]  # after a recording: the call recorded isn't new
     shell.state = st()
     shell._sync_calls()
-    assert w.starts == [False, True]  # after a recording: the call recorded isn't new
+    assert w.starts == [False, True]  # the same watch goes on once it is wrapped up
     shell.state = st(prefs={"call_suggestions": False})
     shell._sync_calls()
     assert not w.running
@@ -1980,6 +1983,94 @@ def test_calls_are_watched_only_while_nothing_is_recorded(host: FakeHost, appkit
     w.on_start(calls.Call("zoom", "Zoom", "us.zoom.xos", 501))
     time.sleep(0.1)
     assert len(host.calls) == 2
+
+
+class FakeClock:
+    now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class SteppedWatcher(calls.CallWatcher):
+    """The real watcher, its thread replaced by the looks the test takes, on a fake clock."""
+
+    def start(self, *, baseline: bool) -> None:
+        if self.running:
+            return
+        self.reset(baseline=baseline)
+        self._stop = threading.Event()
+        self._thread = threading.current_thread()  # "alive": running until stopped
+
+    def looks(self, seconds: float) -> None:
+        end = self.clock() + seconds
+        while self.clock() < end:
+            if self.running:
+                self.step(self._stop)
+            self.clock.now += 2.0  # type: ignore[attr-defined]
+
+
+def test_a_call_that_starts_while_the_last_meeting_is_wrapped_up_is_suggested(
+        host: FakeHost, appkit: Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Back-to-back calls: Stop on meeting A, and B begins during A's wrap-up (tens of seconds, minutes with an agent
+    at work). The calls under way are taken as known when Stop is pressed — the one just recorded is not new —, not
+    when the wrap-up ends, which swallowed B; and not when the recording started either, or a call joined after
+    pressing Start would be suggested the moment you stop."""
+    def st(*args: Any, **kw: Any) -> dict[str, Any]:
+        return _manual(*args, capabilities={"call_detection": True}, **kw)
+
+    class FakeProbe:
+        running, caps = False, ()
+
+        def device_running(self) -> bool:
+            return self.running
+
+        def captures(self) -> tuple[calls.Capture, ...]:
+            return self.caps
+
+    probe = FakeProbe()
+    made: list[SteppedWatcher] = []
+
+    def make(on_start: Any, on_end: Any) -> SteppedWatcher:
+        made.append(SteppedWatcher(on_start=on_start, on_end=on_end, probe=probe, clock=FakeClock()))
+        return made[-1]
+
+    monkeypatch.setattr(native.calls, "CallWatcher", make)
+    host.thread.start()
+    shell = _shell(host)
+    shell._launched = True
+    zoom, teams = calls.Capture(501, "us.zoom.xos"), calls.Capture(777, "com.microsoft.teams2")
+
+    def suggested() -> list[Any]:
+        time.sleep(0.05)
+        return [args for name, args in host.calls if name == "suggest_meeting"]
+
+    for current in ("stopped", "starting", "listening"):
+        shell.apply_state(st(current, minutes=1 if current == "listening" else None))
+    (w,) = made
+    probe.running, probe.caps = True, (zoom,)  # meeting A, recorded
+    w.looks(600)
+    shell.apply_state(st("stopping"))  # Stop: A is wrapped up
+    w.looks(4)
+    probe.caps = ()  # A's call is over
+    w.looks(10)
+    probe.caps = (teams,)  # B begins during the wrap-up
+    w.looks(10)
+    shell.apply_state(st("stopped"))
+    w.looks(120)
+    assert suggested() == [("Microsoft Teams", "microsoft teams")]  # B, once; never A
+
+    # a call still under way when Stop is pressed is the one just recorded: never suggested, through the wrap-up or after
+    host.calls.clear()
+    probe.caps = (zoom,)
+    for current in ("starting", "listening"):
+        shell.apply_state(st(current, minutes=1 if current == "listening" else None))
+    w.looks(60)
+    shell.apply_state(st("stopping"))
+    w.looks(30)
+    shell.apply_state(st("stopped"))
+    w.looks(120)
+    assert suggested() == [] and len(made) == 1
 
 
 def test_calls_are_named_with_what_macos_says(monkeypatch: pytest.MonkeyPatch) -> None:

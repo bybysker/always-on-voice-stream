@@ -1261,16 +1261,18 @@ class MacShell:
 
     def _sync_calls(self) -> None:
         """Main thread, at each host state: look for calls only while nothing is recorded, suggestions are on and
-        the setup is done (the host suggests nothing otherwise anyway)."""
+        the setup is done (the host suggests nothing otherwise anyway) — from the moment Stop is pressed: the calls
+        under way then are the one just recorded, and a call that begins while the meeting is wrapped up (seconds,
+        minutes with an agent at work) is a new one. Taken at the end of the wrap-up, that baseline swallowed it."""
         if not self._launched:
             return
         current = str(self.state.get("state") or "stopped")
         prefs = self.state.get("prefs") or {}
         caps = self.state.get("capabilities") or {}
-        if current in ("starting", "listening", "paused", "stopping"):
+        if current in ("starting", "listening", "paused"):
             self._recorded = True
         want = (not self.quitting and bool(caps.get("call_detection")) and bool(prefs.get("call_suggestions", True))
-                and bool(self.state.get("setup_done")) and current in ("stopped", "error"))
+                and bool(self.state.get("setup_done")) and current in ("stopped", "error", "stopping"))
         if want and (self._watcher is None or not self._watcher.running):
             if self._watcher is None:
                 self._watcher = calls.CallWatcher(on_start=self._call_seen, on_end=self._call_gone)
