@@ -131,6 +131,10 @@ START = {"stopped": "start", "error": "restart", "paused": "resume"}
 """What starting a meeting does in each state (:meth:`AppHost.meeting_start`): after a problem, a restart
 as Start does then; paused, Resume. Starting or listening, nothing: one is recorded or about to be. While
 the last one is wrapped up (stopping), the start waits for it (see :meth:`AppHost.meeting_action`)."""
+DOUBLE_PRESS_S = 2.0
+"""The keyboard shortcut (or a toggle link) pressed again this soon after the Stop that began the wrap-up under
+way is part of that Stop — a double press, a key that bounced — not a start of the next meeting once the notes
+are written, which would begin a recording minutes later by itself. An explicit Start always is one."""
 STOPPABLE = frozenset({"starting", "listening", "paused", "error"})
 """The states :meth:`AppHost.meeting_stop` stops (an error: Stop dismisses it, and stops what still runs)."""
 CALL_MEMORY_S = 4 * 3600.0
@@ -143,8 +147,9 @@ URL_ACTIONS = {"meeting/start": "start", "meeting/stop": "stop", "meeting/toggle
 KEYED_ACTIONS = frozenset({"start", "toggle"})
 """The links that may start a recording: they need the key (``?key=``), or any web page could."""
 
-MeetingAction = Literal["start", "restart", "resume", "stop", "error"]
-"""What a meeting action did (``error``: a start that failed, the state says why), for the shell's sound."""
+MeetingAction = Literal["start", "restart", "resume", "stop", "error", "cancelled"]
+"""What a meeting action did (``error``: a start that failed, the state says why; ``cancelled``: a start that
+waited for the last meeting's wrap-up, taken back before it began), for the shell's sound."""
 
 _STT_KEYS = {"openai": ("OPENAI_API_KEY", "OpenAI"), "openai-realtime": ("OPENAI_API_KEY", "OpenAI"),
              "deepgram": ("DEEPGRAM_API_KEY", "Deepgram")}  # fmt: skip
@@ -428,8 +433,14 @@ class AppHost:
         """Which action :attr:`_toggling` carries out."""
         self._start_queued = False
         """A start asked for while the last meeting is being wrapped up (state "stopping"): it starts once that
-        is done, unless Stop, Stop now or quitting comes first (:meth:`_start_after_stop`)."""
+        is done, unless Stop, Stop now, quitting or a switch to manual takes it back first
+        (:meth:`_start_after_stop`, :meth:`_take_back_start`). The state says so (``start_queued``)."""
         self._queued_start: asyncio.Task[bool] | None = None
+        self._stop_pressed_at: float | None = None
+        """When (:func:`time.monotonic`) the Stop that began the wrap-up under way was pressed
+        (see :data:`DOUBLE_PRESS_S`)."""
+        self._queued_after: asyncio.Task[Any] | None = None
+        """The Stop the start waiting for the wrap-up waits for first (pressed just before it, not under way yet)."""
         self._status_changed = asyncio.Event()
         """Set at every change of :attr:`status` (a start queued behind a stop waits for the stop to be over)."""
         self.suggestion: dict[str, Any] | None = None
@@ -445,7 +456,7 @@ class AppHost:
         """Something the person should know happened by itself (``kind``: ``ended_after_silence``,
         ``link_refused``), until dismissed or the next meeting starts. ``ended_after_silence`` is ``pending``
         while the meeting's notes are being written, then says where they are (``title``, ``folder``: none
-        when nothing was said)."""
+        when nothing was said) — or, when its wrap-up failed or was cut short, ``unfinished``."""
         self.wall: Callable[[], float] = time.time
         """The clock the calls already suggested are remembered on (tests replace it)."""
         self.status: State = "stopped"
@@ -592,6 +603,7 @@ class AppHost:
             "error": self.error,
             "restart_pending": self.restart_pending,
             "waiting_for_model": self.awaiting_model,
+            "start_queued": self._start_queued,
             "warnings": list(self.warnings),
             "mode": p.meeting_start,
             "suggestion": dict(self.suggestion) if self.suggestion is not None else None,
@@ -634,6 +646,8 @@ class AppHost:
 
     def _set_status(self, status: State, error: str | None = None) -> None:
         self.status, self.error = status, error
+        if status in ("stopped", "error", "starting"):
+            self._stop_pressed_at = None  # the wrap-up that Stop began is over: a press now is no double press
         self._status_changed.set()
         self._publish_state()
 
@@ -749,7 +763,7 @@ class AppHost:
             # pending: its notes are being written (meeting.ended says whether there are any, and where)
             self.notice = {"kind": "ended_after_silence", "meeting_id": ev.data.get("meeting_id"),
                            "minutes": round(a.end_after_s / 60), "at": utcnow().isoformat(), "title": None,
-                           "folder": None, "pending": True}  # fmt: skip
+                           "folder": None, "pending": True, "unfinished": False}  # fmt: skip
         if not self._stop_requested and not self._closing:
             self.track(asyncio.ensure_future(self.listen_stop()))
         else:
@@ -926,12 +940,14 @@ class AppHost:
     def _settle_notice(self, assistant: Assistant) -> bool:
         """``assistant`` is over, however it ended: a notice still saying one of its meetings' notes are being
         written (``pending``) stops saying so — that wrap-up never said it was done (cut short by a forced
-        stop, failed) and won't now. Returns whether it did."""
+        stop, failed) and won't now. It is ``unfinished`` then: with no ``meeting.ended``, whether anything
+        had been said isn't known, and its missing folder must not read as "nothing was said". Returns
+        whether it did."""
         note = self.notice
         ids = {s.meeting.id for s in [assistant.current, *assistant.finished_meetings] if s is not None}
         if note is None or not note.get("pending") or note.get("meeting_id") not in ids:
             return False
-        note["pending"] = False
+        note.update(pending=False, unfinished=True)
         return True
 
     async def listen_pause(self) -> None:
@@ -956,7 +972,7 @@ class AppHost:
         Calling it with ``force`` while a normal stop is under way escalates that stop. A restart under
         way (e.g. "apply now") then stays stopped, and so does a start waiting for the stop under way."""
         if force or self._stop_requested:
-            self._start_queued = False  # Stop (now) while the last meeting is wrapped up: the next one doesn't start
+            self._take_back_start()  # Stop (now) while the last meeting is wrapped up: the next one doesn't start
         self._stop_pressed = True
         await self._stop(force, timeout)
         if not self._closing:
@@ -1038,20 +1054,25 @@ class AppHost:
 
     def meeting_action(self, what: Literal["start", "stop", "toggle"] = "toggle") -> MeetingAction | None:
         """What :meth:`meeting_start`, :meth:`meeting_stop` or :meth:`meeting_toggle` would do now, or
-        ``None``: nothing to do, or nothing while listening starts, while the previous action is still
-        being carried out (the gap before the state says so) and once the app is quitting. While the last
-        meeting is being wrapped up (``stopping``), a start waits for it (:meth:`_start_after_stop`): its
-        microphone is closed already, but the summary, pushes and agents can take minutes, and back-to-back
-        meetings mustn't lose the next one's start. A stop is never held back by a start under way: Stop
-        must always be able to end a recording, or take back a start that waits."""
+        ``None``: nothing to do, or nothing while listening starts and once the app is quitting.
+
+        A start pressed while the previous one is still being carried out (the gap before the state says
+        so), or while one waits for a wrap-up, is that same start and says how it went with it: answered
+        with nothing, the shell would play its failure sound for a press followed by a recording. While the
+        last meeting is being wrapped up (``stopping``), a start waits for it (:meth:`_start_after_stop`):
+        its microphone is closed already, but the summary, pushes and agents can take minutes, and
+        back-to-back meetings mustn't lose the next one's start — except a toggle (the shortcut) within
+        :data:`DOUBLE_PRESS_S` of the Stop that began that wrap-up, which is part of that Stop. A stop is
+        never held back by a start under way: Stop must always be able to end a recording, or take back a
+        start that waits."""
         if self._closing:
             return None
         if what == "stop":
             return "stop" if self.status in STOPPABLE or self._start_queued else None
+        if self._toggling is not None and not self._toggling.done() and self._toggled != "stop":
+            return self._toggled  # a start, restart or resume under way (or waiting for a wrap-up): joined
         if self._start_waits():
-            return "start"
-        if self._toggling is not None and not self._toggling.done():
-            return None
+            return "stop" if what == "toggle" and self._pressed_again() else "start"
         return (TOGGLE if what == "toggle" else START).get(self.status)  # type: ignore[return-value]
 
     def _start_waits(self) -> bool:
@@ -1059,6 +1080,11 @@ class AppHost:
         the state doesn't say so yet), or a start waits for one already."""
         busy = self._toggling is not None and not self._toggling.done()
         return self._start_queued or self.status == "stopping" or (busy and self._toggled == "stop")
+
+    def _pressed_again(self) -> bool:
+        """A press now comes within :data:`DOUBLE_PRESS_S` of the Stop that began the wrap-up under way."""
+        at = self._stop_pressed_at
+        return at is not None and time.monotonic() - at < DOUBLE_PRESS_S
 
     def toggle_action(self) -> str | None:
         """What a press of the keyboard shortcut does now (:data:`.hotkey.TOGGLE`): :meth:`meeting_action`."""
@@ -1070,13 +1096,23 @@ class AppHost:
         once listening is up, or after :data:`START_WAIT_S`; one that waits for the last meeting's wrap-up,
         after that too), or ``"error"`` when it failed — a missing key, a permission, a microphone that
         gave up: those become state ``error`` rather than an exception, and the shell's sound must not say
-        it worked. ``None`` for a start taken back while it waited."""
+        it worked. ``cancelled`` for a start that waited and was taken back (:meth:`_take_back_start`)."""
         if action is None:
             return None
-        if action == "start" and self._start_waits():
-            return await self._queue_start()
+        under_way = self._toggling if self._toggling is not None and not self._toggling.done() else None
         if action == "stop":
-            self._start_queued = False  # a start waiting for the last meeting's wrap-up is taken back
+            if self._take_back_start():
+                # what this Stop stops is the start waiting for the wrap-up under way, which goes on as it was
+                # (the notes are written in full); a restart under way stays stopped, as after any Stop
+                self._stop_pressed = True
+                return action
+            if self.status == "stopping" or (under_way is not None and self._toggled == "stop"):
+                return action  # pressed again (the shortcut twice): part of the Stop under way
+            self._stop_pressed_at = time.monotonic()
+        elif under_way is not None and self._toggled == action:
+            return await self._outcome(under_way, action)  # pressed again while it is carried out
+        elif action == "start" and self._start_waits():
+            return await self._queue_start()
         run = {"start": self.listen_start, "restart": self.listen_restart, "stop": self.listen_stop,
                "resume": self.listen_resume}[action]  # fmt: skip
         task = self._toggling = asyncio.ensure_future(run())
@@ -1085,41 +1121,70 @@ class AppHost:
         if action == "stop":
             await asyncio.sleep(0)  # its first step: the state says "stopping" by the time this returns
             return action
-        await asyncio.wait({task})  # the work isn't cancelled if this is
-        return "error" if self.status == "error" else action
+        return await self._outcome(task, action)
 
-    async def _queue_start(self) -> MeetingAction | None:
+    async def _outcome(self, task: asyncio.Task[Any], action: MeetingAction) -> MeetingAction:
+        """What the meeting action ``task`` carries out did, once it is done (the work isn't cancelled if the
+        caller is): ``cancelled`` for a waiting start taken back, ``error`` for one that failed."""
+        await asyncio.wait({task})
+        if task.cancelled():
+            return "cancelled"
+        if (exc := task.exception()) is not None:
+            log.warning("could not %s: %s", action, exc, exc_info=exc)
+            return "error"
+        return "cancelled" if task.result() is False else "error" if self.status == "error" else action
+
+    async def _queue_start(self) -> MeetingAction:
         """A start while the last meeting is being wrapped up: once that is done (:meth:`_start_after_stop`).
-        Pressed again meanwhile, it is the same start (also after a Stop took it back: the last word wins)."""
+        Pressed again meanwhile, it is the same start (:meth:`meeting_action`); after a Stop took it back, a
+        new one."""
         busy = self._toggling is not None and not self._toggling.done()
         before = self._toggling if busy and self._toggled == "stop" else None
-        self._start_queued = True
-        if self._queued_start is None or self._queued_start.done():
+        if not self._start_queued or self._queued_start is None or self._queued_start.done():
+            self._start_queued = True
+            self._queued_after = before
             self._queued_start = asyncio.ensure_future(self._start_after_stop(before))
             self.track(self._queued_start)
             log.info("the last meeting is being wrapped up: the next one starts as soon as it is")
+            self._publish_state()  # the window, the floating button and the menus say so, and offer to cancel it
         task = self._toggling = self._queued_start
         self._toggled = "start"
-        await asyncio.wait({task})  # the work isn't cancelled if this is
-        if task.cancelled() or task.exception() is not None or not task.result():
-            return None
-        return "error" if self.status == "error" else "start"
+        return await self._outcome(task, "start")
 
     async def _start_after_stop(self, before: asyncio.Task[Any] | None) -> bool:
         """Wait for the stop under way — ``before``, a Stop pressed just before that hasn't begun yet, then
-        the state ``stopping`` (the capture closed, the meeting wrapped up) — and start listening, unless the
-        start was taken back meanwhile (:attr:`_start_queued`: Stop, Stop now) or the app is quitting. Not
-        on the run task: it also waits for an ended meeting's agents, and is gone once the stop is over."""
+        the state ``stopping`` (the capture closed, the meeting wrapped up) — and start listening. Not on the
+        run task: it also waits for an ended meeting's agents, and is gone once the stop is over. Taken back
+        meanwhile, it is cancelled (:meth:`_take_back_start`); ``False`` if the app is quitting all the same."""
         if before is not None:
             await asyncio.wait({before})
         while self.status == "stopping" and not self._closing:
             self._status_changed.clear()
             await self._status_changed.wait()
-        queued, self._start_queued = self._start_queued, False
-        if not queued or self._closing:
-            log.info("the start waiting for the last meeting's wrap-up was taken back")
+        if not self._start_queued or self._closing:
             return False
+        self._start_queued = False
+        self._publish_state()  # from here on it is a start like any other, and Stop stops it as one
         await self.listen_start()
+        return True
+
+    def _take_back_start(self, publish: bool = True) -> bool:
+        """The start waiting for the last meeting's wrap-up (Stop, Stop now, quitting, a switch to manual): it
+        won't start, and the presses waiting for it are answered ``cancelled`` at once. Returns whether there
+        was one."""
+        if not self._start_queued:
+            return False
+        self._start_queued = False
+        task = self._queued_start
+        if task is not None and not task.done():
+            task.cancel()  # it hasn't begun to start anything: it only waits (see _start_after_stop)
+        if self._toggling is task:
+            # the action under way is the stop it waited for again — not a start a press could join while
+            # its cancellation is still on its way
+            self._toggling, self._toggled = self._queued_after, "stop" if self._queued_after is not None else None
+        log.info("the start waiting for the last meeting's wrap-up was taken back")
+        if publish:
+            self._publish_state()
         return True
 
     async def meeting_start(self) -> MeetingAction | None:
@@ -1222,11 +1287,11 @@ class AppHost:
     async def suggestion_accept(self) -> MeetingAction | None:
         """"Start" on the suggestion: :meth:`meeting_start` (also when it was taken down meanwhile: starting
         is what was asked)."""
-        self._withdraw_suggestion()
-        action = await self.meeting_start()
-        if action is None:
-            self._publish_state()  # nothing started (one is recorded already): the suggestion still goes away
-        return action
+        if self._withdraw_suggestion():
+            # said before the start, which may wait minutes for the last meeting's wrap-up: a suggestion still
+            # shown meanwhile would offer a "Not now" that takes back nothing
+            self._publish_state()
+        return await self.meeting_start()
 
     def suggestion_dismiss(self) -> bool:
         """(On the loop.) "Not now": the suggestion goes away; this call isn't suggested again."""
@@ -1269,8 +1334,9 @@ class AppHost:
         recording. ``meeting/stop`` and ``open`` need none: they can't record anything.
 
         Returns the outcome: what the meeting action did (``start``, ``restart``, ``resume``, ``stop``,
-        ``error``), ``nothing`` (nothing to do), ``open`` (the shell shows the window), ``refused`` (no key,
-        or not this one: :attr:`notice` says so) or ``unknown`` (not a link Voicestream knows)."""
+        ``error``, ``cancelled``), ``nothing`` (nothing to do), ``open`` (the shell shows the window),
+        ``refused`` (no key, or not this one: :attr:`notice` says so) or ``unknown`` (not a link Voicestream
+        knows)."""
         parsed = parse_url(url)
         if parsed is None:
             log.info("ignored a voicestream link this version doesn't know")
@@ -1367,6 +1433,10 @@ class AppHost:
         if not self.prefs.call_suggestions:
             self._withdraw_suggestion()
         to_manual = mode != "manual" and self.prefs.meeting_start == "manual"
+        if to_manual:
+            # a start waiting for the last meeting's wrap-up was asked for as always-on listening: carried out
+            # now, it would open a manual meeting by itself once the notes are written
+            self._take_back_start(publish=False)
         limits = (old.silence_ask_minutes, old.silence_end_minutes) != (self.prefs.silence_ask_minutes,
                                                                         self.prefs.silence_end_minutes)
         a = self._assistant
@@ -1605,6 +1675,7 @@ class AppHost:
         """Stop listening (a graceful wrap-up of up to :data:`GRACEFUL_SHUTDOWN_S`, then forced; at once
         forced with ``force``), downloads and the server. Safe to call again to escalate."""
         self._closing = True  # a restart in flight (settings, pending after a meeting) must not start a new one
+        self._take_back_start()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + (0 if force else GRACEFUL_SHUTDOWN_S)
         if self._run_task is not None:

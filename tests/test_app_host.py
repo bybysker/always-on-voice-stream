@@ -898,19 +898,26 @@ async def test_the_shortcut_starts_stops_resumes_and_restarts(tmp_path: Path) ->
 
 
 async def test_the_shortcut_does_nothing_while_starting_or_quitting(tmp_path: Path) -> None:
-    host = _host(tmp_path)
+    built: list[Assistant] = []
+    host = _host(tmp_path, factory=_factory(built=built))
     host.status = "starting"
     assert host.toggle_action() is None and await host.listen_toggle() is None
     host.status = "stopping"  # a start, once the last meeting is wrapped up (test_app_meeting_start)
     assert host.toggle_action() == "start"
     host.status = "stopped"
     # two presses in a row (each its own call on the loop, as the shell posts them): the second comes
-    # while the first one's start is being carried out, before it has changed the state
+    # while the first one's start is being carried out, before it has changed the state. It is the same
+    # start, and says so when it is up: "nothing" would be the shell's failure sound for a press that records
     first = asyncio.ensure_future(host.listen_toggle())
     await asyncio.sleep(0)
-    assert host.status == "stopped" and await host.listen_toggle() is None
-    assert await first == "start"
+    assert host.status == "stopped" and host.toggle_action() == "start" and host.meeting_action("start") == "start"
+    assert await host.listen_toggle() == "start"
+    assert await first == "start" and len(built) == 1
     await _until(lambda: host.status == "listening" and host.toggle_action() == "stop")
+    await host.listen_stop()
+    # on the same turn of the loop (the shortcut and the floating button at once): one start, both say it
+    assert await asyncio.gather(host.meeting_toggle(), host.meeting_start()) == ["start", "start"]
+    assert host.status == "listening" and len(built) == 2
     await host.shutdown()
     assert host.toggle_action() is None and await host.listen_toggle() is None and host.status == "stopped"
 
@@ -920,6 +927,9 @@ async def test_the_shortcut_after_a_failed_start_tries_again(tmp_path: Path) -> 
         raise TranscriptionError("DEEPGRAM_API_KEY is not set", fatal=True)
 
     host = _host(tmp_path, factory=broken)
+    # two presses at once: the second joins the first, and both say it failed
+    assert await asyncio.gather(host.meeting_toggle(), host.meeting_toggle()) == ["error", "error"]
+    host._set_status("stopped")
     await _toggled(host, "error", "error")  # a start that failed: said so (the shell's sound must not say it worked)
     assert host.error.startswith("Speech-to-text with Deepgram needs your Deepgram key")
     assert host.toggle_action() == "restart"
@@ -927,6 +937,22 @@ async def test_the_shortcut_after_a_failed_start_tries_again(tmp_path: Path) -> 
     host._factory = _factory()  # fixed meanwhile
     await _toggled(host, "restart", "listening")
     await host.listen_stop()
+
+
+async def test_a_start_that_raises_says_it_failed_and_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                         caplog: pytest.LogCaptureFixture) -> None:
+    """A start that raises rather than going to the error state (a bug): the presses say it failed — the shell's
+    failure sound, not its "recording" one — and the log says why, not asyncio once the task is collected."""
+    caplog.set_level(logging.WARNING)
+    host = _host(tmp_path)
+
+    async def broken(paused: bool = False) -> None:
+        await asyncio.sleep(0)
+        raise RuntimeError("the start went wrong")
+
+    monkeypatch.setattr(host, "listen_start", broken)
+    assert await asyncio.gather(host.meeting_toggle(), host.meeting_start()) == ["error", "error"]
+    assert "could not start: the start went wrong" in caplog.text
 
 
 async def test_the_shortcut_preference_and_what_the_shell_says(tmp_path: Path) -> None:

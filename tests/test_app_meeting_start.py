@@ -5,6 +5,7 @@ Start and Stop goes through, "Still in a meeting?", voicestream:// links and cal
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import threading
@@ -305,7 +306,8 @@ async def test_the_notice_says_the_notes_are_being_written_until_they_are(tmp_pa
                                                                           monkeypatch: pytest.MonkeyPatch) -> None:
     """Ended after an hour without speech: the wrap-up (summary, pushes) takes a while, and until it says
     whether there are notes the notice says they are being written (``pending``), not that nothing had been
-    said; it says so once it is known, also when nothing was said, or when the wrap-up never says it."""
+    said; it says so once it is known, also when nothing was said. A wrap-up that never says it (it failed, or
+    was cut short) leaves it ``unfinished``: whether anything was said isn't known, so it must not say nothing was."""
     gate = _slow_wrap_up(monkeypatch)
     wall = Wall()
     built: list[Assistant] = []
@@ -323,11 +325,13 @@ async def test_the_notice_says_the_notes_are_being_written_until_they_are(tmp_pa
         await _until(lambda: host.status == "stopped")
         notice = host.state()["notice"]
         assert notice["pending"] is False and notice["folder"] == list_sessions(host.cfg.data_path)[-1].name
+        assert notice["unfinished"] is False
 
         await host.meeting_start()  # nothing said this time: no notes, once that is known
         wall.advance(61)
         await _until(lambda: host.status == "stopped" and host.notice is not None)
-        assert host.state()["notice"]["pending"] is False and host.state()["notice"]["folder"] is None
+        notice = host.state()["notice"]
+        assert notice["pending"] is False and notice["folder"] is None and notice["unfinished"] is False
 
         # a wrap-up that fails (a full disk) never says it is done: the notice doesn't stay "being written"
         await host.meeting_start()
@@ -339,7 +343,9 @@ async def test_the_notice_says_the_notes_are_being_written_until_they_are(tmp_pa
         monkeypatch.setattr(built[-1].current.store, "save", full)
         wall.advance(61)
         await _until(lambda: host.status == "error")
-        assert host.state()["notice"]["pending"] is False and not _events(host, "meeting.ended")[2:]
+        notice = host.state()["notice"]
+        assert notice["pending"] is False and notice["unfinished"] is True and notice["folder"] is None
+        assert not _events(host, "meeting.ended")[2:]
     finally:
         gate.set()
         await host.shutdown()
@@ -524,7 +530,8 @@ async def test_a_start_while_the_last_meeting_is_wrapped_up_waits_for_it(tmp_pat
                                                                          monkeypatch: pytest.MonkeyPatch) -> None:
     """Back-to-back calls: Stop, then Start (the shortcut, the floating button, Spotlight) as the next one
     begins. The microphone is closed already but the wrap-up can take minutes: the next meeting starts as
-    soon as it is done, rather than the press being lost. Stop, Stop now or quitting meanwhile still win."""
+    soon as it is done, rather than the press being lost. Stop, Stop now or quitting meanwhile still win, and
+    the press they take back is answered at once that it was (``cancelled``: no failure sound, no start sound)."""
     gate = _slow_wrap_up(monkeypatch)
     built: list[Assistant] = []
     host = _manual(tmp_path, built=built)
@@ -534,15 +541,16 @@ async def test_a_start_while_the_last_meeting_is_wrapped_up_waits_for_it(tmp_pat
         await built[-1]._route(seg("I'll send the deck to Sam by Friday.", "mic", t=1.0))
         gate.clear()
         assert await host.meeting_stop() == "stop" and host.status == "stopping"
-        assert host.meeting_action("start") == "start" and host.meeting_action("toggle") == "start"
+        # (the shortcut, this soon after the Stop, is part of it: see the next test)
+        assert host.meeting_action("start") == "start" and host.meeting_action("toggle") == "stop"
         waiting = asyncio.ensure_future(start())
         await asyncio.sleep(0.2)
         assert not waiting.done() and host.status == "stopping"
         return waiting
 
     try:
-        first = await stopped_with_a_start_waiting(host.meeting_toggle)
-        again = asyncio.ensure_future(host.open_url(host.launcher_url()))  # pressed again (Spotlight): one start
+        first = await stopped_with_a_start_waiting(lambda: host.open_url(host.launcher_url()))  # Spotlight
+        again = asyncio.ensure_future(host.meeting_toggle())  # and the shortcut too: the same start
         await asyncio.sleep(0.1)
         assert host.meeting_action("toggle") == "start" and not again.done() and len(built) == 1
         gate.set()  # the last meeting's notes are written: the next one starts
@@ -552,38 +560,31 @@ async def test_a_start_while_the_last_meeting_is_wrapped_up_waits_for_it(tmp_pat
         order = [(e.type, e.data.get("notes")) for e in host.bus.history if e.type in ("meeting.ended", "meeting.started")]
         assert [t for t, _ in order] == ["meeting.started", "meeting.ended", "meeting.started"] and order[1][1]
 
-        # Stop while the start waits: nothing starts after the wrap-up
+        # Stop while the start waits: nothing starts after the wrap-up, and the notes are written as ever
         waiting = await stopped_with_a_start_waiting(host.meeting_start)
         assert host.meeting_action("stop") == "stop" and await host.meeting_stop() == "stop"
+        assert await asyncio.wait_for(waiting, 1) == "cancelled"  # said then, not once the notes are written
+        assert host.status == "stopping" and not built[-1].forced
         gate.set()
-        assert await waiting is None
         await _until(lambda: host.status == "stopped")
         await asyncio.sleep(0.1)
         assert host.status == "stopped" and len(built) == 2 and host.assistant is None
+        assert _events(host, "meeting.ended")[-1]["notes"]
 
         # "Stop now" (the window, during the wrap-up) likewise
         waiting = await stopped_with_a_start_waiting(host.meeting_start)
         await host.listen_stop(force=True)
-        assert await waiting is None and host.status == "stopped" and len(built) == 3
+        assert await waiting == "cancelled" and host.status == "stopped" and len(built) == 3
 
-        # Start, Stop, Start again during one wrap-up: the last word wins, and it is one start
+        # Start, Stop, Start again during one wrap-up: the last word wins, and it is one start — also when the
+        # Stop and the Start come on the same turn of the loop (the floating button's Cancel, then its Start)
         waiting = await stopped_with_a_start_waiting(host.meeting_start)
-        assert await host.meeting_stop() == "stop"
-        again = asyncio.ensure_future(host.meeting_toggle())
+        stop, again = asyncio.ensure_future(host.meeting_stop()), asyncio.ensure_future(host.meeting_start())
+        assert await stop == "stop" and await asyncio.wait_for(waiting, 1) == "cancelled"
         await asyncio.sleep(0.1)
-        assert not again.done() and host.status == "stopping"
+        assert not again.done() and host.status == "stopping" and host.state()["start_queued"] is True
         gate.set()
-        assert await again == "start" and await waiting == "start" and host.in_meeting() and len(built) == 5
-
-        # two presses of the shortcut in a row while recording: the second comes before the stop says so
-        await built[-1]._route(seg("Last point.", "mic", t=1.0))
-        gate.clear()
-        stop, start = asyncio.ensure_future(host.meeting_toggle()), asyncio.ensure_future(host.meeting_toggle())
-        assert await stop == "stop"
-        await asyncio.sleep(0.1)
-        assert host.status == "stopping" and not start.done()
-        gate.set()
-        assert await start == "start" and host.in_meeting() and len(built) == 6
+        assert await again == "start" and host.in_meeting() and len(built) == 5
 
         # quitting while a start waits: nothing starts
         await built[-1]._route(seg("One more thing.", "mic", t=1.0))
@@ -595,7 +596,112 @@ async def test_a_start_while_the_last_meeting_is_wrapped_up_waits_for_it(tmp_pat
         await asyncio.sleep(0.1)
         gate.set()
         await quitting
-        assert await waiting is None and len(built) == 6 and host.assistant is None
+        assert await waiting == "cancelled" and len(built) == 5 and host.assistant is None
+    finally:
+        gate.set()
+        await host.shutdown()
+
+
+async def test_the_shortcut_pressed_twice_to_stop_is_one_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shortcut pressed twice while recording (a double press, a key that bounced): the second press comes
+    during the wrap-up the first one began, where a press starts the next meeting once the notes are written.
+    Within DOUBLE_PRESS_S of that Stop it is part of it: it says "stop", and no recording begins minutes later
+    by itself. Later in the wrap-up it is the next meeting's start, as before; and an explicit Start (the window,
+    the floating button, a meeting/start link, a call suggestion) always is one."""
+    monkeypatch.setattr(host_mod, "DOUBLE_PRESS_S", 0.5)
+    gate = _slow_wrap_up(monkeypatch)
+    built: list[Assistant] = []
+    host = _manual(tmp_path, built=built)
+    toggle_link = host.launcher_url().replace("meeting/start", "meeting/toggle")
+
+    async def recording() -> None:
+        if not host.in_meeting():
+            assert await host.meeting_start() == "start"
+        await built[-1]._route(seg("I'll send the deck to Sam by Friday.", "mic", t=1.0))
+        gate.clear()
+
+    try:
+        await recording()
+        # on the same turn of the loop (before the state says "stopping"), and again once it does
+        first, second = asyncio.ensure_future(host.meeting_toggle()), asyncio.ensure_future(host.meeting_toggle())
+        assert [await first, await second] == ["stop", "stop"]
+        assert host.status == "stopping" and host.toggle_action() == "stop"
+        assert await host.meeting_toggle() == "stop" and await host.open_url(toggle_link) == "stop"
+        assert host.state()["start_queued"] is False
+        gate.set()
+        await _until(lambda: host.status == "stopped")
+        await asyncio.sleep(0.2)
+        assert host.status == "stopped" and len(built) == 1 and not host.in_meeting()
+
+        # pressed later in the wrap-up: the next meeting, once the notes are written
+        await recording()
+        assert await host.meeting_toggle() == "stop"
+        await asyncio.sleep(0.6)
+        assert host.status == "stopping" and host.toggle_action() == "start"
+        waiting = asyncio.ensure_future(host.meeting_toggle())
+        await asyncio.sleep(0.1)
+        assert not waiting.done() and host.state()["start_queued"] is True
+        gate.set()
+        assert await waiting == "start" and host.in_meeting() and len(built) == 3
+
+        # an explicit Start right after the Stop: a start (and the shortcut then is the same start)
+        await recording()
+        assert await host.meeting_toggle() == "stop"
+        assert host.meeting_action("start") == "start"
+        waiting = asyncio.ensure_future(host.meeting_start())
+        await asyncio.sleep(0.1)
+        assert host.state()["start_queued"] is True and host.toggle_action() == "start"
+        gate.set()
+        assert await waiting == "start" and host.in_meeting() and len(built) == 4
+
+        # the menu's Stop pressed twice, while the Stop isn't under way yet: one stop
+        await recording()
+        stops = [asyncio.ensure_future(host.meeting_stop()) for _ in range(2)]
+        assert [await t for t in stops] == ["stop", "stop"]
+        gate.set()
+        await _until(lambda: host.status == "stopped")
+        assert len(built) == 4 and len(_events(host, "meeting.ended")) == 4
+    finally:
+        gate.set()
+        await host.shutdown()
+
+
+async def test_a_start_waiting_for_the_wrap_up_is_shown_until_it_starts_or_is_taken_back(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A start waiting for the last meeting's wrap-up is in the state (``start_queued``) from the press until it
+    starts or is taken back: the window, the floating button and the menus say the next meeting starts once the
+    notes are written, and offer to cancel it (a Stop, which leaves the notes being written as they were)."""
+    gate = _slow_wrap_up(monkeypatch)
+    built: list[Assistant] = []
+    host = _manual(tmp_path, built=built)
+    seen: list[tuple[str, bool]] = []
+    host.add_state_listener(lambda state: seen.append((state["state"], state["start_queued"])))
+
+    async def stopped_with_a_start_waiting() -> asyncio.Future[Any]:
+        await built[-1]._route(seg("I'll send the deck to Sam by Friday.", "mic", t=1.0))
+        gate.clear()
+        assert await host.meeting_stop() == "stop"
+        assert seen[-1] == ("stopping", False) and host.state()["start_queued"] is False
+        waiting = asyncio.ensure_future(host.meeting_start())
+        await asyncio.sleep(0.1)
+        assert seen[-1] == ("stopping", True) and host.state()["start_queued"] is True
+        return waiting
+
+    try:
+        assert await host.meeting_start() == "start" and host.state()["start_queued"] is False
+        waiting = await stopped_with_a_start_waiting()
+        gate.set()
+        assert await waiting == "start" and seen[-1] == ("listening", False)
+        assert "stopping" in {s for s, queued in seen if queued} <= {"stopping", "stopped"}  # never once it starts
+
+        waiting = await stopped_with_a_start_waiting()
+        assert await host.meeting_stop() == "stop"  # Cancel
+        assert seen[-1] == ("stopping", False) and await asyncio.wait_for(waiting, 1) == "cancelled"
+        assert host.meeting_action("stop") is None  # nothing more to take back: the wrap-up goes on
+        gate.set()
+        await _until(lambda: host.status == "stopped")
+        assert not built[-1].forced and _events(host, "meeting.ended")[-1]["notes"] and len(built) == 2
+        assert seen[-1] == ("stopped", False)
     finally:
         gate.set()
         await host.shutdown()
@@ -779,6 +885,46 @@ async def test_a_start_waiting_for_the_speech_model_is_dropped_by_the_switch_to_
     await _until(lambda: host.status == "stopped")
 
 
+async def test_a_start_waiting_for_the_wrap_up_is_dropped_by_the_switch_to_manual(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Always-on listening, a meeting being wrapped up after a Stop, and a press meant to start listening again
+    once it is: switched to "when I start one" meanwhile, that start would open a meeting nobody started.
+    It is taken back (``cancelled``); one pressed in manual mode is a start by hand and still waits."""
+    gate = _slow_wrap_up(monkeypatch)
+    built: list[Assistant] = []
+    host = _host(tmp_path, idle=0, factory=_factory(built=built))  # automatic; idle 0: a meeting from the start
+    try:
+        await host.listen_start()
+        await _until(lambda: host.in_meeting())
+        await built[0]._route(seg("I'll send the deck to Sam by Friday.", "mic", t=1.0))
+        assert await host.meeting_stop() == "stop" and host.status == "stopping"
+        waiting = asyncio.ensure_future(host.meeting_start())
+        await asyncio.sleep(0.1)
+        assert not waiting.done() and host.state()["start_queued"] is True
+        host.update_prefs({"meeting_start": "manual"})
+        assert await asyncio.wait_for(waiting, 1) == "cancelled" and host.state()["start_queued"] is False
+        gate.set()
+        await _until(lambda: host.status == "stopped" and host.assistant is None)
+        await asyncio.sleep(0.2)
+        assert host.status == "stopped" and len(built) == 1 and not host.in_meeting()
+
+        assert await host.meeting_start() == "start" and built[-1].manual  # by hand, in manual mode
+        await built[-1]._route(seg("Budget review.", "mic", t=1.0))
+        gate.clear()
+        assert await host.meeting_stop() == "stop"
+        waiting = asyncio.ensure_future(host.meeting_start())
+        await asyncio.sleep(0.1)
+        host.update_prefs({"meeting_start": "manual", "silence_end_minutes": 30})  # not a switch to manual
+        assert not waiting.done() and host.state()["start_queued"] is True
+        gate.set()
+        assert await waiting == "start" and host.in_meeting() and len(built) == 3
+        await host.meeting_stop()
+        await _until(lambda: host.status == "stopped")
+    finally:
+        gate.set()
+        await host.shutdown()
+
+
 # ----------------------------------------------------------------------- links
 
 
@@ -928,6 +1074,36 @@ async def test_a_call_is_suggested_once_and_never_starts_anything(tmp_path: Path
     assert host.suggest_meeting("Webex")
     host.update_prefs({"call_suggestions": False})  # turned off: taken down, none after
     assert host.state()["suggestion"] is None and not host.suggest_meeting("Google Meet")
+
+
+async def test_start_on_a_suggestion_during_a_wrap_up_takes_it_down_at_once(tmp_path: Path,
+                                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    """A call begins while the last meeting is wrapped up, and you press Start on its suggestion: the start waits
+    for the wrap-up, but the suggestion goes away at once wherever it is shown — the floating button and the
+    window show what is published, and a "Not now" left there would do nothing while the recording still starts."""
+    gate = _slow_wrap_up(monkeypatch)
+    built: list[Assistant] = []
+    host = _manual(tmp_path, built=built, setup_done=True)
+    seen: list[dict[str, Any]] = []
+    host.add_state_listener(seen.append)
+    try:
+        await host.meeting_start()
+        await built[-1]._route(seg("I'll send the deck to Sam by Friday.", "mic", t=1.0))
+        assert await host.meeting_stop() == "stop" and host.status == "stopping"
+        await _until(lambda: bool(_events(host, "meeting.ending")))
+        await asyncio.sleep(0.1)  # the wrap-up is at its summary: nothing else is published until it is done
+        assert host.suggest_meeting("zoom.us") and seen[-1]["suggestion"]["app"] == "zoom.us"
+        accept = asyncio.ensure_future(host.suggestion_accept())
+        await asyncio.sleep(0.2)
+        assert not accept.done() and host.status == "stopping"
+        assert seen[-1]["suggestion"] is None and seen[-1]["state"] == "stopping"
+        gate.set()  # the notes are written: the start you asked for goes on
+        assert await accept == "start" and host.in_meeting() and len(built) == 2
+        await host.meeting_stop()
+        await _until(lambda: host.status == "stopped")
+    finally:
+        gate.set()
+        await host.shutdown()
 
 
 def test_no_suggestion_before_the_setup_is_done(tmp_path: Path) -> None:
@@ -1090,7 +1266,8 @@ def test_answers_over_http(client: TestClient, host: AppHost) -> None:
 def test_a_start_waiting_for_the_wrap_up_is_answered_at_once(client: TestClient, host: AppHost,
                                                              monkeypatch: pytest.MonkeyPatch) -> None:
     """Over HTTP (the window, Start on a call suggestion), a start that waits for the last meeting's
-    wrap-up is answered after a moment with what it will do, not minutes later once the notes are written."""
+    wrap-up is answered after a moment with what it will do, not minutes later once the notes are written. The
+    window's Cancel (Stop) takes it back, and the notes go on being written."""
     gate = threading.Event()
     real = session_mod.summarize
 
@@ -1106,9 +1283,14 @@ def test_a_start_waiting_for_the_wrap_up_is_answered_at_once(client: TestClient,
         assert client.post("/api/meeting/stop").json()["state"] == "stopping"
         body = client.post("/api/meeting/start").json()
         assert (body["action"], body["state"], body["in_meeting"]) == ("start", "stopping", False)
+        assert body["start_queued"] is True
+        body = client.post("/api/meeting/stop").json()  # Cancel
+        assert (body["action"], body["state"], body["start_queued"]) == ("stop", "stopping", False)
+        assert not host.assistant.forced  # the notes are written in full all the same
         host.suggest_meeting("zoom.us")
         body = client.post("/api/suggestion/accept").json()
         assert (body["action"], body["state"], body["suggestion"]) == ("start", "stopping", None)
+        assert body["start_queued"] is True
         gate.set()  # the notes are written: the start goes on
         # the meeting opens while the state still says starting: wait for both
         _wait(client, lambda s: s["in_meeting"] and s["state"] == "listening")
@@ -1116,6 +1298,29 @@ def test_a_start_waiting_for_the_wrap_up_is_answered_at_once(client: TestClient,
         _wait(client, lambda s: s["state"] == "stopped")
     finally:
         gate.set()
+
+
+def test_a_start_that_fails_after_it_was_answered_is_logged(client: TestClient, host: AppHost,
+                                                            monkeypatch: pytest.MonkeyPatch,
+                                                            caplog: pytest.LogCaptureFixture) -> None:
+    """A start answered before it was done (it waited for a wrap-up) that then raises: its error is in the log,
+    not asyncio's "Task exception was never retrieved" whenever the task happens to be collected."""
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr(app_routes, "START_ANSWER_S", 0.1)
+    raised = threading.Event()
+
+    async def failing() -> None:
+        await asyncio.sleep(0.3)
+        raised.set()
+        raise RuntimeError("the speech service went away")
+
+    monkeypatch.setattr(host, "meeting_start", failing)
+    assert client.post("/api/meeting/start").json()["action"] == "start"  # answered while it still waits
+    assert raised.wait(5)
+    _wait(client, lambda s: not host._background)
+    gc.collect()
+    assert "never retrieved" not in caplog.text
+    assert "the speech service went away" in caplog.text
 
 
 def test_meeting_preferences_over_http(client: TestClient, host: AppHost) -> None:
