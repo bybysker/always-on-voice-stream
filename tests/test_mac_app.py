@@ -209,6 +209,9 @@ class FakeHost:
             self.server.shutdown()
             self.server.server_close()
         if self.thread.is_alive():
+            # what the shell posted last (a call ending as the test ends) starts before the loop stops: a
+            # coroutine dropped unstarted is a "never awaited" warning
+            asyncio.run_coroutine_threadsafe(asyncio.sleep(0), self.loop).result(5)
             self.loop.call_soon_threadsafe(self.loop.stop)
             self.thread.join(5)
 

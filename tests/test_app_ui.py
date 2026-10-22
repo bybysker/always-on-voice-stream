@@ -2741,17 +2741,20 @@ def test_the_setup_says_what_it_turned_on(make_app: Callable[..., UIApp], open_p
 SEEN_ABOVE_FOOT = """() => {
   const foot = $('setup-foot').getBoundingClientRect().top;
   const rows = [...document.querySelectorAll('.summary-list > div'), $('setup-login').closest('.switch-row') || $('setup-login')];
-  return { foot, scrolled: document.scrollingElement.scrollTop,
+  const scroller = document.querySelector('.setup');
+  return { foot, scrolled: document.scrollingElement.scrollTop + (scroller ? scroller.scrollTop : 0),
            cut: rows.filter((el) => el.getBoundingClientRect().bottom > foot).map((el) => el.textContent) };
 }"""
 
 
+@pytest.mark.parametrize("mode", ["manual", "automatic"])
 @pytest.mark.parametrize("lang", ["en", "fr"])
 def test_the_setup_all_set_is_seen_whole_in_the_smallest_window(make_app: Callable[..., UIApp],
-                                                                 open_page: Callable[..., Page], lang: str) -> None:
-    """All set, at the Mac window's smallest (900×640), in English and in French, with every way of
-    starting a meeting on: each row it lists and the "Open Voicestream at login" switch are above the
-    buttons, without scrolling."""
+                                                                 open_page: Callable[..., Page], lang: str,
+                                                                 mode: str) -> None:
+    """All set, at the Mac window's smallest (900×640), in English and in French, by hand or
+    automatically, with every way of starting a meeting on: each row it lists and the "Open Voicestream
+    at login" switch are above the buttons, without scrolling."""
     from playwright.sync_api import expect
 
     from voicestream.app.native import MIN_SIZE
@@ -2764,12 +2767,14 @@ def test_the_setup_all_set_is_seen_whole_in_the_smallest_window(make_app: Callab
     pg.goto(app.url + "#/setup/start")
     pg.locator('#boot').wait_for(state='hidden')
     pg.evaluate(f"applyLanguage('{lang}')")
+    if mode == "automatic":
+        pg.click("input[name][value='automatic'] >> xpath=..")
     pg.click("#setup-next")
     expect(pg.locator(".summary-list > div")).to_have_count(8)  # the 5 always there, the floating button, Spotlight, calls
     expect(pg.locator("#setup-login")).to_be_attached()
     seen = pg.evaluate(SEEN_ABOVE_FOOT)
     assert seen["scrolled"] == 0 and not seen["cut"], seen
-    p.shot(f"setup-done-smallest-{lang}")
+    p.shot(f"setup-done-smallest-{lang}-{mode}")
 
 
 def test_the_setup_all_set_lists_the_ways_in_automatic_mode_too(make_app: Callable[..., UIApp],

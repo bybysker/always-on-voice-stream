@@ -1048,6 +1048,9 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
   .setup-card { padding: 24px 32px; }
   .setup-card > .lead { margin-bottom: 16px; }
   .setup-foot { padding-bottom: 24px; }
+  /* All set lists every way of starting a meeting, and in French its buttons take two lines */
+  .summary-list { margin: 0 0 8px; }
+  .summary-list div { padding: 2px 0; }
 }
 /* the tablet and the phone: the sidebar becomes a bar at the top, its menu opens the rest as a sheet.
    Under 900 px only: the Mac window stops at 900 (native.py's MIN_SIZE), and at its smallest it keeps
