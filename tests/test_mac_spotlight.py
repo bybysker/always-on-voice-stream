@@ -37,6 +37,9 @@ def test_write_then_keep_then_remove(tmp_path: Path) -> None:
     assert info["CFBundleIdentifier"] == "io.github.bybysker.voicestream.new-meeting"  # its own, not the app's
     assert info["CFBundleIdentifier"] != spotlight.APP_ID
     assert info["LSUIElement"] is True and info["CFBundlePackageType"] == "APPL"
+    # its executable is a script, no arm64 binary: without this an Apple Silicon Mac with no Rosetta takes it for
+    # an Intel app and asks to install Rosetta — a verdict cached for its bundle id, so it must be there from the first
+    assert info["LSArchitecturePriority"] == ["arm64"]
     assert info["CFBundleExecutable"] == "new-meeting" and info["CFBundleVersion"] == "0.3.0"
     assert "CFBundleIconFile" not in info  # no icon given
     assert (bundle / "Contents" / "PkgInfo").read_bytes() == b"APPL????"
@@ -135,8 +138,14 @@ def test_check_says_what_is_wrong(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert ok["ok"] and ok["plutil"] and linted[0][1:] == ["-lint", str(bundle / "Contents" / "Info.plist")]
     bad = spotlight.check(bundle, run=lambda argv, **k: types.SimpleNamespace(returncode=1))
     assert bad["plutil"] is False and bad["ok"] is False
-    assert set(bad) == {"plist", "ours", "background_only", "executable", "script", "private", "plutil", "ok"}
+    assert set(bad) == {"plist", "ours", "background_only", "native", "executable", "script", "private", "plutil", "ok"}
     assert all(isinstance(v, bool) for v in bad.values())  # booleans only: the report is shared, the script holds the key
+    plist = bundle / "Contents" / "Info.plist"
+    info = plistlib.loads(plist.read_bytes())
+    del info["LSArchitecturePriority"]
+    plist.write_bytes(plistlib.dumps(info))
+    intel = spotlight.check(bundle, run=lambda *a, **k: types.SimpleNamespace(returncode=0))
+    assert intel["native"] is False and intel["ok"] is False  # it would ask for Rosetta
     if os.name == "posix":
         (bundle / "Contents" / "MacOS" / "new-meeting").chmod(0o644)
         assert spotlight.check(bundle, run=lambda *a, **k: types.SimpleNamespace(returncode=0))["executable"] is False
