@@ -2228,6 +2228,48 @@ def test_opening_the_app_again_keeps_what_you_were_typing(make_app: Callable[...
     expect(pg.locator("#live-start")).to_be_focused()
 
 
+def test_a_meeting_that_ended_by_itself_says_while_its_notes_are_written(make_app: Callable[..., UIApp],
+                                                                         open_page: Callable[..., Page]) -> None:
+    """A meeting that ended after a long silence is wrapped up before anyone knows whether it had notes:
+    meanwhile its banner says they are being written (no link yet), never that nothing was said."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual", meetings=True)
+    _mac_features(app)
+    p = open_page(app)
+    pg = p.page
+    host, loop = app.host, app.host.loop
+    assert loop is not None
+    folder = app.folder_of("Budget review")
+
+    def notice(**kw: Any) -> None:
+        def go() -> None:
+            host.notice = {"kind": "ended_after_silence", "meeting_id": "m-1", "minutes": 60, "at": "2026-10-21T10:00:00+00:00",
+                           "title": None, "folder": None, **kw}
+            host._publish_state()
+        loop.call_soon_threadsafe(go)
+
+    told = pg.locator("#notices .notice", has_text="The meeting ended by itself.")
+    notice(pending=True)
+    expect(told).to_contain_text("It ended after 60 min without speech: its notes are being written…")
+    expect(pg.locator("#notice-open")).to_have_count(0)
+    p.shot("banner-ended-after-silence-writing")
+    notice(pending=False, title="Budget review", folder=folder)
+    expect(told).to_contain_text("“Budget review” ended after 60 min without speech: its notes are ready.")
+    expect(pg.locator("#notice-open")).to_be_visible()
+    notice(pending=True)  # the next one; nothing was said in it after all
+    expect(told).to_contain_text("its notes are being written…")
+    notice(pending=False)
+    expect(told).to_contain_text("Nothing had been said, so there are no notes.")
+    notice()  # a notice from before the field: as it says
+    expect(told).to_contain_text("Nothing had been said, so there are no notes.")
+
+    pg.evaluate("applyLanguage('fr')")
+    notice(pending=True)
+    expect(pg.locator("#notices .notice", has_text="La réunion s’est terminée d’elle-même.")).to_contain_text(
+        "Elle s’est terminée après 60 min sans parole : ses notes sont en cours de rédaction…")
+
+
 def test_google_bridge_script_route(tmp_path: Path) -> None:
     """Settings → Your tools → Google copies the bridge script from the app (needs the token)."""
     from test_app_host import _factory, _write_config
