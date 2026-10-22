@@ -144,10 +144,11 @@ class UIApp:
     def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch, *, setup_done: bool, listen_on_launch: bool = False,
                  user: str = "Camille", meetings: bool = False, provider: str = "heuristic", backend: str = "fake",
                  config_extra: str = "", fresh: bool = False, models: tuple[str, ...] = (), broken_mic: int = 0,
-                 keys: dict[str, str] | None = None) -> None:
+                 keys: dict[str, str] | None = None, meeting_start: str = "automatic") -> None:
         """``fresh``: no settings file at all (a new install); ``models``: speech models already
         downloaded; ``broken_mic``: that many assistants get a microphone that gives up at once
-        (meeting audio keeps going); ``keys``: keys already saved."""
+        (meeting audio keeps going); ``keys``: keys already saved; ``meeting_start``: how meetings
+        start (most of these screens were drawn for always-on listening, so ``automatic``)."""
         from test_session import FakeEngine, IdleSource
 
         from voicestream.models import TranscriptSegment
@@ -172,9 +173,8 @@ class UIApp:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(stt_models.GGML_MAGIC + b"\0" * 64)
         self.prefs_path = root / "app.json"
-        # these screens were drawn for always-on listening: meetings start by themselves here
         self.prefs_path.write_text(json.dumps({"setup_done": setup_done, "listen_on_launch": listen_on_launch,
-                                               "meeting_start": "automatic"}), encoding="utf-8")
+                                               "meeting_start": meeting_start}), encoding="utf-8")
         self.dl_gate = threading.Event()
         self.dl_gate.set()
         self.reminders_checks: list[str] = []
@@ -500,10 +500,17 @@ def test_setup_wizard_end_to_end(make_app: Callable[..., UIApp], open_page: Call
     expect(pg.locator("#setup-reminders-check")).to_contain_text("click OK")
     p.shot("setup-6-tools-checking")
 
+    # how meetings start: as saved (this app listens all the time), with its own switch
+    expect(pg.locator("#setup-h")).to_have_text("How you start a meeting")
+    expect(pg.locator("input[name='c-How you start a meeting'][value='automatic']")).to_be_checked()
+    expect(pg.locator("#setup-launch")).to_be_visible()
+    p.shot("setup-7-start")
+    pg.click("#setup-next")
+
     # done: the download is still running, so listening starts once it has finished
     expect(pg.locator("#setup-h")).to_have_text("You’re all set, Camille Martin")
     expect(pg.locator("#setup-next")).to_have_text("Start listening when the download is done")
-    p.shot("setup-7-done")
+    p.shot("setup-8-done")
     pg.click("#setup-next")
     expect(pg.locator("#shell")).to_be_visible()
     expect(pg.locator("#setup")).to_be_hidden()
@@ -1015,7 +1022,9 @@ def test_settings_in_french_in_the_dark(make_app: Callable[..., UIApp], open_pag
             "(labels) => labels.map((el) => el.querySelector('.lead')?.textContent.trim() || '')")
         assert leads and all(leads), (sec, leads)
     pg.click(".subnav a[href='#/settings/general']")
-    expect(pg.locator(".set-label", has_text="L’application")).to_contain_text("son raccourci clavier")
+    # the keyboard shortcut is one of the ways of starting a meeting: it has moved to that section
+    expect(pg.locator(".set-label", has_text="Démarrer une réunion")).to_contain_text("comment démarrer une réunion")
+    expect(pg.locator("#set-starting #shortcut-setting")).to_have_count(1)
     pg.click(".subnav a[href='#/settings/stt']")
     summary = pg.locator("#stt-summary")
     for words in ("Utilisé :", "Sur ce Mac — gratuit et privé", "Modèle : ", " Mo"):
@@ -1311,7 +1320,7 @@ def test_reminders_permission_is_asked_during_setup(make_app: Callable[..., UIAp
     p.shot("setup-6-tools-reminders-denied")
     app.reminders_denied = False  # allowed in System Settings
     pg.click("#setup-reminders-again")
-    expect(pg.locator("#setup-h")).to_have_text(re.compile("You’re all set"))
+    expect(pg.locator("#setup-h")).to_have_text("How you start a meeting")  # the next step
     assert len(app.reminders_checks) == 2
 
 

@@ -294,6 +294,8 @@ def start_meeting(app: DemoApp) -> None:
 
     from voicestream.models import TranscriptSegment
 
+    if app.host.prefs.meeting_start == "manual":  # nothing starts by itself: Start meeting, as the page does
+        app.host.call(app.host.meeting_start()).result(15)
     deadline = time.monotonic() + 15
     while app.host.status != "listening":
         if time.monotonic() > deadline:

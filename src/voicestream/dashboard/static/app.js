@@ -60,6 +60,9 @@ const ICONS = {
   costs: [['path', 'M4 20V11M10 20V5M16 20v-6M21 20H3']],
   settings: [['path', 'M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1'], ['circle', { cx: 15, cy: 6, r: 2 }], ['circle', { cx: 9, cy: 12, r: 2 }], ['circle', { cx: 17, cy: 18, r: 2 }]],
   play: [['path', 'M8 5.5v13l10.5-6.5z', true]],
+  record: [['circle', { cx: 12, cy: 12, r: 6 }, true]],
+  phone: [['path', 'M6.5 3.5h3l1.5 4.5-2 1.5a11 11 0 0 0 5.5 5.5l1.5-2 4.5 1.5v3a2 2 0 0 1-2 2A16 16 0 0 1 4.5 5.5a2 2 0 0 1 2-2z']],
+  keyboard: [['rect', { x: 2.5, y: 6, width: 19, height: 12, rx: 2 }], ['path', 'M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M6 13.5h.01M17.5 13.5h.01M8.5 14.5h7']],
   pause: [['rect', { x: 6.5, y: 5, width: 3.5, height: 14, rx: 1 }, true], ['rect', { x: 14, y: 5, width: 3.5, height: 14, rx: 1 }, true]],
   stop: [['rect', { x: 6, y: 6, width: 12, height: 12, rx: 2 }, true]],
   check: [['path', 'M5 12.5l4.5 4.5L19 7.5']],
@@ -182,6 +185,11 @@ function intl(Kind, loc, opts) {
 }
 
 function fmtNum(n) { return intl(Intl.NumberFormat, locale()).format(n); }
+
+/** "this window, the menu bar or Spotlight", in the page's language. */
+function fmtList(items, type = 'disjunction') {
+  return Intl.ListFormat ? intl(Intl.ListFormat, locale(), { type }).format(items) : items.join(', ');
+}
 
 /** A figure with exactly ``digits`` decimals and no unit: "1.60", "1,60" (an axis whose unit is in its title). */
 function fmtFixed(n, digits) {
@@ -446,7 +454,7 @@ const EVENT_TYPES = [
   'meeting.started', 'meeting.updated', 'meeting.ending', 'meeting.ended', 'meeting.notes_updated', 'meeting.saved',
   'segment', 'transcript.partial', 'level', 'extraction', 'item.added', 'item.updated', 'agent.updated', 'item.pushed',
   'sink.error', 'notes.pushed', 'cost', 'screen', 'source.error', 'source.stopped', 'agent.budget', 'agent.held',
-  'model.download', 'settings.changed',
+  'model.download', 'settings.changed', 'app.focus',
 ];
 
 let source = null, retryMs = 1000, retryTimer = null, deadSince = null;
@@ -505,6 +513,8 @@ function handle(type, ev) {
       return applyLiveState(d);
     case 'app.state':
       return setApp(d);
+    case 'app.focus':  // opened again (Spotlight, the Dock): the window is in front, its Start control in focus
+      return focusStart();
     case 'app.warning':
     case 'source.error':
     case 'source.stopped':
@@ -560,6 +570,20 @@ function setApp(st) {
 function stateKey() {
   const st = S.app ? S.app.state : 'stopped';
   return ['stopped', 'starting', 'listening', 'paused', 'stopping', 'error'].includes(st) ? st : 'stopped';
+}
+
+/** Meetings start when you start them (the default), or by themselves when someone speaks
+ *  (``automatic``, the always-on listening of before): the words and controls follow it. */
+function isManual() { return !S.app || S.app.mode !== 'automatic'; }
+
+/** Where a meeting can be started from besides the shortcut, as this app has them: this window, and
+ *  in the Mac app its menu bar, the floating button and Spotlight when they are on. */
+function startPlaces() {
+  const a = S.app || {};
+  const caps = a.capabilities || {}, prefs = a.prefs || {};
+  return [t('where.window'), caps.native_window && t('where.menu_bar'),
+    caps.floating_button && prefs.floating_button && t('where.floating'),
+    caps.spotlight && prefs.spotlight_launcher && t('where.spotlight')].filter(Boolean);
 }
 
 function meetingElapsed() {
@@ -701,9 +725,14 @@ function renderConn() {
 
 function stateText() {
   const st = stateKey();
-  if (st === 'error') return t('state.error');
+  // started by hand, listening is a recording: "Not recording" says what you need to know before a call
+  if (isManual() && ['stopped', 'listening', 'stopping'].includes(st)) return t('state.m.' + st);
   return t('state.' + st);
 }
+
+/** The Live screen has the meeting's own controls when meetings start by hand: the recorder's are
+ *  not shown twice there (it keeps saying what is going on). */
+function liveOwnsControls() { return isManual() && S.route.name === 'live' && !S.setup; }
 
 function renderTopbar() {
   const bar = $('topbar');
@@ -718,17 +747,18 @@ function renderTopbar() {
     h('span', { class: 'text' }, stateText()), extra);
   if (st === 'error' && a.error) pill.title = humanize(a.error);
 
-  // today's spending sits at the foot of the sidebar, under the screens it leads to
-  const spend = h('button', { type: 'button', class: 'spend', id: 'spend', onclick: () => go('#/costs') });
+  // today's spending sits at the foot of the sidebar, under the screens it leads to (a link: it opens one)
+  const spend = h('a', { class: 'spend', id: 'spend', href: '#/costs' });
   fillSpend(spend);
   keepFocus($('spend-slot'), () => fill($('spend-slot'), spend));
 
+  const manual = isManual();
   const busy = st === 'starting' || st === 'stopping';
   let primary;
   if (st === 'listening') primary = btn(t('action.pause'), { cls: 'big', id: 'primary', onclick: (e) => listen('pause', e.currentTarget) }, 'pause');
   else if (st === 'paused') primary = btn(t('action.resume'), { cls: 'primary big', id: 'primary', onclick: (e) => listen('resume', e.currentTarget) }, 'play');
-  else if (busy) primary = h('button', { type: 'button', class: 'btn primary big', id: 'primary', disabled: true }, spinner(), t('state.' + st));
-  else primary = btn(t('action.start'), { cls: 'primary big', id: 'primary', onclick: (e) => listen(startAction(), e.currentTarget) }, 'play');
+  else if (busy) primary = h('button', { type: 'button', class: 'btn primary big', id: 'primary', disabled: true }, spinner(), stateText());
+  else primary = btn(manual ? t('action.start_meeting') : t('action.start'), { cls: 'primary big', id: 'primary', onclick: (e) => meetingStart(e.currentTarget) }, manual ? 'record' : 'play');
 
   const canStop = ['listening', 'paused', 'starting', 'stopping', 'error'].includes(st) && !(st === 'error' && !a.error);
   const stop = st === 'stopping'
@@ -736,7 +766,8 @@ function renderTopbar() {
     : btn(st === 'error' ? t('action.dismiss') : t('action.stop'), { id: 'stop', onclick: (e) => stopListening(e.currentTarget) }, st === 'error' ? null : 'stop');
   stop.hidden = !canStop || (st === 'error' && !a.error);
 
-  keepFocus(bar, () => fill(bar, pill, h('div', { class: 'recorder-actions' }, primary, stop)));
+  const actions = h('div', { class: 'recorder-actions', hidden: liveOwnsControls() }, primary, stop);
+  keepFocus(bar, () => fill(bar, pill, actions));
 }
 
 function fillSpend(el) {
@@ -762,17 +793,34 @@ async function listen(action, button) {
   if (res) setApp(res);
 }
 
-/** "Start listening" after a problem restarts: the problem can leave half of it running (the
- *  microphone gave up, meeting audio is still recorded), and starting would then do nothing. */
-function startAction() { return stateKey() === 'error' ? 'restart' : 'start'; }
+/** Start, Stop and Keep go through the host's meeting actions, the ones the menu bar, the shortcut, the
+ *  floating button and Spotlight use too (POST /api/meeting/…): a start after a problem is a restart,
+ *  as the problem can leave half of it running (the microphone gave up, meeting audio still recorded). */
+async function meetingAction(what, button) {
+  const res = await act(button, () => api('POST', '/api/meeting/' + what));
+  if (res) setApp(res);
+  return res;
+}
 
+function meetingStart(button) { return meetingAction('start', button); }
+
+/** Stop. A meeting started by hand ends as with the shortcut or the floating button, without a question:
+ *  Stop is how it is meant to end (its notes are written as usual). Listening all the time, Stop is not
+ *  the usual end of a meeting (silence is), so it is checked first. */
 async function stopListening(button) {
-  if (stateKey() === 'error' && !S.app.in_meeting) return listen('stop', button);  // "Dismiss"
-  if (S.app.in_meeting) {
+  if (stateKey() === 'error' && !S.app.in_meeting) return meetingAction('stop', button);  // "Dismiss"
+  if (S.app.in_meeting && !isManual()) {
     const ok = await ask({ title: t('ask.stop_title'), body: t('ask.stop_body'), ok: t('action.stop'), danger: false });
     if (!ok) return;
   }
-  return listen('stop', button);
+  return meetingAction('stop', button);
+}
+
+/** A call, "Still in a meeting?", or something that happened by itself: Start / Not now, Keep, OK. */
+async function answer(path, button) {
+  const res = await act(button, () => api('POST', '/api/' + path));
+  if (res) setApp(res);
+  return res;
 }
 
 async function stopNow(button) {
@@ -789,21 +837,79 @@ function notice(kind, iconName, msg, ...actions) {
     icon(iconName), h('div', { class: 'msg' }, msg), ...actions);
 }
 
-/** Shell-wide notices: the connection, and new settings waiting for the meeting to end. */
+/** Shell-wide notices, on every screen: the connection, new settings waiting for the meeting to end, and
+ *  what the app asks or tells from its state — a call that may want notes, "Still in a meeting?", a
+ *  meeting that ended by itself. Inline, never a dialog: nothing takes the focus from what you are doing.
+ *  A notice already on show is kept as it is (a screen reader hears it once, a focused button stays). */
 function renderNotices() {
   const box = $('notices');
   if (!box) return;
-  const out = [];
+  const out = [];  // [key, make]
   if (S.authFailed) {
-    out.push(notice('error', 'alert', t('conn.auth')));
+    out.push(['auth', () => notice('error', 'alert', t('conn.auth'))]);
   } else if (S.conn !== 'live' && deadSince && Date.now() - deadSince > 3000) {
-    out.push(notice('warn', 'refresh', t('conn.lost')));
+    out.push(['conn', () => notice('warn', 'refresh', t('conn.lost'))]);
   }
-  if (S.app && S.app.restart_pending) {
-    out.push(notice('info', 'info', t('notice.restart_pending'),
-      btn(t('notice.apply_now'), { cls: 'small', id: 'apply-now', onclick: (e) => applyNow(e.currentTarget) })));
+  const a = S.app;
+  if (a && a.setup_done && !S.setup) {
+    const s = a.suggestion, still = a.still_there, n = a.notice;
+    if (s) out.push(['suggestion|' + s.at + '|' + (s.app || ''), () => suggestionBanner(s)]);
+    if (still) out.push(['still|' + still.meeting_id + '|' + still.silent_minutes + '|' + (still.ends_at || ''), () => stillThereBanner(still)]);
+    if (n && NOTICE_KINDS.includes(n.kind)) out.push(['notice|' + n.kind + '|' + (n.at || '') + '|' + (n.folder || '') + '|' + (n.title || ''), () => appNoticeBanner(n)]);
   }
-  fill(box, ...out);
+  if (a && a.restart_pending) {
+    out.push(['restart', () => notice('info', 'info', t('notice.restart_pending'),
+      btn(t('notice.apply_now'), { cls: 'small', id: 'apply-now', onclick: (e) => applyNow(e.currentTarget) }))]);
+  }
+  const shown = new Map([...box.children].map((el) => [el.dataset.key, el]));
+  const want = out.map(([key, make]) => {
+    const k = LANG + '|' + key;
+    const el = shown.get(k) || make();
+    el.dataset.key = k;
+    return el;
+  });
+  want.forEach((el, i) => { if (box.children[i] !== el) box.insertBefore(el, box.children[i] || null); });
+  while (box.children.length > want.length) box.lastElementChild.remove();
+}
+
+const NOTICE_KINDS = ['ended_after_silence', 'link_refused'];
+
+/** "Call detected in Zoom — start notes for this call?": Start meeting / Not now. Never a start by itself. */
+function suggestionBanner(s) {
+  const title = s.app ? t('sug.title', { app: s.app }) : t('sug.title_any');
+  return notice('info call', 'phone', h('span', {}, h('strong', {}, title), ' ', t('sug.text')),
+    h('div', { class: 'notice-actions' },
+      btn(t('sug.dismiss'), { cls: 'small ghost', id: 'suggestion-dismiss', onclick: (e) => answer('suggestion/dismiss', e.currentTarget) }),
+      btn(t('action.start_meeting'), { cls: 'small', id: 'suggestion-start', onclick: (e) => answer('suggestion/accept', e.currentTarget) }, 'record')));
+}
+
+/** A long silence in a meeting started by hand: keep recording (the counts start over), or end it now. */
+function stillThereBanner(s) {
+  const until = s.ends_at && fmtClock(s.ends_at);
+  return notice('info', 'clock', h('span', {}, h('strong', {}, t('still.title')), ' ',
+    t('still.text', { n: fmtNum(s.silent_minutes || 0) }), until ? ' ' + t('still.ends', { time: until }) : ''),
+  h('div', { class: 'notice-actions' },
+    btn(t('live.end'), { cls: 'small ghost', id: 'still-end', onclick: (e) => meetingAction('stop', e.currentTarget) }),
+    btn(t('still.keep'), { cls: 'small', id: 'still-keep', onclick: (e) => meetingAction('keep', e.currentTarget) })));
+}
+
+/** Something that happened by itself and should be known: the meeting ended after a long silence (its
+ *  notes are ready), or a link asked to record without Voicestream's key. OK puts it away. */
+function appNoticeBanner(n) {
+  const ok = btn(t('common.ok'), { cls: 'small', id: 'notice-ok', onclick: (e) => answer('notice/dismiss', e.currentTarget) });
+  if (n.kind === 'link_refused') {
+    return notice('warn', 'shield', h('span', {}, h('strong', {}, t('notice.link_title')), ' ', t('notice.link_text')),
+      h('div', { class: 'notice-actions' }, ok));
+  }
+  const mins = fmtNum(n.minutes || 0);
+  const text = !n.folder ? t('notice.silence_empty', { n: mins })
+    : n.title ? t('notice.silence_text', { title: n.title, n: mins }) : t('notice.silence_untitled', { n: mins });
+  const open = n.folder && btn(t('live.open_notes'), { cls: 'small ghost', id: 'notice-open', onclick: (e) => {
+    answer('notice/dismiss', null);
+    go('#/meetings/' + enc(n.folder));
+  } });
+  return notice('info', 'checkCircle', h('span', {}, h('strong', {}, t('notice.silence_title')), ' ', text),
+    h('div', { class: 'notice-actions' }, open, ok));
 }
 
 async function applyNow(button) {
@@ -844,6 +950,7 @@ function navigate(focus) {
   document.body.classList.remove('raise-toasts', 'live-meeting');  // the save bar and the live meeting put them back
   setMenu(false);
   renderNav();
+  renderTopbar();  // on Live, the recorder leaves the meeting's controls to the screen
   const r = S.route;
   if (r.name === 'live') renderLive();
   else if (r.name === 'meetings') renderMeetings(prev);
@@ -854,8 +961,15 @@ function navigate(focus) {
     const main = $('main');
     if (prev.name !== r.name || prev.parts.join('/') !== r.parts.join('/')) window.scrollTo(0, 0);
     const section = prev.name === 'settings' && r.name === 'settings' && $('screen-settings').querySelector('.subnav [aria-current=page]');
-    if (section) {
+    const control = r.name === 'live' && (liveFocusTarget() || (S.focusStart && $('primary')));
+    S.focusStart = false;
+    if (r.name === 'settings' && settingsAnchor()) {
+      // a link to one section of a screen ("Change" beside how meetings start): that section, in view
+      focusSettingsAnchor();
+    } else if (section) {
       section.focus({ preventScroll: true });  // moving along the sections: stay in the section list
+    } else if (control) {
+      control.focus({ preventScroll: true });  // Live's one job: Return starts the meeting
     } else {
       const heading = $('screen-' + r.name).querySelector('h1');
       (heading || main).setAttribute('tabindex', '-1');
@@ -873,18 +987,19 @@ function tick() {
   const extra = $('state-extra');
   if (extra) extra.textContent = S.app && S.app.in_meeting && elapsed != null ? t('state.meeting_for', { time: fmtDuration(elapsed) }) : '';
   if (LV.elapsed && S.live.meeting) LV.elapsed.textContent = elapsed != null ? fmtTs(elapsed) : '';
+  if (LV.clockTime && S.live.meeting && stateKey() !== 'stopping') LV.clockTime.textContent = elapsed != null ? fmtTs(elapsed) : '';
   // a minute at a time: each new length lays out every bar of the strip again
   if (LV.voices && inMeetingView()) LV.voices.setTotal(Math.ceil((elapsed || 0) / 60) * 60);
   const now = Date.now();
   for (const m of S.live.meters.values()) {
-    if (now - m.at > 2500) { m.fill.style.width = '0%'; m.el.classList.remove('speech'); }
+    if (now - m.at > 2500) { m.fill.style.transform = 'scaleX(0)'; m.el.classList.remove('speech'); }
   }
   let stale = false;
   for (const [src, p] of S.live.partials) {
     if (now - p.at > 10000) { S.live.partials.delete(src); stale = true; }
   }
   if (stale) renderPartials();
-  if (S.conn !== 'live' && deadSince && now - deadSince > 3000 && !$('notices').querySelector('.notice.warn')) renderNotices();
+  if (S.conn !== 'live' && deadSince && now - deadSince > 3000 && !$('notices').querySelector(`[data-key="${LANG}|conn"]`)) renderNotices();
 }
 
 // ======================================================================= item cards
@@ -1210,21 +1325,28 @@ function buildLive() {
   LV.notices = h('div', { class: 'live-notices', id: 'live-notices' });
 
   LV.heroIcon = h('div', { class: 'hero-icon' });
-  LV.heroTitle = h('h1', { id: 'live-heading' });
+  LV.heroTitle = h('h1', { id: 'live-heading', tabindex: '-1' });
   LV.heroText = h('p', { id: 'live-text' });
-  LV.heroRow = h('div', { class: 'row' });
+  LV.heroRow = h('div', { class: 'start-row', id: 'live-controls' });
+  LV.modeLine = h('p', { class: 'mode-line', id: 'live-mode' });
   LV.idleMeterSlot = h('div', { class: 'row' });
-  // between meetings: the state and what to do about it, then what came out of the meetings so far
-  // (the last one with its to-dos, the week in figures, the ones before it)
+  // the shortcut and its "Choose a shortcut": one recorder kept across redraws (a redraw mid-recording
+  // must not forget it is recording)
+  LV.shortcut = shortcutSetting({ prefix: 'live-shortcut', variant: 'live' });
+  // between meetings: the state and what to do about it (by hand: Start meeting, the shortcut, the other
+  // ways), then what came out of the meetings so far (the last one with its to-dos, the week in figures,
+  // the ones before it)
   LV.lastCard = h('section', { class: 'card last-meeting', id: 'last-meeting', 'aria-labelledby': 'last-h' });
   LV.week = h('section', { class: 'card week', id: 'live-week', 'aria-labelledby': 'week-h' });
   LV.recent = h('section', { class: 'card recent', id: 'live-recent', 'aria-labelledby': 'recent-h' });
   LV.idle = h('div', { class: 'idle' },
-    h('div', { class: 'hero' }, LV.heroIcon, h('div', { class: 'grow' }, LV.heroTitle, LV.heroText, LV.idleMeterSlot, LV.heroRow)),
+    h('div', { class: 'hero' }, LV.heroIcon,
+      h('div', { class: 'grow' }, LV.heroTitle, LV.heroText, LV.idleMeterSlot, LV.heroRow, LV.modeLine)),
     LV.week, LV.lastCard, LV.recent);
 
-  LV.title = h('h1', { id: 'meeting-heading' });
+  LV.title = h('h1', { id: 'meeting-heading', tabindex: '-1' });
   LV.elapsed = h('span', { class: 'num' });
+  LV.elapsedSep = h('span', { 'aria-hidden': 'true' }, '·');
   LV.subText = h('span');
   LV.pausedPill = h('span', { class: 'pill warn' }, icon('pause'), t('state.paused_short'));
   LV.meterSlot = h('div');
@@ -1232,13 +1354,17 @@ function buildLive() {
   const sources = [...S.live.meters.keys()];
   S.live.meters.clear();
   for (const src of sources) meter(src);
-  LV.extract = btn(t('live.extract'), { title: t('live.extract_help'), id: 'extract', onclick: (e) => extractNow(e.currentTarget) }, 'sparkle');
+  LV.extract = btn(t('live.extract_short'), { cls: 'small ghost', title: t('live.extract_help'), id: 'extract', onclick: (e) => extractNow(e.currentTarget) }, 'sparkle');
   LV.end = btn(t('live.end'), { cls: 'danger', id: 'end-meeting', onclick: (e) => endMeeting(e.currentTarget) }, 'stop');
   LV.ending = notice('info', 'clock', t('live.ending'));
+  // a meeting started by hand: its clock, then Pause or Resume and Stop, where the eye lands first
+  LV.clockTime = h('span', { class: 'num rec-time', role: 'timer', 'aria-label': t('live.clock_label') });
+  LV.clock = h('div', { class: 'rec-clock', id: 'rec-clock' }, h('span', { class: 'rec-dot', 'aria-hidden': 'true' }), LV.clockTime);
+  LV.controls = h('div', { class: 'live-actions', id: 'meeting-controls' });
   const head = h('div', { class: 'live-head' },
     h('div', { class: 'title' }, LV.title,
-      h('div', { class: 'sub' }, LV.elapsed, h('span', { 'aria-hidden': 'true' }, '·'), LV.subText, LV.pausedPill), LV.meterSlot),
-    h('div', { class: 'row' }, LV.extract, LV.end));
+      h('div', { class: 'sub' }, LV.elapsed, LV.elapsedSep, LV.subText, LV.pausedPill), LV.meterSlot),
+    h('div', { class: 'live-side' }, LV.clock, LV.controls, LV.end));
 
   LV.transcript = h('div', { class: 'scroll transcript', id: 'transcript', role: 'log', 'aria-label': t('live.transcript'), tabindex: '0' });
   LV.tEmpty = h('p', { class: 'empty-line' }, t('live.nothing_yet'));
@@ -1259,9 +1385,10 @@ function buildLive() {
   LV.addForm = addItemForm(LV.board, (body) => api('POST', '/api/items', body), { compact: true });
   const dismissed = h('input', { type: 'checkbox', id: 'live-show-dismissed', checked: liveCtx.showDismissed });
   dismissed.addEventListener('change', () => LV.board.showDismissed(dismissed.checked));
+  // "Update to-dos now" acts on the to-dos: it sits on their pane, not with the recording's controls
   const itemsPane = h('section', { class: 'card pane', 'aria-labelledby': 'ip-h' },
     h('div', { class: 'pane-head' }, h('h2', { id: 'ip-h' }, t('live.items')),
-      h('label', { for: 'live-show-dismissed' }, dismissed, t('items.show_dismissed'))),
+      h('div', { class: 'pane-tools' }, LV.extract, h('label', { for: 'live-show-dismissed' }, dismissed, t('items.show_dismissed')))),
     h('div', { class: 'scroll' }, LV.addForm, LV.board.el));
 
   LV.meeting = h('div', { class: 'live-meeting' }, head, LV.ending, LV.voices.el, h('div', { class: 'panes' }, transcriptPane, itemsPane));
@@ -1293,6 +1420,11 @@ function inMeetingView() {
 function renderLive() {
   if (!LV.root) buildLive();
   const inMeeting = inMeetingView();
+  const view = inMeeting ? 'meeting' : 'idle';
+  // a focus the change of view takes away (Stop pressed, the meeting over; Start, the meeting begun)
+  const active = document.activeElement;
+  const lost = !active || active === document.body
+    || (LV.root.contains(active) && !(inMeeting ? LV.meeting : LV.idle).contains(active));
   attachLive(inMeeting);
   LV.root.classList.toggle('in-meeting', inMeeting);
   document.body.classList.toggle('live-meeting', inMeeting && S.route.name === 'live');
@@ -1303,6 +1435,37 @@ function renderLive() {
   renderLiveNotices();
   if (inMeeting) renderLiveHead();
   else renderIdle();
+  if (LV.view && LV.view !== view && lost && S.route.name === 'live' && !S.setup) {
+    const target = liveFocusTarget();
+    if (target) target.focus({ preventScroll: true });
+  }
+  LV.view = view;
+}
+
+/** Where the keyboard focus goes on Live when meetings start by hand: Start between meetings (Return
+ *  starts one), Resume while paused, the meeting's title while it records (never Stop: Return would end
+ *  it). Listening all the time, nothing: the screen's title, as on every screen. */
+function liveFocusTarget() {
+  if (!LV.root || S.route.name !== 'live' || S.setup || !S.app || !isManual()) return null;
+  if (!inMeetingView()) {
+    const start = $('live-start');
+    return start && !start.disabled ? start : LV.heroTitle;
+  }
+  const resume = stateKey() === 'paused' && $('live-pause');
+  return resume || LV.title;
+}
+
+/** The app was opened again (from Spotlight, the Dock, its menu): Live, with its Start control in
+ *  focus — unless a dialog is open, or the setup: what you were doing there stays as it is. */
+function focusStart() {
+  if (S.setup || !S.app || $('ask').open || $('viewer').open) return;
+  if (S.route.name !== 'live') {
+    S.focusStart = true;
+    location.hash = '#/live';  // navigate() puts the focus on it
+    return;
+  }
+  const target = liveFocusTarget() || $('primary');
+  if (target) target.focus({ preventScroll: true });
 }
 
 function renderLiveNotices() {
@@ -1312,7 +1475,8 @@ function renderLiveNotices() {
     const fix = fixFor(S.app.error);
     out.push(notice('error', 'alert', h('span', {}, h('strong', {}, t('live.problem')), ' ', humanize(S.app.error)),
       fix && btn(fix.label, { cls: 'small', onclick: fix.run }),
-      btn(t('action.try_again'), { cls: 'small', id: 'try-again', onclick: (e) => listen(startAction(), e.currentTarget) })));
+      // started by hand, Try again is the screen's own control, beside Start or Stop
+      !isManual() && btn(t('action.try_again'), { cls: 'small', id: 'try-again', onclick: (e) => meetingStart(e.currentTarget) })));
   }
   // two raw messages can say the same thing in plain words (one per model being downloaded…): shown once
   const seen = new Set([S.app.error ? humanize(S.app.error) : null]);
@@ -1326,7 +1490,7 @@ function renderLiveNotices() {
     const fix = fixFor(w);
     out.push(notice('warn', 'alert', humanize(w),
       fix && btn(fix.label, { cls: 'small', onclick: fix.run }),
-      h('button', { type: 'button', class: 'btn ghost small', 'aria-label': t('common.hide'), title: t('common.hide'),
+      h('button', { type: 'button', class: 'btn ghost small icon-only', 'aria-label': t('common.hide'), title: t('common.hide'),
         onclick: () => { S.dismissed.add(w); renderLiveNotices(); } }, icon('x'))));
   }
   if (warnings.length > 3) out.push(h('p', { class: 'small muted' }, t('live.more_warnings', { n: warnings.length - 3 })));
@@ -1336,21 +1500,105 @@ function renderLiveNotices() {
 
 function renderLiveHead() {
   const m = S.live.meeting;
+  const st = stateKey();
+  const manual = isManual();
   LV.title.textContent = m.title || t('live.untitled');
   const mode = S.live.extraction === 'claude' ? t('live.mode_claude') : S.live.extraction ? t('live.mode_offline') : '';
   LV.subText.textContent = [t('live.started_at', { time: fmtClock(m.started_at) }), mode].filter(Boolean).join(' · ');
   const elapsed = meetingElapsed();
   LV.elapsed.textContent = elapsed != null ? fmtTs(elapsed) : '';
-  LV.pausedPill.hidden = stateKey() !== 'paused';
-  const live = S.live.phase === 'live' && ['listening', 'paused'].includes(stateKey());
+  // by hand, the clock stands beside Pause and Stop; listening all the time, it starts the line under the title
+  LV.elapsed.hidden = LV.elapsedSep.hidden = manual;
+  LV.clock.hidden = LV.controls.hidden = !manual;
+  LV.end.hidden = manual;  // ending the meeting by hand is Stop
+  LV.pausedPill.hidden = st !== 'paused';
+  const live = S.live.phase === 'live' && ['listening', 'paused'].includes(st);
   LV.extract.disabled = LV.end.disabled = !live;
   LV.addForm.setDisabled(!live);
   LV.ending.hidden = S.live.phase !== 'ending';
   LV.tEmpty.textContent = t('live.nothing_yet');
+  if (manual) renderMeetingControls(st, elapsed);
+}
+
+/** A meeting started by hand: its clock, then Pause (Resume) and Stop, Stop filled while it records. */
+function renderMeetingControls(st, elapsed) {
+  const wrapping = st === 'stopping' || S.live.phase === 'ending';
+  LV.clock.className = 'rec-clock ' + (wrapping ? 'stopping' : st);
+  if (!wrapping) LV.clockTime.textContent = elapsed != null ? fmtTs(elapsed) : '';
+  const parts = [];
+  if (wrapping) {
+    if (st === 'stopping') parts.push(btn(t('action.stop_now'), { cls: 'danger', id: 'live-stop-now', onclick: (e) => stopNow(e.currentTarget) }));
+  } else if (st === 'error') {
+    parts.push(btn(t('action.stop'), { id: 'live-stop', onclick: (e) => meetingAction('stop', e.currentTarget) }, 'stop'),
+      btn(t('action.try_again'), { cls: 'primary', id: 'live-retry', onclick: (e) => meetingStart(e.currentTarget) }, 'refresh'));
+  } else {
+    const paused = st === 'paused';
+    parts.push(paused
+      ? btn(t('action.resume'), { cls: 'primary', id: 'live-pause', onclick: (e) => listen('resume', e.currentTarget) }, 'play')
+      : btn(t('action.pause'), { id: 'live-pause', disabled: st !== 'listening', onclick: (e) => listen('pause', e.currentTarget) }, 'pause'),
+    btn(t('action.stop'), { cls: paused ? '' : 'primary', id: 'live-stop', onclick: (e) => meetingAction('stop', e.currentTarget) }, 'stop'));
+  }
+  keepFocus(LV.controls, () => fill(LV.controls, ...parts));
 }
 
 function renderIdle() {
   const st = stateKey();
+  if (isManual()) renderStartPanel(st);
+  else renderListeningHero(st);
+  renderLastMeeting();
+}
+
+/** Between meetings, when they start by hand: one large Start meeting (in focus, so Return starts it),
+ *  the keyboard shortcut with "Choose a shortcut", and the line that says how meetings start. */
+function renderStartPanel(st) {
+  const views = {
+    stopped: ['', t('live.m.stopped'), t('live.m.stopped_text')],
+    starting: ['', t('live.m.starting'), t('live.idle.starting_text')],
+    listening: ['listening', t('live.m.recording'), t('live.m.recording_text')],
+    paused: ['paused', t('live.idle.paused'), t('live.m.paused_text')],
+    stopping: ['', t('live.m.stopping'), t('live.m.stopping_text')],
+    error: ['error', t('live.idle.error'), t('live.m.error_text')],
+  };
+  const [cls, title, text] = views[st];
+  LV.heroIcon.className = 'hero-icon ' + cls;
+  fill(LV.heroIcon);
+  LV.heroTitle.textContent = title;
+  LV.heroText.textContent = text;
+  const huge = 'primary huge';
+  const parts = [];
+  if (st === 'stopped') {
+    parts.push(btn(t('action.start_meeting'), { cls: huge, id: 'live-start', onclick: (e) => meetingStart(e.currentTarget) }, 'record'));
+  } else if (st === 'error') {
+    parts.push(btn(t('action.try_again'), { cls: huge, id: 'live-start', onclick: (e) => meetingStart(e.currentTarget) }, 'refresh'),
+      S.app.error && btn(t('action.dismiss'), { cls: 'ghost', id: 'live-dismiss', onclick: (e) => meetingAction('stop', e.currentTarget) }));
+  } else if (st === 'starting' || st === 'stopping') {
+    parts.push(h('button', { type: 'button', class: 'btn ' + huge, id: 'live-start', disabled: true }, spinner(), stateText()),
+      st === 'stopping' && btn(t('action.stop_now'), { cls: 'danger small', id: 'live-stop-now', onclick: (e) => stopNow(e.currentTarget) }));
+  } else {  // recording, its page on its way
+    const paused = st === 'paused';
+    parts.push(btn(paused ? t('action.resume') : t('action.pause'), { cls: paused ? 'primary' : '', id: 'live-pause',
+      onclick: (e) => listen(paused ? 'resume' : 'pause', e.currentTarget) }, paused ? 'play' : 'pause'),
+    btn(t('action.stop'), { cls: paused ? '' : 'primary', id: 'live-stop', onclick: (e) => meetingAction('stop', e.currentTarget) }, 'stop'));
+  }
+  const between = st === 'stopped' || st === 'error';
+  if (between) LV.shortcut.draw();
+  keepFocus(LV.heroRow, () => fill(LV.heroRow, ...parts, between && LV.shortcut.childElementCount ? LV.shortcut : null));
+  LV.heroRow.hidden = false;
+  if (between) {
+    fill(LV.modeLine, t('live.mode.manual', { where: fmtList(startPlaces()) }), ' ', modeChangeLink());
+    LV.modeLine.hidden = false;
+  } else {
+    LV.modeLine.hidden = true;
+  }
+}
+
+function modeChangeLink() {
+  return h('a', { href: '#/settings/general/starting', id: 'live-mode-change', 'aria-label': t('live.mode.change_aria') }, t('live.mode.change'));
+}
+
+/** Listening all the time (automatic): the state and what it means, as before, and that meetings
+ *  start by themselves here — with the way to change it. Start and Resume are the recorder's. */
+function renderListeningHero(st) {
   const minutes = S.settings ? S.settings.values.always_on.idle_split_minutes : 10;
   const views = {
     listening: ['mic', 'listening', t('live.idle.listening'), minutes > 0 ? t('live.idle.listening_text', { n: fmtNum(minutes) }) : t('live.idle.listening_text_nosplit')],
@@ -1366,12 +1614,10 @@ function renderIdle() {
   LV.heroTitle.textContent = title;
   LV.heroText.textContent = text;
   if (st === 'stopped') LV.heroText.append(shortcutHint() || '');
-  const row = [];
-  if (st === 'stopped') row.push(btn(t('action.start'), { cls: 'primary big', onclick: (e) => listen('start', e.currentTarget) }, 'play'));
-  if (st === 'paused') row.push(btn(t('action.resume'), { cls: 'primary big', onclick: (e) => listen('resume', e.currentTarget) }, 'play'));
-  fill(LV.heroRow, ...row);
-  LV.heroRow.hidden = !row.length;
-  renderLastMeeting();
+  fill(LV.heroRow);
+  LV.heroRow.hidden = true;
+  fill(LV.modeLine, t('live.mode.automatic'), ' ', modeChangeLink());
+  LV.modeLine.hidden = false;
 }
 
 /** The meetings, newest first, as far back as the last 7 days go at least: the week's figures count
@@ -1856,7 +2102,7 @@ function meter(name, desc) {
 function setLevel(d) {
   const m = meter(d.source);
   const db = typeof d.db === 'number' ? d.db : -90;  // -inf arrives as null
-  m.fill.style.width = Math.round(Math.max(0, Math.min(1, (db + 60) / 60)) * 100) + '%';
+  m.fill.style.transform = 'scaleX(' + Math.max(0, Math.min(1, (db + 60) / 60)).toFixed(2) + ')';
   m.el.classList.toggle('speech', Boolean(d.speech));
   m.at = Date.now();
   if (LV.meters && LV.meters.hidden && ['listening', 'paused', 'starting'].includes(stateKey())) LV.meters.hidden = false;
@@ -2091,7 +2337,8 @@ function renderMeetingList() {
   if (!box) return;
   const { rows, total, q, error } = S.meetings;
   if (error && !rows.length) {
-    fill(box, h('div', { class: 'card empty-state' }, icon('alert', 'xl'), h('strong', {}, t('meetings.error')), humanize(error)));
+    fill(box, h('div', { class: 'card empty-state' }, icon('alert', 'xl'), h('strong', {}, t('meetings.error')), humanize(error),
+      btn(t('action.try_again'), { cls: 'small', id: 'meetings-retry', onclick: (e) => act(e.currentTarget, () => loadMeetings()) }, 'refresh')));
     return;
   }
   if (!rows.length) {
@@ -2472,7 +2719,8 @@ async function renderCosts() {
     CV.data = await api('GET', '/api/cost?hours=' + S.costHours);
   } catch (err) {
     fill(root, h('div', { class: 'screen-head' }, h('h1', {}, t('costs.title'))),
-      h('div', { class: 'card empty-state' }, icon('alert', 'xl'), h('strong', {}, t('costs.error')), humanize(err.message)));
+      h('div', { class: 'card empty-state' }, icon('alert', 'xl'), h('strong', {}, t('costs.error')), humanize(err.message),
+        btn(t('action.try_again'), { cls: 'small', id: 'costs-retry', onclick: () => renderCosts() }, 'refresh')));
     return;
   }
   if (S.route.name === 'costs') drawCosts();
@@ -2969,7 +3217,7 @@ function progressBar(name, dl) {
 function updateProgress(el, dl) {
   const pct = dl.total ? Math.min(100, (dl.done / dl.total) * 100) : 0;
   const shown = Math.min(99, Math.round(pct));  // 100% is "Downloaded", once the file is checked and in place
-  el.querySelector('.track span').style.width = pct.toFixed(1) + '%';
+  el.querySelector('.track span').style.transform = 'scaleX(' + (pct / 100).toFixed(3) + ')';
   el.setAttribute('aria-valuenow', String(shown));
   el.setAttribute('aria-label', t('stt.downloading'));
   el.querySelector('.pct').textContent = t('stt.progress', { pct: fmtNum(shown), done: fmtBytes(dl.done), total: fmtBytes(dl.total) });
@@ -3178,7 +3426,8 @@ async function renderSettings() {
       await Promise.all([S.settings ? null : loadSettings(), S.models ? null : loadModels()]);
     } catch (err) {
       fill(root, h('div', { class: 'screen-head' }, h('h1', {}, t('set.title'))),
-        h('div', { class: 'card empty-state' }, icon('alert', 'xl'), h('strong', {}, t('set.error')), humanize(err.message)));
+        h('div', { class: 'card empty-state' }, icon('alert', 'xl'), h('strong', {}, t('set.error')), humanize(err.message),
+          btn(t('action.try_again'), { cls: 'small', id: 'settings-retry', onclick: () => renderSettings() }, 'refresh')));
       return;
     }
   }
@@ -3186,6 +3435,25 @@ async function renderSettings() {
 }
 
 function currentSection() { return SECTIONS.includes(S.route.parts[0]) ? S.route.parts[0] : 'general'; }
+
+/** ``#/settings/general/starting``: a link to one part of a section (Live's "Change", beside how
+ *  meetings start). */
+function settingsAnchor() {
+  return S.route.name === 'settings' && currentSection() === 'general' && S.route.parts[1] === 'starting' ? 'set-starting' : null;
+}
+
+/** That part, scrolled into view with its heading in focus — once the section is drawn (the settings
+ *  may still be loading). */
+function focusSettingsAnchor() {
+  const id = settingsAnchor();
+  const el = id && $(id);
+  S.anchorPending = Boolean(id) && !el;
+  if (!el) return;
+  const heading = el.querySelector('h2');
+  heading.setAttribute('tabindex', '-1');
+  el.scrollIntoView({ block: 'start' });
+  heading.focus({ preventScroll: true });
+}
 
 function redrawSection() {
   const focused = document.activeElement && document.activeElement.id;
@@ -3206,6 +3474,7 @@ function drawSettings(sec) {
     h('div', { class: 'savebar', id: 'savebar', role: 'region', 'aria-label': t('set.savebar') }));
   window.scrollTo(0, scroll);
   renderSaveBar();
+  if (S.anchorPending) focusSettingsAnchor();
 }
 
 function renderSaveBar() {
@@ -3267,6 +3536,9 @@ async function applyHeldStt(held) {
 }
 
 async function saveSettings() {
+  // a value already shown as wrong under its field (minutes that aren't a whole number…): fix it first
+  const wrong = Object.keys(S.fieldErrors).find((p) => p.startsWith('pref:'));
+  if (wrong) return showSaveError(wrong, S.fieldErrors[wrong]);
   const changes = { ...S.draft };
   const prefs = { ...S.prefsDraft };
   const held = holdUntilDownloaded(changes);
@@ -3278,7 +3550,13 @@ async function saveSettings() {
     if (Object.keys(changes).length) res = await api('PATCH', '/api/settings', { changes });
     S.draft = {};
     if (Object.keys(prefs).length) {
-      setApp({ ...S.app, prefs: await api('PATCH', '/api/prefs', prefs) });
+      const saved = await api('PATCH', '/api/prefs', prefs).catch((err) => {
+        // "silence_ask_minutes: Input should be…": under the preference's own field
+        const m = err.status === 400 && /^(\w+): (.*)$/s.exec(err.message || '');
+        if (m && m[1] in prefs) err.body = { field: 'pref:' + m[1], error: m[2] };
+        throw err;
+      });
+      setApp({ ...S.app, prefs: { ...S.app.prefs, ...saved }, mode: saved.meeting_start || S.app.mode });
       S.prefsDraft = {};
     }
     S.fieldErrors = {};
@@ -3357,6 +3635,7 @@ function generalSection() {
   const caps = S.app.capabilities || {};
   const loginHelp = caps.login_item ? t('set.login_help') : t('set.login_unavailable');
   return h('div', {},
+    startingSection(),
     card(t('set.you'), t('set.you_lead'),
       field('user_name', t('set.name'), textInput('user_name', { placeholder: t('set.name_ph') }), { help: t('set.name_help') }),
       h('div', { class: 'field', dataset: { path: 'transcription.language' } },
@@ -3365,16 +3644,73 @@ function generalSection() {
           for (const [p, v] of Object.entries(LANG_CHOICES[choice] || {})) setDraft(p, v);
           redrawSection();
         }),
-        errorEl('transcription.language')),
-      field('always_on.idle_split_minutes', t('set.idle'), numberInput('always_on.idle_split_minutes', { min: 0, max: 240, step: 1 }),
-        { help: t('set.idle_help'), extra: h('span', { class: 'suffix' }, t('set.minutes')) })),
+        errorEl('transcription.language'))),
     card(t('set.app'), t('set.app_lead'),
       h('div', { class: 'field', dataset: { path: 'pref:ui_language' } },
         h('label', { for: 'p-ui_language' }, t('set.ui_language')),
         h('div', { class: 'control' }, uiLanguageSelect())),
-      prefSwitch('listen_on_launch', t('set.listen_on_launch'), t('set.listen_on_launch_help')),
-      prefSwitch('start_at_login', t('set.start_at_login'), loginHelp, { disabled: !caps.login_item }),
-      shortcutSetting()));
+      prefSwitch('start_at_login', t('set.start_at_login'), loginHelp, { disabled: !caps.login_item })));
+}
+
+/** Settings → General → Starting meetings: when Voicestream records (by hand or by itself) and every
+ *  way of starting a meeting from any app. Saved with Save, as the rest of the screen (the shortcut
+ *  at once, as macOS's own). What only the Mac app does is said, and its switches are off elsewhere. */
+function startingSection() {
+  const caps = S.app.capabilities || {};
+  const manual = pref('meeting_start') !== 'automatic';
+  const mac = (cap, key, label, help) => prefSwitch(key, label, caps[cap] ? help : help + ' ' + t('set.login_unavailable'), { disabled: !caps[cap] });
+  const section = card(t('start.title'), [t('start.lead'), startingSummary()],
+    h('div', { class: 'field', dataset: { path: 'pref:meeting_start' } },
+      h('span', { class: 'label', id: 'start-mode-label' }, t('start.how')),
+      choiceCards(t('start.how'), [
+        { value: 'manual', title: t('start.manual'), desc: t('start.manual_desc') },
+        { value: 'automatic', title: t('start.automatic'), desc: t('start.automatic_desc') },
+      ], manual ? 'manual' : 'automatic', (v) => { setPref('meeting_start', v); redrawSection(); }, { cols: 2 })),
+    manual && prefMinutes('silence_ask_minutes', t('start.ask'), t('start.ask_help')),
+    manual && prefMinutes('silence_end_minutes', t('start.end'), t('start.end_help')),
+    !manual && field('always_on.idle_split_minutes', t('set.idle'), numberInput('always_on.idle_split_minutes', { min: 0, max: 240, step: 1 }),
+      { help: t('set.idle_help'), extra: h('span', { class: 'suffix' }, t('set.minutes')) }),
+    !manual && prefSwitch('listen_on_launch', t('set.listen_on_launch'), t('set.listen_on_launch_help')),
+    shortcutSetting(),
+    mac('floating_button', 'floating_button', t('start.floating'), t('start.floating_help')),
+    mac('spotlight', 'spotlight_launcher', t('start.spotlight'), t('start.spotlight_help')),
+    mac('call_detection', 'call_suggestions', t('start.suggest'), t('start.suggest_help')));
+  section.id = 'set-starting';
+  return section;
+}
+
+/** Beside the section, how meetings start now (as saved): the way, the shortcut and what is on. */
+function startingSummary() {
+  const a = S.app, p = a.prefs, caps = a.capabilities || {};
+  const on = [p.meeting_start === 'automatic' ? t('start.summary_auto') : t('start.summary_manual')];
+  if (p.hotkey && caps.hotkey) on.push(t('start.summary_keys', { keys: shortcutText(p.hotkey) }));
+  if (p.floating_button && caps.floating_button) on.push(t('start.summary_floating'));
+  if (p.spotlight_launcher && caps.spotlight) on.push(t('start.summary_spotlight'));
+  if (p.call_suggestions && caps.call_detection) on.push(t('start.summary_suggest'));
+  return h('div', { class: 'summary', id: 'start-summary' }, t('start.summary'), on.map((text) => h('span', {}, icon('check'), text)));
+}
+
+/** A number of minutes for a preference (0 to 600; 0: never), checked as you type: a value the app
+ *  would refuse says so under the field, and Save says to fix it first. */
+function prefMinutes(key, label, help) {
+  const path = 'pref:' + key;
+  const el = h('input', { type: 'number', id: 'p-' + key, class: 'narrow', value: String(pref(key)), min: 0, max: 600, step: 1,
+    inputmode: 'numeric', autocomplete: 'off' });
+  el.addEventListener('input', () => {
+    const raw = el.value.trim();
+    const n = Number(raw);
+    if (raw !== '' && Number.isInteger(n) && n >= 0 && n <= 600) {
+      delete S.fieldErrors[path];
+      markField(path, null);
+      setPref(key, n);
+    } else {
+      S.fieldErrors[path] = t('err.minutes');
+      markField(path, S.fieldErrors[path]);
+      S.prefsDraft[key] = raw;  // unsaved, and not sendable as it is
+      renderSaveBar();
+    }
+  });
+  return field(path, label, el, { help, extra: h('span', { class: 'suffix' }, t('start.minutes_silence')) });
 }
 
 function uiLanguageSelect() {
@@ -3688,7 +4024,7 @@ function onSettingsChanged() {
 
 // ==================================================================== setup wizard
 
-const STEPS = ['welcome', 'you', 'stt', 'claude', 'perms', 'tools', 'done'];
+const STEPS = ['welcome', 'you', 'stt', 'claude', 'perms', 'tools', 'start', 'done'];
 const STEP_KEY = 'voicestream-setup-step';
 
 function recommendedModel() {
@@ -3706,6 +4042,9 @@ function openSetup(forced = false) {
       if (saved > 0 && saved < STEPS.length) S.setup.step = saved;
     } catch (_) { /* no storage: start at the beginning */ }
   }
+  // a link to one of its steps (#/setup/start) opens it there, as a reload does
+  const linked = STEPS.indexOf((/^#\/setup\/(\w+)$/.exec(location.hash) || [])[1]);
+  if (linked > 0) S.setup.step = linked;
   $('shell').hidden = true;
   for (const name of SCREENS) $('screen-' + name).replaceChildren();  // drawn again when the setup closes
   $('setup').hidden = false;
@@ -3748,6 +4087,11 @@ function initChoices() {
     list: (v.sinks.reminders || {}).list_name || t('setup.tools.list_default'),  // the raw setting: the sink's default is English
     startAtLogin: S.app.prefs.start_at_login,
     listenOnLaunch: S.app.prefs.listen_on_launch,
+    // how meetings start, as saved (a new install's defaults: by hand, with every way of starting one on)
+    mode: S.app.prefs.meeting_start === 'automatic' ? 'automatic' : 'manual',
+    floating: S.app.prefs.floating_button !== false,
+    spotlight: S.app.prefs.spotlight_launcher !== false,
+    suggestions: S.app.prefs.call_suggestions !== false,
   };
 }
 
@@ -3839,7 +4183,8 @@ function renderSetupFoot() {
     fill(W.errorBox, W.error && ready ? h('p', { class: 'field-error setup-error', role: 'alert', id: 'setup-error' }, W.error) : null,
       W.error && ready && W.fileProblem ? btn(t('fix.show_config'), { cls: 'small', id: 'setup-show-config', onclick: () => reveal('config') }, 'folder') : null);
   }
-  const extra = ready && def.secondary ? btn(def.secondary.label(), { id: 'setup-secondary', disabled: W.busy, onclick: () => runStep(def.secondary.run) }) : null;
+  const extra = ready && def.secondary && (!def.secondary.when || def.secondary.when(W))
+    ? btn(def.secondary.label(), { id: 'setup-secondary', disabled: W.busy, onclick: () => runStep(def.secondary.run) }) : null;
   fill(W.foot, back || h('span'), dl, skip, extra, next);
 }
 
@@ -4036,6 +4381,52 @@ const SETUP_STEPS = {
     },
   },
 
+  start: {
+    // when Voicestream records, and the ways of starting a meeting from any app: the defaults are on,
+    // so Continue is enough; what only the Mac app does is said instead of offered elsewhere
+    view: (W) => {
+      const caps = S.app.capabilities || {};
+      const c = W.choice;
+      const options = [
+        { value: 'manual', title: t('start.manual'), desc: t('setup.start.manual_desc') },
+        { value: 'automatic', title: t('start.automatic'), desc: t('start.automatic_desc') },
+      ];
+      const parts = [...setupHead(t('setup.start.title'), t('setup.start.lead')),
+        choiceCards(t('setup.start.title'), options, c.mode, (v) => { c.mode = v; renderSetup(); }, { list: true })];
+      if (c.mode === 'automatic') {
+        parts.push(h('div', { class: 'sub-card' },
+          switchRow('setup-launch', t('set.listen_on_launch'), t('set.listen_on_launch_help'), c.listenOnLaunch, (on) => { c.listenOnLaunch = on; })));
+        return parts;
+      }
+      if (caps.hotkey) {
+        W.shortcut = W.shortcut || shortcutSetting({ prefix: 'setup-shortcut', variant: 'setup' });
+        W.shortcut.draw();
+        parts.push(h('div', { class: 'sub-card setup-shortcut' }, W.shortcut, h('p', { class: 'help small muted' }, t('setup.start.shortcut_help'))));
+      }
+      if (caps.floating_button || caps.spotlight || caps.call_detection) {
+        parts.push(h('div', { class: 'sub-card' },
+          caps.floating_button && switchRow('setup-floating', t('start.floating'), t('start.floating_help'), c.floating, (on) => { c.floating = on; }),
+          caps.spotlight && switchRow('setup-spotlight', t('start.spotlight'), t('start.spotlight_help'), c.spotlight, (on) => { c.spotlight = on; }),
+          caps.call_detection && switchRow('setup-suggestions', t('start.suggest'), t('start.suggest_help'), c.suggestions, (on) => { c.suggestions = on; })));
+      } else if (!caps.hotkey) {  // the browser: none of these exist here
+        parts.push(h('p', { class: 'help muted', id: 'setup-start-mac-only' }, t('setup.start.mac_only')));
+      }
+      return parts;
+    },
+    nextLabel: () => t('setup.next'),
+    next: async (W) => {
+      const c = W.choice, p = S.app.prefs;
+      const want = { meeting_start: c.mode, floating_button: c.floating, spotlight_launcher: c.spotlight,
+        call_suggestions: c.suggestions, listen_on_launch: c.listenOnLaunch };
+      const changes = Object.fromEntries(Object.entries(want).filter(([k, v]) => p[k] !== v));
+      if (Object.keys(changes).length) {
+        const saved = await api('PATCH', '/api/prefs', changes);
+        S.app = { ...S.app, prefs: { ...S.app.prefs, ...saved }, mode: saved.meeting_start || S.app.mode };
+      }
+      return true;
+    },
+  },
+
   done: {
     view: (W) => {
       const v = S.settings.values;
@@ -4047,6 +4438,9 @@ const SETUP_STEPS = {
       const rem = S.settings.sinks.reminders && S.settings.sinks.reminders.enabled;
       const row = (ok, text) => h('div', { class: ok ? '' : 'pending' }, icon(ok ? 'checkCircle' : 'clock'), h('span', {}, text));
       const caps = S.app.capabilities || {};
+      const hk = S.app.prefs.hotkey;
+      const how = W.choice.mode === 'automatic' ? t('setup.done.automatic')
+        : hk && caps.hotkey ? t('setup.done.manual_keys', { keys: shortcutText(hk) }) : t('setup.done.manual');
       return [
         ...setupHead(t('setup.done.title', { name: v.user_name }), t('setup.done.lead')),
         h('div', { class: 'summary-list' },
@@ -4056,19 +4450,21 @@ const SETUP_STEPS = {
           row(true, claude ? t('setup.done.claude') : t('setup.done.offline')),
           rem ? row(!W.remindersCheck || W.remindersCheck.status === 'ok',
             t('setup.done.reminders', { list: savedVal('sinks.reminders.list_name') || '' })) : null,
-          row(true, t('setup.done.files'))),
-        h('div', { class: 'sub-card' },
-          caps.login_item ? switchRow('setup-login', t('set.start_at_login'), t('set.login_help'), W.choice.startAtLogin, (on) => { W.choice.startAtLogin = on; }) : null,
-          switchRow('setup-launch', t('set.listen_on_launch'), t('set.listen_on_launch_help'), W.choice.listenOnLaunch, (on) => { W.choice.listenOnLaunch = on; })),
+          row(true, t('setup.done.files')),
+          row(true, how)),
+        caps.login_item ? h('div', { class: 'sub-card' },
+          switchRow('setup-login', t('set.start_at_login'), t('set.login_help'), W.choice.startAtLogin, (on) => { W.choice.startAtLogin = on; })) : null,
       ];
     },
+    // by hand, nothing is started now: Done opens Live, its Start meeting ready for the next call
     nextLabel: () => {
+      if (S.setup && S.setup.choice.mode !== 'automatic') return t('setup.done.finish');
       const v = S.settings.values;
       const model = v.transcription.backend === 'whisper-cpp' && v.transcription.whisper_cpp.model;
       return model && S.downloads[model] ? t('setup.done.start_after') : t('setup.done.start');
     },
-    next: async (W) => finishSetup(W, true),
-    secondary: { label: () => t('setup.done.later'), run: async (W) => finishSetup(W, false) },
+    next: async (W) => finishSetup(W, W.choice.mode === 'automatic'),
+    secondary: { label: () => t('setup.done.later'), run: async (W) => finishSetup(W, false), when: (W) => W.choice.mode === 'automatic' },
   },
 };
 
@@ -4184,7 +4580,7 @@ function shortcutFromEvent(e) {
   return { code: e.code, mods, key: Object.hasOwn(layout, e.code) ? String(layout[e.code]) : '' };
 }
 
-/** The Live screen's line for when it isn't listening: the shortcut, once macOS took it. */
+/** The Live screen's line for when it isn't listening (always-on listening): the shortcut, once macOS took it. */
 function shortcutHint() {
   const a = S.app;
   const hk = a && a.prefs.hotkey;
@@ -4192,11 +4588,21 @@ function shortcutHint() {
   return h('span', { id: 'shortcut-hint' }, ' ' + t('shortcut.hint', { keys: shortcutText(hk) }));
 }
 
-/** Settings → General: the shortcut, with Change (records the next combination pressed), Turn off and
- *  Reset, and the sound it plays. Saved at once, as macOS's own keyboard settings are: whether macOS
- *  took it is what you want to know next. Elsewhere than the Mac app, it says it is a Mac feature. */
-function shortcutSetting() {
-  const box = h('div', { id: 'shortcut-setting', dataset: { path: 'pref:hotkey' } });
+/** A shortcut as the keys to press: ⌥ ⌘ R. */
+function shortcutKeys(hk, attrs = {}) {
+  const caps = [...shortcutMods(hk.mods).map((m) => SHORTCUT_GLYPHS[m]), shortcutLabel(hk.code, hk.key)];
+  return h('span', { class: 'keys', translate: 'no', ...attrs }, caps.map((c) => h('kbd', {}, c)));
+}
+
+/** The keyboard shortcut, with "Choose a shortcut" (records the next combination pressed), and in
+ *  Settings Turn off, Reset and the sound it plays. Saved at once, as macOS's own keyboard settings are:
+ *  whether macOS took it is what you want to know next. Elsewhere than the Mac app, it says it is a Mac
+ *  feature. Three places show it: Settings → General (``settings``), Live between meetings (``live``:
+ *  the keys in a sentence) and the setup (``setup``: a large button); ``prefix`` makes their ids.
+ *  The element's ``draw()`` shows the shortcut as it is now and keeps a recording under way. */
+function shortcutSetting({ prefix = 'shortcut', variant = 'settings' } = {}) {
+  const id = (part) => prefix + '-' + part;
+  const box = h('div', { id: id('setting'), class: 'shortcut-setting ' + variant, dataset: variant === 'settings' ? { path: 'pref:hotkey' } : null });
   let recording = false, error = '', timer = null;
   const mac = () => Boolean(S.app.capabilities && S.app.capabilities.hotkey);
 
@@ -4217,10 +4623,10 @@ function shortcutSetting() {
     timer = setTimeout(() => { stop(true); draw(); }, 30000);  // the app turns it back on by then too
     tellHost(true);  // the current shortcut is off meanwhile, or pressing it would not reach this page
     draw();
-    $('shortcut-keys').focus({ preventScroll: true });  // not the button: Space or Enter would press it
+    $(id('keys')).focus({ preventScroll: true });  // not the button: Space or Enter would press it
   };
   const onBlur = () => { stop(true); draw(); };
-  const backToChange = () => { if (box.isConnected && $('shortcut-change')) $('shortcut-change').focus({ preventScroll: true }); };
+  const backToChange = () => { if (box.isConnected && $(id('change'))) $(id('change')).focus({ preventScroll: true }); };
   function onKey(e) {
     if (!box.isConnected) { stop(true); return; }
     e.preventDefault();
@@ -4255,38 +4661,67 @@ function shortcutSetting() {
     }
     if (box.isConnected) draw();
   };
+  // what the shortcut does follows how meetings start: a meeting, or listening
+  const said = (key) => t(isManual() ? key + '_meeting' : key);
   const statusText = (hk) => {
     const st = S.app.hotkey || {};
-    if (!hk) return t('shortcut.status.off');
-    if (st.status === 'ok') return t('shortcut.status.ok');
+    if (!hk) return said('shortcut.status.off');
+    if (st.status === 'ok') return said('shortcut.status.ok');
     if (st.status === 'taken') return t('shortcut.status.taken');
     if (st.status === 'failed') return t('shortcut.status.failed', { code: st.error });
     return '';  // pending: the answer is on its way
   };
   const draw = (held) => keepFocus(box, () => {
+    if (!mac()) {  // the browser, or Linux and Windows: no global shortcut, said so where it would be
+      fill(box, variant === 'live' ? null : variant === 'setup'
+        ? h('p', { class: 'help', id: id('status') }, said('shortcut.mac_only'))
+        : h('div', { class: 'field' }, h('span', { class: 'label', id: id('label') }, t('shortcut.label')),
+          h('p', { class: 'help', id: id('status'), role: 'status' }, said('shortcut.mac_only'))));
+      return;
+    }
     const hk = S.app.prefs.hotkey;
+    const st = (S.app.hotkey || {}).status;
     const isDefault = hk && hk.code === SHORTCUT_DEFAULT.code && shortcutMods(hk.mods).join() === SHORTCUT_DEFAULT.mods.join();
-    let keys = hk ? shortcutText(hk) : t('shortcut.off');
-    if (recording) keys = held && held.length ? held.map((m) => SHORTCUT_GLYPHS[m]).join('') + '…' : t('shortcut.press');
-    const ok = mac() && hk && (S.app.hotkey || {}).status === 'ok';
-    const pill = h('span', { class: 'pill' + (recording ? ' info' : ok ? ' ok' : ''), id: 'shortcut-keys', tabindex: recording ? '-1' : null }, keys);
-    const controls = mac() ? [
-      btn(recording ? t('common.cancel') : t('shortcut.change'), { cls: 'small', id: 'shortcut-change',
-        onclick: () => { if (recording) { stop(true); draw(); } else record(); } }),
-      !recording && hk && btn(t('shortcut.turn_off'), { cls: 'small ghost', id: 'shortcut-off', onclick: (e) => save(null, e.currentTarget) }),
-      !recording && !isDefault && btn(t('shortcut.reset', { keys: shortcutText(SHORTCUT_DEFAULT) }), { cls: 'small ghost', id: 'shortcut-reset',
-        onclick: (e) => save({ ...SHORTCUT_DEFAULT }, e.currentTarget) }),
-    ] : [];
-    const help = !mac() ? t('shortcut.mac_only') : recording ? t('shortcut.press_help') : statusText(hk);
+    let keys;
+    if (recording) {
+      keys = h('span', { class: 'pill info', id: id('keys'), tabindex: '-1' },
+        held && held.length ? held.map((m) => SHORTCUT_GLYPHS[m]).join('') + '…' : t('shortcut.press'));
+    } else {
+      keys = hk ? shortcutKeys(hk, { id: id('keys') }) : h('span', { class: 'pill', id: id('keys') }, t('shortcut.off'));
+    }
+    const choose = btn(recording ? t('common.cancel') : t('shortcut.choose'), {
+      cls: variant === 'setup' ? 'big' : 'small', id: id('change'),
+      onclick: () => { if (recording) { stop(true); draw(); } else record(); } }, recording || variant === 'settings' ? null : 'keyboard');
+    const off = !recording && hk && btn(t('shortcut.turn_off'), { cls: 'small ghost', id: id('off'), onclick: (e) => save(null, e.currentTarget) });
+    const reset = !recording && !isDefault && btn(t('shortcut.reset', { keys: shortcutText(SHORTCUT_DEFAULT) }), {
+      cls: 'small ghost', id: id('reset'), onclick: (e) => save({ ...SHORTCUT_DEFAULT }, e.currentTarget) });
+    const errorLine = h('p', { class: 'field-error', id: id('error'), role: error ? 'alert' : null }, error);
+    if (variant === 'live') {
+      // a sentence: "Or press ⌥ ⌘ R in any app", and the button beside it
+      let line;
+      if (recording) line = [keys];
+      else if (!hk) line = [h('span', { id: id('keys') }, t('live.shortcut.none'))];
+      else if (st === 'taken' || st === 'failed') line = [keys, ' ', h('span', { class: 'warn-text' }, t(st === 'taken' ? 'live.shortcut.taken' : 'live.shortcut.failed'))];
+      else line = [t('live.shortcut.or_press'), ' ', keys, ' ', t('live.shortcut.any_app')];
+      fill(box,
+        h('div', { class: 'shortcut-line', role: 'group', 'aria-labelledby': id('text') },
+          h('span', { class: 'shortcut-text', id: id('text') }, ...line), choose),
+        recording && h('p', { class: 'help', id: id('status'), role: 'status' }, t('shortcut.press_help')),
+        errorLine);
+      return;
+    }
+    const help = recording ? t('shortcut.press_help') : statusText(hk);
+    const controls = variant === 'setup' ? [keys, choose, reset] : [keys, choose, off, reset];
     fill(box,
       h('div', { class: 'field' + (error ? ' invalid' : '') },
-        h('span', { class: 'label', id: 'shortcut-label' }, t('shortcut.label')),
-        h('div', { class: 'control', role: 'group', 'aria-labelledby': 'shortcut-label', 'aria-describedby': 'shortcut-status shortcut-error' },
-          pill, ...controls),
-        h('p', { class: 'help', id: 'shortcut-status', role: 'status' }, help),
-        h('p', { class: 'field-error', id: 'shortcut-error', role: error ? 'alert' : null }, error)),
-      mac() && prefSwitch('hotkey_sound', t('shortcut.sound'), t('shortcut.sound_help')));
+        h('span', { class: 'label', id: id('label') }, t('shortcut.label')),
+        h('div', { class: 'control', role: 'group', 'aria-labelledby': id('label'), 'aria-describedby': id('status') + ' ' + id('error') },
+          ...controls),
+        h('p', { class: 'help', id: id('status'), role: 'status' }, help),
+        errorLine),
+      variant === 'settings' && prefSwitch('hotkey_sound', said('shortcut.sound'), said('shortcut.sound_help')));
   });
+  box.draw = draw;
   draw();
   return box;
 }
@@ -4303,7 +4738,8 @@ const STRINGS = {
     'common.close': 'Close', 'common.ok': 'OK', 'common.cancel': 'Cancel', 'common.save': 'Save', 'common.open': 'Open',
     'common.loading': 'Loading…', 'common.skip': 'Skip to content', 'common.hide': 'Hide',
 
-    'err.unreachable': "Can't reach Voicestream. Is it still running?",
+    'err.unreachable': "Can't reach Voicestream: check that it is still open, then try again.",
+    'err.minutes': 'Enter a whole number of minutes, from 0 to 600.',
     'err.copy': "Couldn't copy to the clipboard.",
     'err.required': "This can't be empty.",
     'err.number': 'Enter a number.',
@@ -4324,9 +4760,24 @@ const STRINGS = {
     'state.stopped': 'Not listening', 'state.starting': 'Starting…', 'state.listening': 'Listening',
     'state.paused': 'Paused — nothing is being recorded', 'state.paused_short': 'Paused', 'state.stopping': 'Stopping…',
     'state.error': 'Needs attention', 'state.meeting_for': 'Meeting in progress · {time}', 'state.in_meeting': 'A meeting is in progress',
+    'state.m.stopped': 'Not recording', 'state.m.listening': 'Recording', 'state.m.stopping': 'Wrapping up…',
 
     'action.start': 'Start listening', 'action.pause': 'Pause', 'action.resume': 'Resume', 'action.stop': 'Stop',
     'action.stop_now': 'Stop now', 'action.dismiss': 'Dismiss', 'action.try_again': 'Try again',
+    'action.start_meeting': 'Start meeting',
+
+    'where.window': 'this window', 'where.menu_bar': 'the menu bar', 'where.floating': 'the floating button', 'where.spotlight': 'Spotlight',
+
+    'sug.title': 'Call detected in {app}.', 'sug.title_any': 'Call detected.', 'sug.text': 'Start notes for this call?',
+    'sug.dismiss': 'Not now',
+    'still.title': 'Still in a meeting?', 'still.text': 'Nothing has been said for {n} min.',
+    'still.ends': 'Without an answer, the meeting ends by itself at {time}.', 'still.keep': 'Keep recording',
+    'notice.silence_title': 'The meeting ended by itself.',
+    'notice.silence_text': '“{title}” ended after {n} min without speech: its notes are ready.',
+    'notice.silence_untitled': 'It ended after {n} min without speech: its notes are ready.',
+    'notice.silence_empty': 'It ended after {n} min without speech. Nothing had been said, so there are no notes.',
+    'notice.link_title': 'A link was ignored.',
+    'notice.link_text': 'Something asked Voicestream to start recording without its key, so nothing was recorded. To start a meeting, use this window, the menu bar or Spotlight.',
 
     'top.today': 'Today', 'top.spend_aria': 'Spent today: {amount}. Open Costs.', 'top.spend_title': "Today's spending",
     'cost.stt': 'Speech-to-text', 'cost.claude': 'Claude', 'cost.agents': 'Agents', 'cost.budget_line': 'Daily budget {amount}',
@@ -4359,7 +4810,7 @@ const STRINGS = {
     'hm.mic_silent': 'The microphone only delivers silence: check the microphone permission for Voicestream.',
     'hm.system_silent': "Meeting audio has been silent for a while: allow Voicestream under Privacy & Security → Screen & System Audio Recording, then restart it.",
     'hm.download_retry': 'The speech model download was interrupted ({detail}): trying again…',
-    'hm.download_failed': "The speech model couldn't be downloaded: check your internet connection, then press Download again in Settings → Speech-to-text.",
+    'hm.download_failed': "The speech model couldn't be downloaded: check your internet connection, then click Download again in Settings → Speech-to-text.",
     'hm.mic_missing_default': "Your microphone ({name}) isn't connected — using {detail} until it is back",
     'hm.mic_missing_only': "Your microphone ({name}) isn't connected — using meeting audio only until it is back",
     'hm.mic_missing_none': "Your microphone ({name}) isn't connected — nothing is recorded until it is back",
@@ -4409,7 +4860,21 @@ const STRINGS = {
     'toast.pushed_meeting': 'Sent to {tools}.', 'toast.up_to_date': 'Everything was already sent.',
     'toast.rewrite_failed': "Couldn't rewrite the notes", 'toast.rewritten': 'The notes were rewritten.',
 
-    'live.levels': 'Sound levels', 'live.extract': 'Update to-dos now',
+    'live.levels': 'Sound levels', 'live.extract': 'Update to-dos now', 'live.extract_short': 'Update now',
+    'live.clock_label': 'Time recorded',
+    'live.m.stopped': 'No meeting in progress', 'live.m.stopped_text': 'Nothing is recorded until you start one.',
+    'live.m.starting': 'Starting the meeting…', 'live.m.recording': 'Recording', 'live.m.recording_text': 'Opening the meeting…',
+    'live.m.paused_text': 'Nothing is recorded until you click Resume.',
+    'live.m.stopping': 'Wrapping up the meeting…',
+    'live.m.stopping_text': 'Writing its notes and sending the to-dos to your tools. The next meeting can start in a moment.',
+    'live.m.error_text': 'See the message above to fix it, then click Try again.',
+    'live.mode.manual': 'Meetings start only when you start one, from {where}.',
+    'live.mode.automatic': 'Automatic mode: meetings start by themselves when someone speaks.',
+    'live.mode.change': 'Change', 'live.mode.change_aria': 'Change how meetings start',
+    'live.shortcut.or_press': 'Or press', 'live.shortcut.any_app': 'in any app.',
+    'live.shortcut.none': 'No keyboard shortcut yet.',
+    'live.shortcut.taken': 'is used by another app: choose another.',
+    'live.shortcut.failed': 'was refused by macOS: choose another.',
     'live.extract_help': 'Look through the transcript for new to-dos and decisions right away (it also happens every minute or two).',
     'live.end': 'End meeting', 'live.ending': 'Wrapping up: writing the notes and sending the to-dos to your tools…',
     'live.transcript': 'Transcript', 'live.nothing_yet': 'Nothing said yet.', 'live.jump': 'Jump to the latest',
@@ -4420,11 +4885,11 @@ const STRINGS = {
     'live.idle.listening_text': 'A meeting starts by itself as soon as someone speaks, and ends after {n} min of silence. You can close this window: Voicestream keeps listening in the menu bar.',
     'live.idle.listening_text_nosplit': 'A meeting starts by itself as soon as someone speaks. You can close this window: Voicestream keeps listening in the menu bar.',
     'live.idle.paused': 'Paused — nothing is being recorded',
-    'live.idle.paused_text': 'Press Resume when you want Voicestream to listen again.',
+    'live.idle.paused_text': 'Click Resume when you want Voicestream to listen again.',
     'live.idle.starting': 'Getting ready…', 'live.idle.starting_text': 'Starting the microphone and speech-to-text.',
     'live.idle.stopping': 'Wrapping up…', 'live.idle.stopping_text': 'Saving the meeting and writing its notes.',
     'live.idle.error': 'Something needs your attention', 'live.idle.error_text': 'See the message above to fix it, then try again.',
-    'live.idle.stopped': 'Not listening', 'live.idle.stopped_text': 'Press Start listening when you want Voicestream to take notes of your meetings.',
+    'live.idle.stopped': 'Not listening', 'live.idle.stopped_text': 'Click Start listening when you want Voicestream to take notes of your meetings.',
     'live.no_meetings': 'No meetings yet', 'live.no_meetings_text': 'Your meetings and their notes will appear here.',
     'live.just_ended': 'Just ended', 'live.last_meeting': 'Last meeting', 'live.open_notes': 'Open the notes',
     'live.week': 'Last 7 days', 'live.week.meetings': 'Meetings', 'live.week.actions': 'To-dos', 'live.week.mine': 'For you',
@@ -4459,7 +4924,7 @@ const STRINGS = {
     'meetings.interrupted_note': 'Voicestream was closed while it recorded this meeting (a crash, a forced quit or a power cut): it ends at the last words heard and has basic notes. Nothing was sent yet: rewrite the notes and send its to-dos when you are ready.',
     'meetings.sections': 'Meeting sections', 'meetings.tab.notes': 'Notes', 'meetings.tab.actions': 'To-dos & decisions',
     'meetings.tab.transcript': 'Transcript', 'meetings.tab.email': 'Follow-up email',
-    'meetings.no_notes': 'No notes yet', 'meetings.no_notes_text': 'Press “Rewrite notes” to write them now.',
+    'meetings.no_notes': 'No notes yet', 'meetings.no_notes_text': 'Click “Rewrite notes” to write them now.',
     'meetings.no_notes_live': 'They are written when the meeting ends.',
     'meetings.items_help': 'Correct anything that is wrong: the notes and your tools are updated too.',
     'meetings.items_readonly': 'Read only while the meeting is being recorded elsewhere.',
@@ -4516,20 +4981,40 @@ const STRINGS = {
     'set.languages': 'Languages spoken in your meetings',
     'set.idle': 'A meeting ends after this much silence', 'set.minutes': 'minutes',
     'set.idle_help': 'The next time someone speaks, a new meeting starts. 0 = never end a meeting by itself.',
-    'set.app': 'The app', 'set.app_lead': 'How Voicestream opens, its language and its keyboard shortcut.',
+    'set.app': 'The app', 'set.app_lead': 'How Voicestream opens, and its language.',
+    'start.title': 'Starting meetings', 'start.lead': 'When Voicestream records, and how you start a meeting from any app.',
+    'start.how': 'How meetings start',
+    'start.manual': 'When I start them (recommended)',
+    'start.manual_desc': 'Nothing is recorded until you start a meeting: from this window, the menu bar, the keyboard shortcut, the floating button or Spotlight.',
+    'start.automatic': 'Automatically', 'start.automatic_desc': 'Voicestream listens all the time, and a meeting starts as soon as someone speaks.',
+    'start.ask': 'Ask “Still in a meeting?” after', 'start.ask_help': 'Keep recording or end the meeting in one click. 0 = never ask.',
+    'start.end': 'End the meeting by itself after', 'start.end_help': 'Its notes are written as usual, and Voicestream tells you why it ended. 0 = never.',
+    'start.minutes_silence': 'minutes without speech',
+    'start.floating': 'Show the floating button',
+    'start.floating_help': 'A small button above every app, even in full screen: start, pause and stop a meeting without opening this window. Drag it anywhere; Control-click it to hide it.',
+    'start.spotlight': 'Start a meeting from Spotlight',
+    'start.spotlight_help': 'Press ⌘Space, type “voicestream”, then Return. For this, Voicestream keeps a small “Voicestream – New Meeting” app in your Applications folder.',
+    'start.suggest': 'Suggest notes when a call starts',
+    'start.suggest_help': 'When Zoom, Teams, FaceTime, Meet or Slack starts using the microphone and nothing is recorded, Voicestream offers to start. It never starts by itself.',
+    'start.summary': 'Now:', 'start.summary_manual': 'Meetings start when you start them', 'start.summary_auto': 'Meetings start by themselves',
+    'start.summary_keys': 'Shortcut {keys}', 'start.summary_floating': 'Floating button', 'start.summary_spotlight': 'Spotlight',
+    'start.summary_suggest': 'Suggestions when a call starts',
     'set.ui_language': 'App language', 'set.ui_auto': 'Same as the Mac',
     'set.listen_on_launch': 'Start listening when Voicestream opens',
-    'set.listen_on_launch_help': 'Otherwise, press Start listening yourself.',
+    'set.listen_on_launch_help': 'Otherwise, click Start listening yourself.',
     'set.start_at_login': 'Open Voicestream when I log in', 'set.login_help': 'Voicestream starts in the menu bar.',
     'set.login_unavailable': 'Only available in the Voicestream app for Mac.',
-    'shortcut.label': 'Keyboard shortcut', 'shortcut.change': 'Change', 'shortcut.turn_off': 'Turn off',
+    'shortcut.label': 'Keyboard shortcut', 'shortcut.choose': 'Choose a shortcut', 'shortcut.turn_off': 'Turn off',
     'shortcut.reset': 'Reset to {keys}', 'shortcut.off': 'Off', 'shortcut.key.space': 'Space',
     'shortcut.press': 'Press the new shortcut…', 'shortcut.press_help': 'Hold ⌘, ⌥ or ⌃ and press a key. Esc cancels.',
     'shortcut.mac_only': 'In the Voicestream app for Mac, a keyboard shortcut starts and stops listening from any app.',
+    'shortcut.mac_only_meeting': 'In the Voicestream app for Mac, a keyboard shortcut starts and stops a meeting from any app.',
     'shortcut.status.ok': 'Works from any app, even with this window closed: it starts and stops listening.',
+    'shortcut.status.ok_meeting': 'Works from any app, even with this window closed: it starts and stops a meeting.',
     'shortcut.status.taken': 'Already used by another app — choose another.',
     'shortcut.status.failed': 'macOS refused this shortcut (error {code}) — choose another.',
     'shortcut.status.off': 'Turned off. Start and stop listening from the menu bar or this window.',
+    'shortcut.status.off_meeting': 'Turned off. Start and stop meetings from the menu bar or this window.',
     'shortcut.why.unknown_key': 'Voicestream can’t use this key for a shortcut: choose a letter, a digit, a function key or a punctuation key.',
     'shortcut.why.needs_modifier': 'Hold ⌘, ⌥ or ⌃ as well: {keys} alone types or does something else.',
     'shortcut.why.one_modifier': '{keys} is taken in many apps already (⌘C copies, ⌥E types an accent, ⌃C stops a Terminal command): hold a second one of ⌘, ⌥ or ⌃, as in ⌥⌘R.',
@@ -4537,6 +5022,7 @@ const STRINGS = {
     'shortcut.why.reserved_mac': 'macOS uses {keys} itself (switching apps or windows, Spotlight, input sources, screenshots, Force Quit…): choose another.',
     'shortcut.why.option_only': 'macOS 15 can refuse a shortcut held with ⌥ alone, or ⌥⇧ ({keys}): hold ⌘ or ⌃ too.',
     'shortcut.sound': 'Play a sound when the shortcut starts or stops listening', 'shortcut.sound_help': 'So you know it worked without looking — and another one when listening couldn’t start.',
+    'shortcut.sound_meeting': 'Play a sound when the shortcut starts or stops a meeting', 'shortcut.sound_help_meeting': 'So you know it worked without looking — and another one when the meeting couldn’t start.',
     'shortcut.hint': 'You can also press {keys} in any app.',
 
     'lang.fr+en': 'French and English', 'lang.fr+en.desc': 'Either language, even both in one meeting.',
@@ -4609,7 +5095,7 @@ const STRINGS = {
     'audio.system_ok': 'Meeting audio: {detail}', 'audio.system_missing': 'Meeting audio is not available: {detail}',
     'audio.store': 'Keep a recording of the audio', 'audio.store_help': 'Saved with each meeting. Off by default: the transcript is usually enough.',
 
-    'tools.lead': 'Where your to-dos and notes go. Turn on the ones you use, then press Test.',
+    'tools.lead': 'Where your to-dos and notes go. Turn on the ones you use, then click Test.',
     'tools.more': 'More tools', 'tools.more_help': 'Notion, Linear, Slack…', 'tools.enable': 'Turn on {name}',
     'tools.summary': 'Turned on:', 'tools.summary_none': 'None is turned on yet: the notes stay in your Voicestream folder.',
     'tools.test': 'Test', 'tools.testing': 'Testing…', 'tools.mac_only': 'Mac only',
@@ -4661,7 +5147,7 @@ const STRINGS = {
 
     'agents.title': 'Agents', 'agents.lead': 'An agent is Claude doing a task for you (research, a draft…) while you are still in the meeting.',
     'agents.off': 'Off', 'agents.off.desc': 'Never run agents.',
-    'agents.suggest': 'Suggest (recommended)', 'agents.suggest.desc': 'Mark the to-dos an agent could do; it starts only when you press “Let an agent do it”.',
+    'agents.suggest': 'Suggest (recommended)', 'agents.suggest.desc': 'Mark the to-dos an agent could do; it starts only when you click “Let an agent do it”.',
     'agents.commands': 'When I ask', 'agents.commands.desc': 'Also start right away when you say “Hey Claude, …” in a meeting.',
     'agents.auto': 'Automatic', 'agents.auto.desc': 'Start every task an agent can do, within the daily limit.',
     'agents.daily': 'Agents may spend at most', 'agents.daily_help': 'A separate limit from the notes budget.',
@@ -4677,7 +5163,16 @@ const STRINGS = {
 
     'setup.title': 'Setup', 'setup.step': 'Step {n} of {total}', 'setup.close': 'Close setup',
     'setup.nav.welcome': 'Welcome', 'setup.nav.you': 'About you', 'setup.nav.stt': 'Speech-to-text', 'setup.nav.claude': 'Claude',
-    'setup.nav.perms': 'Permissions', 'setup.nav.tools': 'Your tools', 'setup.nav.done': 'All set',
+    'setup.nav.perms': 'Permissions', 'setup.nav.tools': 'Your tools', 'setup.nav.start': 'Starting meetings', 'setup.nav.done': 'All set',
+    'setup.start.title': 'How you start a meeting',
+    'setup.start.lead': 'Choose when Voicestream records. You can change it later in Settings.',
+    'setup.start.manual_desc': 'Nothing is recorded until you start a meeting. Start it when the call begins, stop it when it ends.',
+    'setup.start.shortcut_help': 'Press it in any app to start a meeting, and again to stop it.',
+    'setup.start.mac_only': 'In the Voicestream app for Mac you can also start a meeting with a keyboard shortcut, from a floating button above every app, from Spotlight, and when a call starts.',
+    'setup.done.manual': 'Meetings start when you start them',
+    'setup.done.manual_keys': 'Meetings start when you start them — or press {keys} in any app',
+    'setup.done.automatic': 'Meetings start by themselves when someone speaks',
+    'setup.done.finish': 'Done',
     'setup.downloading': 'Downloading the speech model', 'setup.back': 'Back', 'setup.next': 'Continue',
     'setup.welcome.title': 'Welcome to Voicestream',
     'setup.welcome.lead': 'Voicestream listens to your meetings and turns them into clear notes and to-do lists — by itself, in French and in English.',
@@ -4728,7 +5223,8 @@ const STRINGS = {
     'common.close': 'Fermer', 'common.ok': 'OK', 'common.cancel': 'Annuler', 'common.save': 'Enregistrer', 'common.open': 'Ouvrir',
     'common.loading': 'Chargement…', 'common.skip': 'Aller au contenu', 'common.hide': 'Masquer',
 
-    'err.unreachable': 'Impossible de joindre Voicestream. Est-il toujours ouvert ?',
+    'err.unreachable': 'Impossible de joindre Voicestream : vérifiez qu’il est toujours ouvert, puis réessayez.',
+    'err.minutes': 'Saisissez un nombre entier de minutes, de 0 à 600.',
     'err.copy': 'Impossible de copier dans le presse-papiers.',
     'err.required': 'Ce champ ne peut pas être vide.',
     'err.number': 'Saisissez un nombre.',
@@ -4749,9 +5245,24 @@ const STRINGS = {
     'state.stopped': 'À l’arrêt', 'state.starting': 'Démarrage…', 'state.listening': 'À l’écoute',
     'state.paused': 'En pause — rien n’est enregistré', 'state.paused_short': 'En pause', 'state.stopping': 'Arrêt…',
     'state.error': 'Action requise', 'state.meeting_for': 'Réunion en cours · {time}', 'state.in_meeting': 'Une réunion est en cours',
+    'state.m.stopped': 'Pas d’enregistrement', 'state.m.listening': 'Enregistrement', 'state.m.stopping': 'Finalisation…',
 
     'action.start': 'Commencer l’écoute', 'action.pause': 'Pause', 'action.resume': 'Reprendre', 'action.stop': 'Arrêter',
     'action.stop_now': 'Arrêter tout de suite', 'action.dismiss': 'Ignorer', 'action.try_again': 'Réessayer',
+    'action.start_meeting': 'Démarrer la réunion',
+
+    'where.window': 'cette fenêtre', 'where.menu_bar': 'la barre des menus', 'where.floating': 'le bouton flottant', 'where.spotlight': 'Spotlight',
+
+    'sug.title': 'Appel détecté dans {app}.', 'sug.title_any': 'Appel détecté.', 'sug.text': 'Prendre des notes de cet appel ?',
+    'sug.dismiss': 'Pas maintenant',
+    'still.title': 'Toujours en réunion ?', 'still.text': 'Rien n’a été dit depuis {n} min.',
+    'still.ends': 'Sans réponse, la réunion se termine d’elle-même à {time}.', 'still.keep': 'Continuer l’enregistrement',
+    'notice.silence_title': 'La réunion s’est terminée d’elle-même.',
+    'notice.silence_text': '« {title} » s’est terminée après {n} min sans parole : ses notes sont prêtes.',
+    'notice.silence_untitled': 'Elle s’est terminée après {n} min sans parole : ses notes sont prêtes.',
+    'notice.silence_empty': 'Elle s’est terminée après {n} min sans parole. Rien n’avait été dit, il n’y a donc pas de notes.',
+    'notice.link_title': 'Un lien a été ignoré.',
+    'notice.link_text': 'Quelque chose a demandé à Voicestream d’enregistrer sans sa clé : rien n’a été enregistré. Pour démarrer une réunion, utilisez cette fenêtre, la barre des menus ou Spotlight.',
 
     'top.today': 'Aujourd’hui', 'top.spend_aria': 'Dépensé aujourd’hui : {amount}. Ouvrir les coûts.', 'top.spend_title': 'Dépenses du jour',
     'cost.stt': 'Transcription', 'cost.claude': 'Claude', 'cost.agents': 'Agents', 'cost.budget_line': 'Budget du jour {amount}',
@@ -4784,7 +5295,7 @@ const STRINGS = {
     'hm.mic_silent': 'Le micro ne transmet que du silence : vérifiez l’autorisation du micro pour Voicestream.',
     'hm.system_silent': 'Le son de la réunion est muet depuis un moment : autorisez Voicestream dans Confidentialité et sécurité → Enregistrement de l’écran et de l’audio système, puis redémarrez-le.',
     'hm.download_retry': 'Le téléchargement du modèle de transcription a été interrompu ({detail}) : nouvel essai…',
-    'hm.download_failed': 'Le modèle de transcription n’a pas pu être téléchargé : vérifiez votre connexion, puis appuyez à nouveau sur Télécharger dans Réglages → Transcription.',
+    'hm.download_failed': 'Le modèle de transcription n’a pas pu être téléchargé : vérifiez votre connexion, puis cliquez à nouveau sur Télécharger dans Réglages → Transcription.',
     'hm.mic_missing_default': 'Votre micro ({name}) n’est pas branché : Voicestream utilise {detail} en attendant qu’il revienne',
     'hm.mic_missing_only': 'Votre micro ({name}) n’est pas branché : seul le son de la réunion est enregistré en attendant qu’il revienne',
     'hm.mic_missing_none': 'Votre micro ({name}) n’est pas branché : rien n’est enregistré en attendant qu’il revienne',
@@ -4834,7 +5345,21 @@ const STRINGS = {
     'toast.pushed_meeting': 'Envoyé vers {tools}.', 'toast.up_to_date': 'Tout avait déjà été envoyé.',
     'toast.rewrite_failed': 'Impossible de réécrire les notes', 'toast.rewritten': 'Les notes ont été réécrites.',
 
-    'live.levels': 'Niveaux sonores', 'live.extract': 'Mettre à jour les tâches',
+    'live.levels': 'Niveaux sonores', 'live.extract': 'Mettre à jour les tâches', 'live.extract_short': 'Mettre à jour',
+    'live.clock_label': 'Durée enregistrée',
+    'live.m.stopped': 'Aucune réunion en cours', 'live.m.stopped_text': 'Rien n’est enregistré tant que vous n’en démarrez pas une.',
+    'live.m.starting': 'Démarrage de la réunion…', 'live.m.recording': 'Enregistrement', 'live.m.recording_text': 'Ouverture de la réunion…',
+    'live.m.paused_text': 'Rien n’est enregistré tant que vous ne cliquez pas sur Reprendre.',
+    'live.m.stopping': 'Finalisation de la réunion…',
+    'live.m.stopping_text': 'Rédaction des notes et envoi des tâches vers vos outils. La réunion suivante pourra démarrer dans un instant.',
+    'live.m.error_text': 'Suivez le message ci-dessus pour corriger, puis cliquez sur Réessayer.',
+    'live.mode.manual': 'Une réunion ne démarre que quand vous la lancez, depuis {where}.',
+    'live.mode.automatic': 'Mode automatique : les réunions démarrent d’elles-mêmes dès que quelqu’un parle.',
+    'live.mode.change': 'Modifier', 'live.mode.change_aria': 'Modifier la façon dont les réunions démarrent',
+    'live.shortcut.or_press': 'Ou appuyez sur', 'live.shortcut.any_app': 'dans n’importe quelle app.',
+    'live.shortcut.none': 'Pas encore de raccourci clavier.',
+    'live.shortcut.taken': 'est déjà utilisé par une autre app : choisissez-en un autre.',
+    'live.shortcut.failed': 'a été refusé par macOS : choisissez-en un autre.',
     'live.extract_help': 'Chercher tout de suite les nouvelles tâches et décisions dans la transcription (cela se fait aussi toutes les une à deux minutes).',
     'live.end': 'Terminer la réunion', 'live.ending': 'Finalisation : rédaction des notes et envoi des tâches vers vos outils…',
     'live.transcript': 'Transcription', 'live.nothing_yet': 'Rien n’a encore été dit.', 'live.jump': 'Revenir au direct',
@@ -4845,11 +5370,11 @@ const STRINGS = {
     'live.idle.listening_text': 'Une réunion commence d’elle-même dès que quelqu’un parle, et se termine après {n} min de silence. Vous pouvez fermer cette fenêtre : Voicestream reste à l’écoute dans la barre des menus.',
     'live.idle.listening_text_nosplit': 'Une réunion commence d’elle-même dès que quelqu’un parle. Vous pouvez fermer cette fenêtre : Voicestream reste à l’écoute dans la barre des menus.',
     'live.idle.paused': 'En pause — rien n’est enregistré',
-    'live.idle.paused_text': 'Appuyez sur Reprendre quand vous voulez que Voicestream écoute à nouveau.',
+    'live.idle.paused_text': 'Cliquez sur Reprendre quand vous voulez que Voicestream écoute à nouveau.',
     'live.idle.starting': 'Préparation…', 'live.idle.starting_text': 'Démarrage du micro et de la transcription.',
     'live.idle.stopping': 'Finalisation…', 'live.idle.stopping_text': 'Enregistrement de la réunion et rédaction de ses notes.',
     'live.idle.error': 'Quelque chose demande votre attention', 'live.idle.error_text': 'Suivez le message ci-dessus pour corriger, puis réessayez.',
-    'live.idle.stopped': 'À l’arrêt', 'live.idle.stopped_text': 'Appuyez sur Commencer l’écoute quand vous voulez que Voicestream prenne des notes de vos réunions.',
+    'live.idle.stopped': 'À l’arrêt', 'live.idle.stopped_text': 'Cliquez sur Commencer l’écoute quand vous voulez que Voicestream prenne des notes de vos réunions.',
     'live.no_meetings': 'Aucune réunion pour l’instant', 'live.no_meetings_text': 'Vos réunions et leurs notes apparaîtront ici.',
     'live.just_ended': 'Vient de se terminer', 'live.last_meeting': 'Dernière réunion', 'live.open_notes': 'Ouvrir les notes',
     'live.week': '7 derniers jours', 'live.week.meetings': 'Réunions', 'live.week.actions': 'Tâches', 'live.week.mine': 'Pour vous',
@@ -4884,7 +5409,7 @@ const STRINGS = {
     'meetings.interrupted_note': 'Voicestream a été fermé pendant l’enregistrement de cette réunion (plantage, arrêt forcé ou coupure de courant) : elle s’arrête aux derniers mots entendus et ses notes sont sommaires. Rien n’a encore été envoyé : réécrivez les notes et envoyez ses tâches quand vous voulez.',
     'meetings.sections': 'Sections de la réunion', 'meetings.tab.notes': 'Notes', 'meetings.tab.actions': 'Tâches et décisions',
     'meetings.tab.transcript': 'Transcription', 'meetings.tab.email': 'E-mail de suivi',
-    'meetings.no_notes': 'Pas encore de notes', 'meetings.no_notes_text': 'Appuyez sur « Réécrire les notes » pour les rédiger maintenant.',
+    'meetings.no_notes': 'Pas encore de notes', 'meetings.no_notes_text': 'Cliquez sur « Réécrire les notes » pour les rédiger maintenant.',
     'meetings.no_notes_live': 'Elles sont rédigées à la fin de la réunion.',
     'meetings.items_help': 'Corrigez ce qui est faux : les notes et vos outils sont mis à jour aussi.',
     'meetings.items_readonly': 'Lecture seule tant que la réunion est enregistrée ailleurs.',
@@ -4941,20 +5466,40 @@ const STRINGS = {
     'set.languages': 'Langues parlées en réunion',
     'set.idle': 'Une réunion se termine après ce silence', 'set.minutes': 'minutes',
     'set.idle_help': 'Dès que quelqu’un reparle, une nouvelle réunion commence. 0 = ne jamais terminer une réunion d’elle-même.',
-    'set.app': 'L’application', 'set.app_lead': 'Comment Voicestream s’ouvre, sa langue et son raccourci clavier.',
+    'set.app': 'L’application', 'set.app_lead': 'Comment Voicestream s’ouvre, et sa langue.',
+    'start.title': 'Démarrer une réunion', 'start.lead': 'Quand Voicestream enregistre, et comment démarrer une réunion depuis n’importe quelle app.',
+    'start.how': 'Comment les réunions démarrent',
+    'start.manual': 'Quand je les démarre (recommandé)',
+    'start.manual_desc': 'Rien n’est enregistré tant que vous ne démarrez pas une réunion : depuis cette fenêtre, la barre des menus, le raccourci clavier, le bouton flottant ou Spotlight.',
+    'start.automatic': 'Automatiquement', 'start.automatic_desc': 'Voicestream écoute en permanence, et une réunion démarre dès que quelqu’un parle.',
+    'start.ask': 'Demander « Toujours en réunion ? » après', 'start.ask_help': 'Continuer l’enregistrement ou terminer la réunion en un clic. 0 = ne jamais demander.',
+    'start.end': 'Terminer la réunion d’elle-même après', 'start.end_help': 'Ses notes sont rédigées comme d’habitude, et Voicestream vous dit pourquoi elle s’est terminée. 0 = jamais.',
+    'start.minutes_silence': 'minutes sans parole',
+    'start.floating': 'Afficher le bouton flottant',
+    'start.floating_help': 'Un petit bouton au-dessus de toutes les apps, même en plein écran : démarrez, mettez en pause et arrêtez une réunion sans ouvrir cette fenêtre. Déplacez-le où vous voulez ; Contrôle-clic pour le masquer.',
+    'start.spotlight': 'Démarrer une réunion depuis Spotlight',
+    'start.spotlight_help': 'Appuyez sur ⌘Espace, tapez « voicestream », puis Retour. Pour cela, Voicestream garde une petite app « Voicestream – New Meeting » dans votre dossier Applications.',
+    'start.suggest': 'Proposer des notes quand un appel commence',
+    'start.suggest_help': 'Quand Zoom, Teams, FaceTime, Meet ou Slack se met à utiliser le micro et que rien n’est enregistré, Voicestream propose de démarrer. Il ne démarre jamais tout seul.',
+    'start.summary': 'Actuellement :', 'start.summary_manual': 'Les réunions démarrent quand vous les lancez', 'start.summary_auto': 'Les réunions démarrent d’elles-mêmes',
+    'start.summary_keys': 'Raccourci {keys}', 'start.summary_floating': 'Bouton flottant', 'start.summary_spotlight': 'Spotlight',
+    'start.summary_suggest': 'Suggestions quand un appel commence',
     'set.ui_language': 'Langue de l’application', 'set.ui_auto': 'Comme le Mac',
     'set.listen_on_launch': 'Commencer l’écoute à l’ouverture de Voicestream',
-    'set.listen_on_launch_help': 'Sinon, appuyez vous-même sur Commencer l’écoute.',
+    'set.listen_on_launch_help': 'Sinon, cliquez vous-même sur Commencer l’écoute.',
     'set.start_at_login': 'Ouvrir Voicestream à l’ouverture de session', 'set.login_help': 'Voicestream démarre dans la barre des menus.',
     'set.login_unavailable': 'Disponible uniquement dans l’application Voicestream pour Mac.',
-    'shortcut.label': 'Raccourci clavier', 'shortcut.change': 'Modifier', 'shortcut.turn_off': 'Désactiver',
+    'shortcut.label': 'Raccourci clavier', 'shortcut.choose': 'Choisir un raccourci', 'shortcut.turn_off': 'Désactiver',
     'shortcut.reset': 'Revenir à {keys}', 'shortcut.off': 'Désactivé', 'shortcut.key.space': 'Espace',
     'shortcut.press': 'Tapez le nouveau raccourci…', 'shortcut.press_help': 'Maintenez ⌘, ⌥ ou ⌃ et appuyez sur une touche. Échap pour annuler.',
     'shortcut.mac_only': 'Dans l’application Voicestream pour Mac, un raccourci clavier démarre et arrête l’écoute depuis n’importe quelle app.',
+    'shortcut.mac_only_meeting': 'Dans l’application Voicestream pour Mac, un raccourci clavier démarre et arrête une réunion depuis n’importe quelle app.',
     'shortcut.status.ok': 'Fonctionne depuis n’importe quelle app, même fenêtre fermée : il démarre et arrête l’écoute.',
+    'shortcut.status.ok_meeting': 'Fonctionne depuis n’importe quelle app, même fenêtre fermée : il démarre et arrête une réunion.',
     'shortcut.status.taken': 'Déjà utilisé par une autre app — choisissez-en un autre.',
     'shortcut.status.failed': 'macOS a refusé ce raccourci (erreur {code}) — choisissez-en un autre.',
     'shortcut.status.off': 'Désactivé. Démarrez et arrêtez l’écoute depuis la barre des menus ou cette fenêtre.',
+    'shortcut.status.off_meeting': 'Désactivé. Démarrez et arrêtez les réunions depuis la barre des menus ou cette fenêtre.',
     'shortcut.why.unknown_key': 'Voicestream ne peut pas utiliser cette touche pour un raccourci : choisissez une lettre, un chiffre, une touche de fonction ou de ponctuation.',
     'shortcut.why.needs_modifier': 'Maintenez aussi ⌘, ⌥ ou ⌃ : seul, {keys} sert à écrire ou à autre chose.',
     'shortcut.why.one_modifier': '{keys} est déjà pris dans beaucoup d’apps (⌘C copie, ⌥E met un accent, ⌃C arrête une commande du Terminal) : maintenez une deuxième touche parmi ⌘, ⌥ ou ⌃, comme dans ⌥⌘R.',
@@ -4962,6 +5507,7 @@ const STRINGS = {
     'shortcut.why.reserved_mac': 'macOS utilise lui-même {keys} (changer d’app ou de fenêtre, Spotlight, sources de saisie, captures d’écran, Forcer à quitter…) : choisissez-en un autre.',
     'shortcut.why.option_only': 'macOS 15 peut refuser un raccourci avec ⌥ seule, ou ⌥⇧ ({keys}) : maintenez aussi ⌘ ou ⌃.',
     'shortcut.sound': 'Jouer un son quand le raccourci démarre ou arrête l’écoute', 'shortcut.sound_help': 'Pour savoir que c’est fait sans regarder — et un autre son si l’écoute n’a pas pu démarrer.',
+    'shortcut.sound_meeting': 'Jouer un son quand le raccourci démarre ou arrête une réunion', 'shortcut.sound_help_meeting': 'Pour savoir que c’est fait sans regarder — et un autre son si la réunion n’a pas pu démarrer.',
     'shortcut.hint': 'Vous pouvez aussi appuyer sur {keys} dans n’importe quelle app.',
 
     'lang.fr+en': 'Français et anglais', 'lang.fr+en.desc': 'L’une ou l’autre, même les deux dans une réunion.',
@@ -5034,7 +5580,7 @@ const STRINGS = {
     'audio.system_ok': 'Son de la réunion : {detail}', 'audio.system_missing': 'Le son de la réunion n’est pas disponible : {detail}',
     'audio.store': 'Garder un enregistrement de l’audio', 'audio.store_help': 'Enregistré avec chaque réunion. Désactivé par défaut : la transcription suffit en général.',
 
-    'tools.lead': 'Où vont vos tâches et vos notes. Activez ceux que vous utilisez, puis appuyez sur Tester.',
+    'tools.lead': 'Où vont vos tâches et vos notes. Activez ceux que vous utilisez, puis cliquez sur Tester.',
     'tools.more': 'Autres outils', 'tools.more_help': 'Notion, Linear, Slack…', 'tools.enable': 'Activer {name}',
     'tools.summary': 'Activés :', 'tools.summary_none': 'Aucun n’est activé pour l’instant : les notes restent dans votre dossier Voicestream.',
     'tools.test': 'Tester', 'tools.testing': 'Test en cours…', 'tools.mac_only': 'Mac uniquement',
@@ -5083,7 +5629,7 @@ const STRINGS = {
 
     'agents.title': 'Agents', 'agents.lead': 'Un agent, c’est Claude qui fait une tâche pour vous (recherche, brouillon…) pendant que la réunion continue.',
     'agents.off': 'Désactivés', 'agents.off.desc': 'Ne jamais lancer d’agent.',
-    'agents.suggest': 'Suggérer (recommandé)', 'agents.suggest.desc': 'Signaler les tâches qu’un agent pourrait faire ; il ne démarre que si vous appuyez sur « Confier à un agent ».',
+    'agents.suggest': 'Suggérer (recommandé)', 'agents.suggest.desc': 'Signaler les tâches qu’un agent pourrait faire ; il ne démarre que si vous cliquez sur « Confier à un agent ».',
     'agents.commands': 'Quand je le demande', 'agents.commands.desc': 'Démarrer aussi tout de suite quand vous dites « Hey Claude, … » en réunion.',
     'agents.auto': 'Automatique', 'agents.auto.desc': 'Lancer chaque tâche qu’un agent peut faire, dans la limite quotidienne.',
     'agents.daily': 'Les agents peuvent dépenser au plus', 'agents.daily_help': 'Une limite distincte du budget des notes.',
@@ -5099,7 +5645,16 @@ const STRINGS = {
 
     'setup.title': 'Configuration', 'setup.step': 'Étape {n} sur {total}', 'setup.close': 'Fermer la configuration',
     'setup.nav.welcome': 'Bienvenue', 'setup.nav.you': 'À propos de vous', 'setup.nav.stt': 'Transcription', 'setup.nav.claude': 'Claude',
-    'setup.nav.perms': 'Autorisations', 'setup.nav.tools': 'Vos outils', 'setup.nav.done': 'Terminé',
+    'setup.nav.perms': 'Autorisations', 'setup.nav.tools': 'Vos outils', 'setup.nav.start': 'Démarrer une réunion', 'setup.nav.done': 'Terminé',
+    'setup.start.title': 'Comment démarrer une réunion',
+    'setup.start.lead': 'Choisissez quand Voicestream enregistre. Vous pourrez le changer plus tard dans les Réglages.',
+    'setup.start.manual_desc': 'Rien n’est enregistré tant que vous ne démarrez pas une réunion. Démarrez-la quand l’appel commence, arrêtez-la quand il se termine.',
+    'setup.start.shortcut_help': 'Appuyez dessus dans n’importe quelle app pour démarrer une réunion, et à nouveau pour l’arrêter.',
+    'setup.start.mac_only': 'Dans l’application Voicestream pour Mac, vous pouvez aussi démarrer une réunion avec un raccourci clavier, depuis un bouton flottant au-dessus de toutes les apps, depuis Spotlight, et quand un appel commence.',
+    'setup.done.manual': 'Les réunions démarrent quand vous les lancez',
+    'setup.done.manual_keys': 'Les réunions démarrent quand vous les lancez — ou appuyez sur {keys} dans n’importe quelle app',
+    'setup.done.automatic': 'Les réunions démarrent d’elles-mêmes dès que quelqu’un parle',
+    'setup.done.finish': 'Terminer',
     'setup.downloading': 'Téléchargement du modèle de transcription', 'setup.back': 'Retour', 'setup.next': 'Continuer',
     'setup.welcome.title': 'Bienvenue dans Voicestream',
     'setup.welcome.lead': 'Voicestream écoute vos réunions et en fait des notes claires et des listes de tâches — tout seul, en français et en anglais.',

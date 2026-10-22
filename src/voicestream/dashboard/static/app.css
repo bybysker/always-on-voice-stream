@@ -127,7 +127,12 @@
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-html { background: var(--ground); }
+/* the focused control is never left under the phone's top bar or the settings' save bar */
+html { background: var(--ground); scroll-padding-top: 16px; -webkit-tap-highlight-color: transparent; }
+html:has(body.raise-toasts) { scroll-padding-bottom: 80px; }
+/* a window, not a page: the whole of it doesn't bounce under a mouse or a trackpad */
+@media (pointer: fine) { html { overscroll-behavior: none; } }
+a, button, input, select, textarea, label, summary { touch-action: manipulation; }
 html, body { margin: 0; }
 body {
   min-height: 100vh;
@@ -137,7 +142,8 @@ body {
   font-feature-settings: "ss01" 0;
   -webkit-font-smoothing: antialiased;
 }
-h1, h2, h3, h4 { margin: 0; font-weight: 500; }
+h1, h2, h3, h4 { margin: 0; font-weight: 500; text-wrap: balance; }
+p { text-wrap: pretty; }
 h1 { font-size: var(--fs-title); line-height: 32px; letter-spacing: -0.01em; }
 h2 { font-size: var(--fs-section); line-height: 24px; }
 h3 { font-size: var(--fs-body); line-height: 20px; }
@@ -153,6 +159,9 @@ kbd {
   border: 1px solid var(--control); border-bottom-width: 2px; background: var(--surface);
   font: 500 var(--fs-small)/16px var(--font); text-align: center; color: var(--text);
 }
+/* a shortcut as the keys to press: ⌥ ⌘ R */
+.keys { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; flex: none; }
+.keys kbd { min-width: 24px; }
 
 .skip {
   position: fixed; left: 12px; top: 12px; z-index: 50; transform: translateY(-200%);
@@ -187,6 +196,7 @@ kbd {
 .btn:hover:not(:disabled) { background: var(--secondary-hover); }
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .btn:disabled, .btn[aria-disabled=true] { opacity: .55; cursor: default; }
+.btn[aria-busy=true] { cursor: progress; }
 .btn.primary { background: var(--primary); color: var(--on-primary); }
 .btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--primary) 84%, var(--ground)); }
 .btn.danger { color: var(--negative); }
@@ -195,7 +205,12 @@ kbd {
 .btn.ghost:hover:not(:disabled) { background: var(--raised); }
 .btn.small { min-height: 28px; padding: 0 10px; font-size: var(--fs-small); gap: 5px; }
 .btn.small .icon { width: 14px; height: 14px; }
+.btn.icon-only { padding: 0; width: 28px; }
 .btn.big { min-height: var(--control-height); padding: 0 16px; }
+/* the screen's one job when it has one: Start meeting, large enough to find without looking for it */
+.btn.huge { min-height: 48px; padding: 0 22px; gap: 10px; font-size: var(--fs-section); }
+.btn.huge .icon { width: 12px; height: 12px; }
+.btn.huge .spin { width: 16px; height: 16px; }
 .btn.link {
   background: none; padding: 0; min-height: 0; color: var(--text); font-weight: 400;
   text-decoration: underline; text-decoration-color: var(--control); text-underline-offset: 3px;
@@ -324,7 +339,7 @@ input.switch:disabled { opacity: .45; cursor: default; }
 .spend {
   display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 6px 8px; width: 100%;
   padding: 10px; border: 0; border-radius: var(--radius-control); background: none; cursor: pointer; text-align: left;
-  color: var(--muted);
+  color: var(--muted); text-decoration: none;
 }
 .spend:hover { background: var(--raised); }
 .spend strong { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
@@ -355,6 +370,10 @@ main { flex: 1; outline: none; }
 }
 .notice > .icon { color: var(--muted); }
 .notice .msg { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+.notice .msg strong { font-weight: 500; }
+/* a banner's answers, at its end: the one that goes on, last (as a macOS alert's default button) */
+.notice-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+.notice.call > .icon { color: var(--text); }
 .notice.warn { background: var(--pill-warning-bg); border-color: var(--notice-warning-edge); }
 .notice.warn > .icon, .notice.warn .msg { color: var(--pill-warning-ink); }
 .notice.error { background: var(--pill-negative-bg); border-color: transparent; }
@@ -366,7 +385,7 @@ main { flex: 1; outline: none; }
 .card .lead, .lead { color: var(--muted); }
 .panel-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
 .panel-head .meta-line { margin-top: 2px; }
-.view-all { color: var(--muted); font-size: var(--fs-small); white-space: nowrap; }
+.view-all { display: inline-flex; align-items: center; min-height: 28px; color: var(--muted); font-size: var(--fs-small); white-space: nowrap; }
 .muted { color: var(--muted); }
 .faint { color: var(--faint); }
 .small { font-size: var(--fs-small); line-height: 18px; }
@@ -412,8 +431,19 @@ main { flex: 1; outline: none; }
 .hero p { color: var(--muted); margin-top: 6px; max-width: 64ch; }
 .hero .row { margin-top: 0; }
 .hero .row > :not(.btn) { margin-top: 14px; }
-/* Start and Resume are the recorder's, at the top of the sidebar on every screen: not twice on this one */
-.hero .row > .btn { display: none; }
+/* by hand: Start meeting, and beside it (under it, when narrow) the shortcut that does the same from any app */
+.start-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; margin-top: 20px; }
+.hero .mode-line { margin-top: 16px; font-size: var(--fs-small); line-height: 18px; }
+.mode-line a { color: var(--text); }
+.shortcut-setting.live { min-width: 0; }
+.shortcut-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.shortcut-text { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--muted); }
+.shortcut-setting.live > p { margin-top: 6px; }
+.shortcut-setting.live .field-error:empty { display: none; }
+.warn-text { color: var(--pill-warning-ink); }
+/* the setup's: the keys large, "Choose a shortcut" beside them */
+.shortcut-setting.setup .keys kbd { min-width: 32px; padding: 3px 8px; font-size: var(--fs-section); line-height: 22px; }
+.setup-shortcut .field { margin-bottom: 4px; }
 .week { grid-column: span 4; padding: 16px 20px; align-self: start; }
 .week h2 { font-size: var(--fs-small); line-height: 18px; color: var(--muted); font-weight: 400; }
 .week { display: flex; flex-direction: column; }
@@ -456,7 +486,8 @@ main { flex: 1; outline: none; }
 .meter .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--control); flex: none; }
 .meter.speech .dot { background: var(--positive); }
 .meter .bar { width: 72px; height: 4px; border-radius: 2px; background: var(--active); overflow: hidden; }
-.meter .fill { display: block; height: 100%; width: 0; background: var(--faint); transition: width .12s linear; }
+/* the level is a scale of the full bar (the compositor moves it; a width would lay the page out again) */
+.meter .fill { display: block; height: 100%; width: 100%; background: var(--faint); transform: scaleX(0); transform-origin: left; transition: transform .12s linear; }
 .meter.speech .fill { background: var(--text); }
 
 /* ----------------------------------------------------------- live: meeting */
@@ -471,6 +502,18 @@ body.live-meeting main { min-height: 0; display: flex; flex-direction: column; }
 .live-head .title .meters { margin-top: 10px; }
 .live-head h1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .live-head .sub { color: var(--muted); display: flex; gap: 8px; align-items: center; min-width: 0; margin-top: 2px; flex-wrap: wrap; }
+/* a meeting started by hand: how long it has recorded, then Pause and Stop, where the eye lands first */
+.live-side { display: flex; align-items: center; gap: 12px 16px; flex-wrap: wrap; }
+.rec-clock { display: inline-flex; align-items: center; gap: 8px; font-size: var(--fs-title); line-height: 32px; font-weight: 500; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+.rec-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--positive); animation: breathe 2.4s ease-in-out infinite; }
+.rec-clock.paused .rec-dot { background: var(--warning); animation: none; }
+.rec-clock.error .rec-dot { background: var(--negative); animation: none; }
+.rec-clock.stopping, .rec-clock.starting { color: var(--muted); }
+.rec-clock.stopping .rec-dot, .rec-clock.starting .rec-dot { background: var(--faint); animation: none; }
+.live-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.live-actions .btn { min-width: 96px; }
+.pane-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
+.pane-tools .btn.small { margin: 0 -2px; }
 .panes { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: var(--gap); }
 .pane { position: relative; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .pane-head {
@@ -478,8 +521,8 @@ body.live-meeting main { min-height: 0; display: flex; flex-direction: column; }
   min-height: 48px; padding: 8px 16px; border-bottom: 1px solid var(--border);
 }
 .pane-head h2 { font-size: var(--fs-body); line-height: 20px; }
-.pane-head label { font-size: var(--fs-small); color: var(--muted); display: flex; gap: 6px; align-items: center; }
-.scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.pane-head label { font-size: var(--fs-small); color: var(--muted); display: flex; gap: 6px; align-items: center; min-height: 28px; cursor: pointer; }
+.scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 
 /* the transcript: the two voices, your lines one tone step apart */
 .transcript { padding: 8px 8px 16px; }
@@ -567,7 +610,7 @@ form.add.compact .title-in { flex-basis: 90px; }
 .badge .icon { width: 13px; height: 13px; color: var(--positive); }
 a.badge:hover { text-decoration: underline; }
 details.evidence { margin-top: 6px; font-size: var(--fs-small); }
-details.evidence summary { cursor: pointer; color: var(--muted); width: max-content; }
+details.evidence summary { cursor: pointer; color: var(--muted); width: max-content; padding: 5px 0; }
 details.evidence p { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 details.evidence blockquote {
   margin: 6px 0 0; padding: 6px 10px; border-radius: var(--radius-control); background: var(--raised);
@@ -630,7 +673,7 @@ form.edit .row input { flex: 1 1 120px; }
 .mrow .dur { text-align: right; color: var(--muted); white-space: nowrap; }
 
 .detail-head { margin-bottom: 20px; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
-.back { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); text-decoration: none; margin-bottom: 8px; }
+.back { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; color: var(--muted); text-decoration: none; margin-bottom: 4px; }
 .back:hover { color: var(--text); }
 .back .icon { width: 16px; height: 16px; }
 .detail-head h1 { overflow-wrap: anywhere; }
@@ -737,7 +780,7 @@ form.edit .row input { flex: 1 1 120px; }
 .chart .xlabels span:first-child { justify-content: flex-start; }
 .chart .xlabels span:last-child { justify-content: flex-end; }
 .history details { margin-top: 12px; }
-.history summary { cursor: pointer; width: max-content; }
+.history summary { cursor: pointer; width: max-content; padding: 5px 0; }
 .bar-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 16px; }
 .bar-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; }
 .bar-list .bar-track { grid-column: 1 / -1; height: 3px; padding-right: 12%; }
@@ -779,7 +822,7 @@ table.data th { color: var(--muted); font-weight: 400; }
 .subnav a:focus-visible { outline: 2px solid var(--hue); outline-offset: -2px; border-radius: var(--radius-chip); }
 .settings-body { padding-bottom: 32px; }
 /* each section is a row: what it is about on the left, its controls in a panel on the right */
-.set-row { display: grid; grid-template-columns: minmax(200px, 3fr) minmax(0, 9fr); gap: var(--gap) 32px; padding: 32px 0; border-top: 1px solid var(--border); }
+.set-row { display: grid; grid-template-columns: minmax(200px, 3fr) minmax(0, 9fr); gap: var(--gap) 32px; padding: 32px 0; border-top: 1px solid var(--border); scroll-margin-top: 8px; }
 .settings-body > div > .set-row:first-child { border-top: 0; }
 /* beside a long panel the section's name and what is on stay in view */
 .set-label { position: sticky; top: 24px; align-self: start; }
@@ -826,7 +869,7 @@ table.data th { color: var(--muted); font-weight: 400; }
 .model .status { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-left: auto; }
 .progress { display: flex; align-items: center; gap: 8px; min-width: 200px; }
 .progress .track { flex: 1; height: 4px; min-width: 90px; border-radius: 2px; background: var(--active); overflow: hidden; }
-.progress .track span { display: block; height: 100%; width: 0; background: var(--text); transition: width .25s; }
+.progress .track span { display: block; height: 100%; width: 100%; background: var(--text); transform: scaleX(0); transform-origin: left; transition: transform .25s; }
 .progress .pct { font-size: var(--fs-small); color: var(--muted); white-space: nowrap; }
 .sub-card { border-radius: var(--radius-card); padding: 16px; margin-top: 12px; background: var(--raised); }
 .sub-card h3 { margin-bottom: 2px; }
@@ -878,7 +921,7 @@ table.data th { color: var(--muted); font-weight: 400; }
 
 /* -------------------------------------------------------------- setup wizard */
 .setup {
-  position: fixed; inset: 0; z-index: 10; overflow-y: auto; background: var(--ground);
+  position: fixed; inset: 0; z-index: 10; overflow-y: auto; overscroll-behavior: contain; background: var(--ground);
   /* the step and its buttons as one column, centred in the window while it is short */
   display: grid; grid-template-columns: 280px minmax(0, 1fr); grid-template-rows: 1fr auto auto 1fr;
 }
@@ -939,8 +982,11 @@ body.raise-toasts .toasts, body.in-setup .toasts { bottom: 76px; }  /* clear of 
 .toast .grow strong { display: block; font-weight: 500; }
 .toast .grow { color: var(--muted); }
 .toast .grow strong, .toast .act { color: var(--text); }
-.toast .x { border: 0; background: none; cursor: pointer; color: var(--muted); padding: 2px; line-height: 1; border-radius: var(--radius-chip); }
-.toast .x:hover { color: var(--text); }
+.toast .x {
+  display: inline-flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; margin: -4px -4px 0 0;
+  border: 0; background: none; cursor: pointer; color: var(--muted); padding: 0; border-radius: var(--radius-control);
+}
+.toast .x:hover { color: var(--text); background: var(--raised); }
 .toast .act { margin-top: 8px; display: inline-flex; }
 dialog { color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card); box-shadow: var(--float-shadow); padding: 0; }  /* taste-skill-ignore: a dialog floats */
 dialog::backdrop { background: rgb(0 0 0 / 40%); }
@@ -951,7 +997,7 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
 .viewer { width: min(900px, calc(100vw - 32px)); max-height: calc(100vh - 48px); }
 .viewer-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
 .viewer-head span { font: 13px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
-.viewer pre { margin: 0; padding: 16px; max-height: calc(100vh - 120px); overflow: auto; font: 13px/20px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.viewer pre { margin: 0; padding: 16px; max-height: calc(100vh - 120px); overflow: auto; overscroll-behavior: contain; font: 13px/20px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .boot { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); }
 .boot.failed { color: var(--negative); padding: 24px; text-align: center; }
 
@@ -996,8 +1042,9 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
     border: 0; border-radius: var(--radius-control); background: var(--secondary); color: var(--text); cursor: pointer;
   }
   .menu-btn .icon { width: 18px; height: 18px; }
+  html { scroll-padding-top: 68px; }  /* clear of the bar at the top */
   .sidebar-sheet {
-    display: none; position: fixed; inset: 53px 0 0 0; z-index: 19; overflow-y: auto;
+    display: none; position: fixed; inset: 53px 0 0 0; z-index: 19; overflow-y: auto; overscroll-behavior: contain;
     padding: 16px; background: var(--ground);
   }
   body.menu-open .sidebar-sheet { display: flex; }
@@ -1057,6 +1104,11 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
   .axis > span.minor { display: none; }  /* 3 or 4 labels, or the last two touch ("8 min10 min") */
   .tabs { gap: 16px; padding: 0 16px; }
   .choices.two, .promises { grid-template-columns: minmax(0, 1fr); }
+  /* the sections wrap onto a second line rather than run off the screen's edge */
+  .subnav { flex-wrap: wrap; column-gap: 16px; overflow-x: visible; }
+  /* Start meeting the width of the screen, under a thumb; the meeting's clock and controls on their own line */
+  .start-row > .btn.huge { flex: 1 1 100%; }
+  .live-side { width: 100%; justify-content: space-between; }
   .email-grid { grid-template-columns: minmax(0, 1fr); gap: 4px; }
   .email-grid .k.top { padding-top: 8px; }
   .setup-card { padding: 24px 20px; }
@@ -1064,6 +1116,24 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
   .setup-top { padding: 16px 16px 0; }
   .setup-foot { padding: 12px 16px 20px; }
   .seg, .tline { grid-template-columns: 40px minmax(0, 1fr); padding: 6px 8px; }
+}
+/* a finger, or a phone's width: every control at least 44 px high (a pointer's 28 px is too small to hit) */
+@media (max-width: 640px), (pointer: coarse) {
+  .btn, .btn.small, .btn.big, .recorder-actions .btn { min-height: 44px; }
+  .btn.icon-only { width: 44px; }
+  .toast .x { width: 44px; height: 44px; margin: -10px -8px -8px 0; }
+  .menu-btn { width: 44px; height: 44px; }
+  .nav a { height: 44px; }
+  .subnav a { padding: 12px 0; }
+  input[type=text], input[type=password], input[type=number], input[type=search], input[type=email],
+  input[type=url], input:not([type]), select { min-height: 44px; }
+  .pane-head label, .view-all, .back { min-height: 44px; }
+  details.evidence summary, .history summary { padding: 12px 0; }
+}
+@media (max-width: 899px) and (pointer: coarse), (max-width: 640px) {
+  .sidebar { min-height: 60px; }
+  .sidebar-sheet { inset: 61px 0 0 0; }
+  html { scroll-padding-top: 76px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before { animation: none !important; transition: none !important; }
