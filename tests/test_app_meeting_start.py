@@ -246,6 +246,36 @@ async def test_an_hour_without_speech_ends_the_meeting_and_says_why(tmp_path: Pa
     await _until(lambda: host.status == "stopped")
 
 
+async def test_speech_right_after_waking_up_isnt_added_to_a_forgotten_meeting(tmp_path: Path) -> None:
+    """A meeting started by hand and forgotten, the lid closed overnight: woken up, the first line can come in
+    before the idle monitor looks again (words cut off when the lid closed, or the next meeting already
+    talking). The night counts as silence, so the meeting ends on it, and that line isn't recorded into it."""
+    wall = Wall()
+    built: list[Assistant] = []
+    base = _clocked(wall, built)
+
+    def asleep(host: AppHost) -> Assistant:
+        a = base(host)
+        a.idle_poll_s = 3600  # the monitor is in the middle of its sleep: only routing can notice
+        return a
+
+    _prefs(tmp_path, "manual")
+    host = _host(tmp_path, factory=asleep, mode="manual")
+    await host.meeting_start()
+    a = built[0]
+    first = a.current
+    await a._route(seg("I'll send the deck to Sam by Friday.", "mic", t=1.0))
+    wall.advance(15 * 60)  # the night: the monitor's clock (time.monotonic) stood still
+    await a._route(seg("Morning! Shall we start the stand-up?", "mic", t=2.0))
+    await a._route(seg("Yes, Priya goes first.", "system", t=5.0))  # still arriving while it winds down
+    await _until(lambda: host.status == "stopped" and host.assistant is None)
+    assert [e["reason"] for e in _events(host, "meeting.ending")] == ["silence"]
+    assert host.state()["notice"]["kind"] == "ended_after_silence" and len(built) == 1
+    assert [s.text for s in first.meeting.segments] == ["I'll send the deck to Sam by Friday."]
+    meeting, _ = load_meeting(list_sessions(host.cfg.data_path)[-1])
+    assert [s.text for s in meeting.segments] == ["I'll send the deck to Sam by Friday."]
+
+
 async def test_a_meeting_ended_by_hand_keeps_its_last_words(cfg: Config) -> None:
     """End meeting (the page, the menu bar) in a meeting started by hand is a stop, in a stop's order: the
     capture closes and its last words are written down before the meeting is wrapped up."""

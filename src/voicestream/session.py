@@ -886,6 +886,14 @@ class Assistant:
         self._check_system_audio(seg)
         if self.manual and self.current is None:
             return  # the meeting started by hand is the only one: words heard without it open no other
+        cur = self.current
+        if (self.manual and cur is not None and not cur.finished and not self._paused and self.end_after_s > 0
+                and self.wall() - cur.last_speech_wall >= self.end_after_s):
+            # just woke up from sleep, before the idle monitor's next look: the meeting has been silent long
+            # enough to end, and this line (words cut off when the lid closed, or the next conversation)
+            # mustn't start the count over. It ends now and the line is dropped, as are those after it
+            self._check_silence(cur)
+            return
         session = await self._ensure_meeting(seg.t_start)
         session.heard()
         session.add_segment(seg)
