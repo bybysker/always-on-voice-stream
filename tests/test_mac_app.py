@@ -1235,11 +1235,17 @@ def test_a_press_toggles_listening_and_plays_a_sound(host: FakeHost, appkit: Rec
         shell.on_hotkey()  # from Carbon's handler, on the main thread: only posts to the host
         assert _wait(lambda s=sound, n=before: len(played) == n + 1 and played[-1] == s)
     assert [c for c in host.calls if c[0] == "meeting_toggle"] == [("meeting_toggle", None)] * 4
-    host._state["state"] = "starting"  # nothing to do: no sound either
+    host._state["state"] = "starting"  # a start is under way: nothing to do, no sound either
     shell.on_hotkey()
     assert _wait(lambda: len([c for c in host.calls if c[0] == "meeting_toggle"]) == 5)
     time.sleep(0.1)
     assert len(played) == 4
+    # the last meeting is being wrapped up and the host could start nothing (it says None): a press meant to
+    # start the next one is not lost in silence — the failure sound, so you know to press again
+    host._state["state"] = "stopping"
+    shell.on_hotkey()
+    assert _wait(lambda: len(played) == 5 and played[-1] == "Basso")
+    del played[-1]
     host._state["state"] = "stopped"
     shell.state = _hk_state("stopped", status="ok", sound=False)  # turned off in Settings
     shell.on_hotkey()
@@ -1821,11 +1827,23 @@ def test_links_reach_the_host_and_say_what_they_did(host: FakeHost, appkit: Reco
     shell.open_url("voicestream://open")
     assert _wait(lambda: ("request_focus", "start") in host.calls)
     host.url_outcome = "nothing"
-    shell.open_url("voicestream://meeting/toggle?key=x")
+    shell.open_url("voicestream://meeting/stop")  # nothing to stop: nothing to say
+    host._state["state"] = "listening"
+    shell.open_url(link)  # a meeting is recorded already: no start was missed
+    host._state["state"] = "starting"
+    shell.open_url(f"voicestream://meeting/toggle?key={host.url_key}")  # one is starting
     shell.on_url_event(Descriptor(None))  # an event without a link: given to the host as nothing
     assert _wait(lambda: host.calls[-1] == ("open_url", ""))
     time.sleep(0.1)
     assert len(sounds) == 3
+    # a start that did nothing where nothing is recorded — the last meeting being wrapped up, the app quitting —:
+    # the failure sound, as the README says, not silence that passes for a meeting being recorded
+    for state, url in (("stopping", link), ("stopped", f"voicestream://meeting/toggle?key={host.url_key}"),
+                       ("error", link)):
+        host._state["state"] = state
+        before = len(sounds)
+        shell.open_url(url)
+        assert _wait(lambda n=before: len(sounds) == n + 1 and sounds[-1] == "Basso"), state
 
 
 def test_the_selftest_link_is_only_asked_about(host: FakeHost, appkit: Recorder) -> None:
