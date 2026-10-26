@@ -11,7 +11,8 @@
 #   verify         codesign --verify --deep --strict, Info.plist, architecture, bundled whisper-server runs
 #   selftest       launch the app with --selftest, take screenshots (window, floating button, menu),
 #                  check the JSON report
-#                  (packaging/mac/check_selftest.py: its own window, its own whisper-server)
+#                  (packaging/mac/check_selftest.py: its own window, its own whisper-server, and an
+#                  update installed end to end from a test DMG of this app as version 99.0.0)
 #   dmg            dist/Voicestream-<version>-arm64.dmg (the app + an Applications shortcut)
 #
 # Needs: Xcode command line tools, cmake, git, and a Python 3.12 with what CI installs (the dev
@@ -32,6 +33,8 @@ export VOICESTREAM_ICON="${VOICESTREAM_ICON:-$ROOT/packaging/mac/build/Voicestre
 APP="$ROOT/dist/Voicestream.app"
 SELFTEST_DIR="${SELFTEST_DIR:-$BUILD/selftest}"
 SELFTEST_SECONDS="${SELFTEST_SECONDS:-30}"
+UPDATE_TEST_DIR="${UPDATE_TEST_DIR:-$BUILD/selftest-update}"
+UPDATE_TEST_VERSION="${UPDATE_TEST_VERSION:-99.0.0}"
 
 say_step() { printf '\n==> %s\n' "$*"; }
 fail() { echo "error: $*" >&2; exit 1; }
@@ -115,19 +118,38 @@ wait_phase() {  # wait_phase <phase> <seconds>: the self-test writes how far it 
   return 1
 }
 
+make_update_dmg() {  # the update the self-test installs: this very app as a newer version, re-signed ad hoc
+  local stage="$UPDATE_TEST_DIR/stage" dmg="$UPDATE_TEST_DIR/Voicestream-$UPDATE_TEST_VERSION-arm64.dmg" attempt
+  rm -rf "$UPDATE_TEST_DIR"; mkdir -p "$stage"
+  ditto "$APP" "$stage/Voicestream.app"
+  plutil -replace CFBundleShortVersionString -string "$UPDATE_TEST_VERSION" "$stage/Voicestream.app/Contents/Info.plist"
+  codesign --force --deep --sign - "$stage/Voicestream.app" >&2  # the Info.plist changed: sign it again
+  codesign --verify --deep --strict "$stage/Voicestream.app" >&2
+  for attempt in 1 2 3; do  # hdiutil on CI runners sometimes fails with "Resource busy"
+    hdiutil create -volname Voicestream -srcfolder "$stage" -ov -format UDZO "$dmg" >&2 && break
+    [[ $attempt == 3 ]] && fail "hdiutil create failed (the update's test DMG)"
+    sleep 5
+  done
+  rm -rf "$stage"
+  echo "$dmg"
+}
+
 step_selftest() {
   say_step "self-test launch (${SELFTEST_SECONDS} s)"
   rm -rf "$SELFTEST_DIR"; mkdir -p "$SELFTEST_DIR"
+  local update_dmg
+  update_dmg="$(make_update_dmg)"
   # run the binary itself, not `open`: the job's own permissions apply and its output stays here.
   # Without the build tree's whisper-server (exported above and by CI): the app must find its own.
-  env -u VOICESTREAM_WHISPER_SERVER \
+  # The update's test DMG is named only to the self-test, which installs it into a copy of the app.
+  env -u VOICESTREAM_WHISPER_SERVER VOICESTREAM_SELFTEST_UPDATE_DMG="$update_dmg" \
     "$APP/Contents/MacOS/Voicestream" --selftest "$SELFTEST_SECONDS" --selftest-report "$SELFTEST_DIR/selftest.json" \
     >"$SELFTEST_DIR/selftest.log" 2>&1 &
   local pid=$! status=0
   if wait_phase window 90; then screencapture -x "$SELFTEST_DIR/window.png" || echo "screenshot failed"; fi
   if wait_phase floating 30; then screencapture -x "$SELFTEST_DIR/floating-button.png" || echo "screenshot failed"; fi
   if wait_phase menu 30; then screencapture -x "$SELFTEST_DIR/menu-bar.png" || echo "screenshot failed"; fi
-  local deadline=$((SECONDS + SELFTEST_SECONDS + 120))
+  local deadline=$((SECONDS + SELFTEST_SECONDS + 420))  # the update's test copies the app twice
   while kill -0 "$pid" 2>/dev/null; do
     if (( SECONDS > deadline )); then echo "the app did not quit: killing it"; kill -9 "$pid" || true; break; fi
     sleep 1
@@ -136,6 +158,7 @@ step_selftest() {
   echo "exit status: $status"
   cat "$SELFTEST_DIR/selftest.log" || true
   # not just the report's "ok": a fallback to the browser passes the checks it runs
+  rm -rf "$UPDATE_TEST_DIR"
   "$PYTHON" packaging/mac/check_selftest.py "$SELFTEST_DIR/selftest.json" "$APP"
   return "$status"
 }

@@ -2,7 +2,8 @@
 
 Whether the first-run setup is done, how meetings start (when you say so, or whenever someone
 speaks), whether to start listening when the app opens, launch at login, the UI language, the
-keyboard shortcut, the floating button, the Spotlight launcher and the window geometry belong to the
+keyboard shortcut, the floating button, the Spotlight launcher, looking for updates and the window
+geometry belong to the
 Mac app, not to the assistant: the command line never reads them, and a config file you share or
 keep in git shouldn't carry them.
 
@@ -141,13 +142,18 @@ class Prefs(BaseModel):
     silence_end_minutes: int = Field(60, ge=0, le=MAX_SILENCE_MINUTES)
     """… and ends by itself after this long without speech, saying why (``0``: never). Time asleep
     counts, time on Pause doesn't, and answering "Keep" starts both counts over."""
+    check_updates: bool = True
+    """Look for a new version on GitHub when the app opens and every six hours (:mod:`.updater`). Only
+    ever an offer: nothing is installed unless you click Install."""
+    update_prereleases: bool = False
+    """Offer pre-releases (betas) too, not only the releases marked as the latest."""
     url_key: str = Field("", exclude=True, repr=False)
     """What a ``voicestream://meeting/start`` link must carry (``?key=``) to start a recording, so that
     another app or a web page can't. Made once (:func:`with_url_key`) and kept in this file only: left
     out of every dump and repr, :func:`save_prefs` writes it on purpose."""
 
     @field_validator("meeting_start", "floating_button", "floating_position", "spotlight_launcher", "call_suggestions",
-                     "silence_ask_minutes", "silence_end_minutes", mode="wrap")
+                     "silence_ask_minutes", "silence_end_minutes", "check_updates", "update_prereleases", mode="wrap")
     @classmethod
     def _saved_or_default(cls, value: Any, handler: ValidatorFunctionWrapHandler, info: ValidationInfo) -> Any:
         """A saved value this version refuses (a newer app's, a hand edit) is the default again, rather
@@ -200,6 +206,8 @@ class PrefsUpdate(BaseModel):
     call_suggestions: bool | None = None
     silence_ask_minutes: Minutes | None = None
     silence_end_minutes: Minutes | None = None
+    check_updates: bool | None = None
+    update_prereleases: bool | None = None
 
 
 NULLABLE = ("window", "hotkey", "floating_position")

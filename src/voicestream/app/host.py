@@ -93,6 +93,7 @@ from .hotkey import TOGGLE
 from .meetings import Meetings
 from .prefs import Prefs, load_prefs, save_prefs, update_prefs, with_url_key
 from .settings import default_config_path, load_app_config
+from .updater import FIRST_CHECK_DELAY_S, Updater, running_app
 
 if TYPE_CHECKING:
     from ..session import Assistant
@@ -387,10 +388,15 @@ class AppHost:
         assistant_factory: Callable[[AppHost], Assistant] | None = None,
         prefs_path: Path | None = None,
         port: int | None = None,
+        update_dir: Path | None = None,
+        auto_updates: bool | None = None,
     ) -> None:
         """``process_setup`` does the app-only process hygiene (umask, PATH, log file); tests turn it
         off. ``assistant_factory`` builds each assistant (tests inject fake sources). ``port`` for the
-        local server: default any free one (the window is given the URL)."""
+        local server: default any free one (the window is given the URL). ``update_dir``: where updates
+        are downloaded and their state kept (default: the app's support folder, with ``process_setup``;
+        else nothing on disk); ``auto_updates``: look for one at launch and every six hours, as the
+        preference says (default: with ``process_setup``, so tests never reach GitHub by themselves)."""
         self.port = port
         self.config_path = Path(config_path).expanduser().absolute() if config_path else default_config_path()
         self.process_setup = process_setup
@@ -498,6 +504,15 @@ class AppHost:
         self._log_handlers: list[tuple[logging.Logger, logging.Handler]] = []
         self._closed: asyncio.Event | None = None
         self._unlisten = self.bus.listen(self._on_event)
+        if update_dir is None and process_setup:
+            from .native_hooks import app_support_dir
+
+            update_dir = app_support_dir() / "updates"
+        self.capabilities["self_update"] = False  # the native shell says when this is the packaged app
+        self.updater = Updater(update_dir, on_change=self._publish_state, busy=self.update_busy)
+        """New versions (:mod:`.updater`): checked, downloaded and installed — never during a meeting."""
+        self._auto_updates = process_setup if auto_updates is None else auto_updates
+        self._update_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------ config
 
@@ -609,6 +624,7 @@ class AppHost:
             "suggestion": dict(self.suggestion) if self.suggestion is not None else None,
             "still_there": dict(self.still_there) if self.still_there is not None else None,
             "notice": dict(self.notice) if self.notice is not None else None,
+            "update": self.updater.view(prefs_on=p.check_updates),
             "prefs": {
                 "listen_on_launch": p.listen_on_launch,
                 "start_at_login": p.start_at_login,
@@ -622,6 +638,8 @@ class AppHost:
                 "call_suggestions": p.call_suggestions,
                 "silence_ask_minutes": p.silence_ask_minutes,
                 "silence_end_minutes": p.silence_end_minutes,
+                "check_updates": p.check_updates,
+                "update_prereleases": p.update_prereleases,
             },
             "hotkey": {**self.hotkey, "recording": self._hotkey_recording is not None},
             "keyboard_layout": dict(self.keyboard_layout),
@@ -636,6 +654,9 @@ class AppHost:
         return lambda: self._state_listeners.remove(fn) if fn in self._state_listeners else None
 
     def _publish_state(self) -> None:
+        updater = getattr(self, "updater", None)
+        if updater is not None:
+            updater.meeting_over()  # an update put off for the meeting is offered again once it is over
         state = self.state()
         self.bus.publish("app.state", **state)
         for fn in list(self._state_listeners):
@@ -1611,6 +1632,43 @@ class AppHost:
                 await dl["task"]
         return stt_models.remove(self.cfg, name)
 
+    # ----------------------------------------------------------------- updates
+
+    def update_busy(self) -> bool:
+        """A meeting is being recorded, or about to be, or wrapped up: no update is installed now (quitting
+        would end it). Always-on listening between meetings is not one: it starts again after the restart."""
+        if self.in_meeting() or self._start_queued or self.status == "stopping":
+            return True
+        return self.prefs.meeting_start == "manual" and self.status in ("starting", "listening", "paused")
+
+    async def update_check(self) -> str:
+        """Check now (Settings → Check now): ``available``, ``up_to_date``, ``offline``, ``rate_limited``, ``error``."""
+        return await self.updater.check(prereleases=self.prefs.update_prereleases, manual=True)
+
+    def update_install(self) -> str:
+        """(On the loop.) Install and restart: the download, its checks and the restart go on in the background;
+        during a meeting it waits for the meeting to end (see :meth:`.updater.Updater.install`)."""
+        return self.updater.install(running_app())
+
+    def update_later(self) -> bool:
+        return self.updater.put_off()
+
+    def update_cancel(self) -> bool:
+        return self.updater.cancel()
+
+    async def _update_loop(self) -> None:
+        """Look for a new version once the setup is done, at launch and every six hours, while the preference
+        is on; quietly (offline, GitHub busy: a later look)."""
+        await asyncio.sleep(FIRST_CHECK_DELAY_S)
+        while not self._closing:
+            p = self.prefs
+            if p.setup_done and p.check_updates and self.updater.due():
+                try:
+                    await self.updater.check(prereleases=p.update_prereleases)
+                except Exception:  # a failed look must not end the looking
+                    log.exception("update: the check failed")
+            await asyncio.sleep(60.0)
+
     # ---------------------------------------------------------------- lifecycle
 
     def _install_logging(self) -> None:
@@ -1652,6 +1710,8 @@ class AppHost:
                 watch(lambda: loop.call_soon_threadsafe(self.audio_devices_changed))
             except Exception as exc:  # noqa: BLE001 - the periodic look still finds the microphone
                 log.debug("no audio device notifications: %s", exc)
+        if self._auto_updates:
+            self._update_task = asyncio.ensure_future(self._update_loop())
         if not (auto_listen and await self.listen_on_launch()):
             self._publish_state()
         return self.url
@@ -1676,6 +1736,9 @@ class AppHost:
         forced with ``force``), downloads and the server. Safe to call again to escalate."""
         self._closing = True  # a restart in flight (settings, pending after a meeting) must not start a new one
         self._take_back_start()
+        if self._update_task is not None:
+            self._update_task.cancel()
+        self.updater.cancel()  # a download under way stops (the next one starts over)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + (0 if force else GRACEFUL_SHUTDOWN_S)
         if self._run_task is not None:

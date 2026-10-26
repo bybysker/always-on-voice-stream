@@ -292,7 +292,15 @@ def test_build_script_prerequisites_match_ci() -> None:
 def test_selftest_launches_without_the_build_trees_whisper_server() -> None:
     script = (MAC / "build.sh").read_text(encoding="utf-8")
     body = script[script.index("step_selftest() {"):script.index("step_dmg() {")]
-    assert 'env -u VOICESTREAM_WHISPER_SERVER \\\n    "$APP/Contents/MacOS/Voicestream" --selftest' in body
+    assert ('env -u VOICESTREAM_WHISPER_SERVER VOICESTREAM_SELFTEST_UPDATE_DMG="$update_dmg" \\\n'
+            '    "$APP/Contents/MacOS/Voicestream" --selftest') in body
+    # the update the self-test installs is this app as a newer version, re-signed, in a DMG made here
+    assert 'update_dmg="$(make_update_dmg)"' in body and 'rm -rf "$UPDATE_TEST_DIR"' in body
+    maker = script[script.index("make_update_dmg() {"):script.index("step_selftest() {")]
+    for step in ('plutil -replace CFBundleShortVersionString -string "$UPDATE_TEST_VERSION"',
+                 'codesign --force --deep --sign - "$stage/Voicestream.app"', "codesign --verify --deep --strict",
+                 'hdiutil create -volname Voicestream -srcfolder "$stage"'):
+        assert step in maker
     assert 'check_selftest.py "$SELFTEST_DIR/selftest.json" "$APP"' in body
     # a screenshot at each phase the self-test writes, in the order it writes them (native.py MacShell._selftest)
     phases = [line.split("wait_phase ")[1].split()[0] for line in body.splitlines() if line.strip().startswith("if wait_phase")]

@@ -1194,6 +1194,12 @@ class Updater:
 # --------------------------------------------------------------------------- self-test
 
 
+SELFTEST_DMG_ENV = "VOICESTREAM_SELFTEST_UPDATE_DMG"
+"""The test DMG ``build.sh selftest`` makes; read by the packaged app's self-test only (never by an update)."""
+SELFTEST_CHECKS = ("update_check", "update_digest_refused", "update_download_verified", "update_bundle_valid",
+                   "update_swap")
+
+
 class _Feed(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
