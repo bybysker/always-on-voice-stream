@@ -536,7 +536,9 @@ def test_the_helper_is_started_in_its_own_session(tmp_path: Path, monkeypatch: p
                             "/d.dmg", "/r", "/l", "1"]
     assert seen["start_new_session"] is True and seen["close_fds"] is True and seen["stdin"] == subprocess.DEVNULL
     script = upd.write_helper(tmp_path / "support")
-    assert script.read_text() == upd.HELPER and stat.S_IMODE(script.stat().st_mode) == 0o700
+    assert script.read_text() == upd.HELPER
+    if os.name == "posix":  # Windows has no such modes (the tests run there too)
+        assert stat.S_IMODE(script.stat().st_mode) == 0o700
 
 
 # ------------------------------------------------------------------- the host's updater
