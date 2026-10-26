@@ -217,7 +217,8 @@ class UIApp:
             self.built.append(a)
             return a
 
-        self.host = AppHost(self.config_path, process_setup=False, prefs_path=self.prefs_path, assistant_factory=factory)
+        self.host = AppHost(self.config_path, process_setup=False, prefs_path=self.prefs_path, assistant_factory=factory,
+                            update_dir=root / "updates")  # never the real support folder
         self._say_start_queued()
         self.url = self.host.run_in_thread()
         self.token = self.host.token
@@ -2885,3 +2886,180 @@ def test_google_bridge_script_route(tmp_path: Path) -> None:
         assert c.get("/api/google-bridge").status_code == 401
         r = c.get("/api/google-bridge", headers={TOKEN_HEADER: "tok-123"})
     assert r.status_code == 200 and "function doPost(e)" in r.json()["script"]
+
+
+# ----------------------------------------------------------------------------- updates
+
+
+def _update_feed(app: UIApp, notes: str) -> Any:
+    """A local stand-in for GitHub's releases API (tests/test_app_updater.py ``Feed``) offering 0.4.0, which
+    this app checks instead of GitHub; it says it can install (as the packaged Mac app does)."""
+    from test_app_updater import Feed
+
+    feed = Feed()
+    feed.publish("/latest", feed.release("v0.4.0", body=notes))
+    up = app.host.updater
+    up.feed, up.local, up.can_install = feed.base + "/latest", True, True
+    up.machine.current = up.machine.current.__class__("0.3.0", (0, 3, 0))
+    app.host.capabilities["self_update"] = True
+    return feed
+
+
+UPDATE_NOTES = ("Intro.\n\n### New in this version\n\n- **Updates** install from inside the app.\n"
+                "- <img src=x onerror=\"document.title='owned'\"> stays text.\n\n### Install\n\n- the old way\n")
+
+
+def test_an_update_is_a_banner_with_what_is_new_and_later(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """A newer version shows inline on every screen — never a dialog, never taking the focus — with what is
+    new in it as text (release notes come from the internet: markup in them stays words), Install and restart,
+    and Later, which puts it away for that version."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    _mac_features(app)
+    feed = _update_feed(app, UPDATE_NOTES)
+    try:
+        p = open_page(app)
+        pg = p.page
+        expect(pg.locator("#live-start")).to_be_focused()
+        assert app.host.call(app.host.update_check()).result(10) == "available"
+        banner = pg.locator("#notices .notice.update")
+        expect(banner).to_contain_text("Voicestream 0.4.0 is available.")
+        expect(banner).to_contain_text("Voicestream restarts by itself")
+        notes = banner.locator("#update-notes")
+        expect(notes.locator(".label")).to_have_text("New in this version")
+        expect(notes.locator("li")).to_have_text(["Updates install from inside the app.",
+                                                  "<img src=x onerror=\"document.title='owned'\"> stays text."])
+        expect(notes).not_to_contain_text("the old way")
+        assert notes.locator("img").count() == 0 and "owned" not in pg.title()
+        expect(pg.locator("#update-install")).to_have_text("Install and restart")
+        expect(pg.locator("#live-start")).to_be_focused()  # the banner never takes the focus
+        expect(pg.locator("#ask")).to_be_hidden()
+        p.shot("banner-update")
+        pg.click("nav a[href='#/meetings']")
+        expect(banner).to_be_visible()  # every screen
+        pg.click("#update-later")
+        expect(banner).to_have_count(0)
+        assert app.host.updater.later == "0.4.0" and app.host.updater.machine.phase == "available"
+        # a check that finds it again doesn't bring it back: Later was for this version
+        assert app.host.call(app.host.update_check()).result(10) == "available"
+        pg.wait_for_timeout(300)
+        expect(banner).to_have_count(0)
+    finally:
+        feed.close()
+
+
+def test_an_update_waits_for_the_meeting_to_end(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """Install and restart during a meeting never stops it: the update downloads, says it waits, and once the
+    meeting ends offers to install now. Here (not the packaged app) the install then says why it can't."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    _mac_features(app)
+    feed = _update_feed(app, UPDATE_NOTES)
+    try:
+        p = open_page(app)
+        pg = p.page
+        pg.click("#live-start")
+        _wait_state(app, "listening")
+        app.host.call(app.host.update_check()).result(10)
+        banner = pg.locator("#notices .notice.update")
+        expect(banner).to_contain_text("Voicestream 0.4.0 is available.")
+        pg.click("#update-install")
+        expect(banner).to_contain_text("It will be offered again once the meeting ends: nothing is installed during a meeting.")
+        expect(pg.locator("#update-install")).to_have_count(0)
+        _wait(lambda: app.host.updater.machine.phase == "ready")  # downloaded meanwhile, and verified
+        assert app.host.status == "listening" and app.host.in_meeting()  # the meeting goes on
+        p.shot("banner-update-waits")
+
+        pg.click("#live-stop")
+        _wait_state(app, "stopped")
+        expect(banner).to_contain_text("The meeting is over: Voicestream 0.4.0 can be installed now.")
+        pg.click("#update-install")
+        expect(banner).to_contain_text("The update wasn’t installed. Only the Voicestream app for Mac installs updates by itself")
+        expect(pg.locator("#update-later")).to_be_visible()
+        assert app.host.updater.machine.error_code == "not_packaged"
+    finally:
+        feed.close()
+
+
+def test_update_banners_in_french_and_app_management(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """The banner in French; when macOS doesn't let the app replace itself (App Management), the update is
+    open in Finder and the banner says how to finish by hand, with no Try again that would fail the same way."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    _mac_features(app)
+    feed = _update_feed(app, UPDATE_NOTES)
+    try:
+        p = open_page(app, locale="fr-FR")
+        pg = p.page
+        app.host.call(app.host.update_check()).result(10)
+        banner = pg.locator("#notices .notice.update")
+        expect(banner).to_contain_text("Voicestream 0.4.0 est disponible.")
+        expect(banner.locator("#update-notes .label")).to_have_text("Nouveautés de cette version")
+        expect(pg.locator("#update-install")).to_have_text("Installer et redémarrer")
+        expect(pg.locator("#update-later")).to_have_text("Plus tard")
+
+        def blocked() -> None:
+            app.host.updater._failed("macOS refuses changes", "app_management")
+
+        assert app.host.loop is not None
+        app.host.loop.call_soon_threadsafe(blocked)
+        expect(banner).to_contain_text("La mise à jour n’a pas été installée.")
+        expect(banner).to_contain_text("faites glisser Voicestream sur Applications, choisissez Remplacer")
+        expect(pg.locator("#update-install")).to_have_count(0)
+        p.shot("banner-update-app-management-fr")
+        keys = pg.evaluate("[Object.keys(STRINGS.en), Object.keys(STRINGS.fr)].map((ks) => ks.filter((k) => k.startsWith('upd.')).sort())")
+        assert keys[0] and keys[0] == keys[1]
+    finally:
+        feed.close()
+
+
+def test_the_updates_section_in_settings(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """Settings → General → Updates: this version, the automatic check (saved with Save, as the rest), beta
+    versions, Check now with what it found, and when it last looked."""
+    from playwright.sync_api import expect
+
+    from voicestream.app.native import WINDOW_SIZE
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    _mac_features(app)
+    feed = _update_feed(app, UPDATE_NOTES)
+    try:
+        p = open_page(app, size=WINDOW_SIZE)
+        pg = p.page
+        pg.click("nav a[href='#/settings']")
+        section = pg.locator("#set-updates")
+        expect(section.locator("h2")).to_have_text("Updates")
+        expect(section.locator("#update-current")).to_have_text("This is Voicestream 0.3.0.")
+        expect(section.locator("#update-last")).to_have_text("Not checked yet.")
+        expect(pg.locator("#p-check_updates")).to_be_checked()
+        expect(pg.locator("#p-update_prereleases")).not_to_be_checked()
+        section.scroll_into_view_if_needed()
+        pg.click("#update-check")
+        expect(pg.locator("#update-check-result")).to_have_text("Voicestream 0.4.0 is available.")
+        expect(section.locator("#update-last")).to_contain_text("Last checked on")
+        expect(pg.locator("#notices .notice.update")).to_contain_text("Voicestream 0.4.0 is available.")
+        p.shot("settings-updates")
+
+        feed.publish("/latest", feed.release("v0.3.0"), etag='"v2"')  # nothing newer any more
+        pg.click("#update-check")
+        expect(pg.locator("#update-check-result")).to_have_text("Voicestream is up to date.")
+        expect(pg.locator("#notices .notice.update")).to_have_count(0)
+        app.host.updater.feed = "http://127.0.0.1:9/latest"  # nobody answers: offline, said plainly
+        pg.click("#update-check")
+        expect(pg.locator("#update-check-result")).to_have_text("GitHub can’t be reached: you seem to be offline.")
+
+        pg.click("label[for=p-check_updates]")
+        pg.click("#save-settings")
+        expect(pg.locator(".toast", has_text="Your settings are saved").last).to_be_visible()
+        _wait(lambda: app.host.prefs.check_updates is False)
+        pg.evaluate("applyLanguage('fr')")
+        pg.click("nav a[href='#/settings']")
+        expect(pg.locator("#set-updates h2")).to_have_text("Mises à jour")
+        expect(pg.locator("#update-current")).to_have_text("Vous utilisez Voicestream 0.3.0.")
+        expect(pg.locator("#update-check")).to_have_text("Rechercher maintenant")
+        expect(pg.locator("#p-check_updates")).not_to_be_checked()
+    finally:
+        feed.close()

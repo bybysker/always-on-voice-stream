@@ -389,6 +389,16 @@ main { flex: 1; outline: none; }
 .notice.warn > .icon, .notice.warn .msg { color: var(--pill-warning-ink); }
 .notice.error { background: var(--pill-negative-bg); border-color: transparent; }
 .notice.error > .icon, .notice.error .msg { color: var(--pill-negative-ink); }
+/* an update on offer: what is new in it under its title, as text (release notes come from the internet) */
+.notice.update .progress { flex: 1 1 200px; }
+.update-notes { margin-top: 8px; max-height: 9.5em; overflow-y: auto; color: var(--muted); font-size: var(--fs-small); line-height: 18px; }
+.update-notes .label { display: block; color: var(--text); font-weight: 500; margin-bottom: 2px; }
+.update-notes ul { margin: 0; padding-left: 18px; }
+.update-notes p { margin: 4px 0 0; }
+.update-current { margin: 0 0 12px; }
+.update-check { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+#update-check-result, #update-last { color: var(--muted); }
+#update-last { margin: 8px 0 0; font-size: var(--fs-small); }
 
 /* ------------------------------------------------------------------- cards */
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card); }

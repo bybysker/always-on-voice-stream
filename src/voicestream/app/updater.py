@@ -102,7 +102,12 @@ Phase = Literal["idle", "available", "downloading", "ready", "installing", "fail
 
 
 class UpdateError(RuntimeError):
-    """A step of the update could not be done (the message is for the person, and the log)."""
+    """A step of the update could not be done: the message for the log, and a ``code`` the window says in
+    your language (``upd.err.<code>`` in app.js)."""
+
+    def __init__(self, message: str, code: str = "unexpected") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class AppManagementBlocked(UpdateError):
@@ -350,7 +355,7 @@ class _Redirects(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
         if not allowed_url(newurl, local=self.local):
-            raise UpdateError(f"the download was sent somewhere unexpected ({urlsplit(newurl).hostname})")
+            raise UpdateError(f"the download was sent somewhere unexpected ({urlsplit(newurl).hostname})", "bad_source")
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new is not None and urlsplit(newurl).hostname != urlsplit(req.full_url).hostname:
             new.remove_header("If-none-match")
@@ -431,11 +436,11 @@ def download(asset: Asset, folder: Path, *, on_progress: Callable[[int, int], No
     said; returns the file. Refused — nothing downloaded — when the API gave no digest; a file that
     doesn't match is deleted. ``cancel`` stops it between chunks."""
     if asset.sha256 is None:
-        raise UpdateError("GitHub gives no checksum for this download, so it can't be checked: not installed")
+        raise UpdateError("GitHub gives no checksum for this download, so it can't be checked: not installed", "no_digest")
     if not 0 < asset.size <= MAX_DMG_BYTES:
-        raise UpdateError(f"the download's size is not believable ({asset.size} bytes)")
+        raise UpdateError(f"the download's size is not believable ({asset.size} bytes)", "bad_size")
     if not allowed_url(asset.url, local=local) or Path(asset.name).name != asset.name or not asset.name.endswith(".dmg"):
-        raise UpdateError("the download is not where Voicestream's releases are")
+        raise UpdateError("the download is not where Voicestream's releases are", "bad_source")
     folder.mkdir(parents=True, exist_ok=True)
     final, part = folder / asset.name, folder / (asset.name + ".part")
     digest = hashlib.sha256()
@@ -446,16 +451,16 @@ def download(asset: Asset, folder: Path, *, on_progress: Callable[[int, int], No
         with _opener(local).open(req, timeout=timeout) as res, open(part, "wb") as out:
             length = res.headers.get("Content-Length")
             if length is not None and length.isdigit() and int(length) != asset.size:
-                raise UpdateError(f"the download's size ({length} bytes) is not the release's ({asset.size})")
+                raise UpdateError(f"the download's size ({length} bytes) is not the release's ({asset.size})", "size_mismatch")
             while True:
                 if cancel is not None and cancel.is_set():
-                    raise UpdateError("cancelled")
+                    raise UpdateError("cancelled", "cancelled")
                 chunk = res.read(CHUNK)
                 if not chunk:
                     break
                 done += len(chunk)
                 if done > asset.size:
-                    raise UpdateError("the download is larger than the release says")
+                    raise UpdateError("the download is larger than the release says", "size_mismatch")
                 digest.update(chunk)
                 out.write(chunk)
                 if on_progress is not None:
@@ -467,14 +472,14 @@ def download(asset: Asset, folder: Path, *, on_progress: Callable[[int, int], No
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         with contextlib.suppress(OSError):
             part.unlink()
-        raise UpdateError(f"the download failed: {getattr(exc, 'reason', exc)}") from None
+        raise UpdateError(f"the download failed: {getattr(exc, 'reason', exc)}", "download_failed") from None
     if done != asset.size:
         part.unlink(missing_ok=True)
-        raise UpdateError(f"the download is incomplete ({done} of {asset.size} bytes)")
+        raise UpdateError(f"the download is incomplete ({done} of {asset.size} bytes)", "size_mismatch")
     if not hmac.compare_digest(digest.hexdigest(), asset.sha256):
         part.unlink(missing_ok=True)
         log.warning("update: %s does not match its SHA-256: deleted", asset.name)
-        raise UpdateError("the download doesn't match the release's checksum: it was deleted, nothing was installed")
+        raise UpdateError("the download doesn't match the release's checksum: it was deleted, nothing was installed", "digest_mismatch")
     os.replace(part, final)
     log.info("update: %s downloaded, size and SHA-256 match", asset.name)
     return final
@@ -508,18 +513,16 @@ def running_app() -> Path | None:
     return app if app.suffix == ".app" else None
 
 
-def install_problem(app: Path | None) -> str | None:
-    """Why this copy of Voicestream can't replace itself, in words, or ``None``."""
+def install_problem(app: Path | None) -> tuple[str, str] | None:
+    """Why this copy of Voicestream can't replace itself — ``(code, words)`` — or ``None``."""
     if app is None:
-        return "Updates install by themselves only in the Voicestream app for Mac: download the new version instead."
+        return "not_packaged", "updates install by themselves only in the Voicestream app for Mac"
     if "AppTranslocation" in app.parts:
-        return ("Voicestream is running from a temporary copy macOS made of the download: drag it to the "
-                "Applications folder, open it from there, then install the update.")
+        return "translocated", "Voicestream runs from a temporary copy macOS made of the download (App Translocation)"
     if app.parts[:2] == ("/", "Volumes") or _read_only(app):
-        return "Voicestream is running from its disk image: drag it to the Applications folder and open it from there."
+        return "on_dmg", "Voicestream runs from its disk image"
     if not os.access(app.parent, os.W_OK) or not os.access(app, os.W_OK):
-        return (f"Voicestream can't replace itself in {app.parent} (you can't write there): "
-                "download the new version and install it by hand.")
+        return "not_writable", f"Voicestream can't replace itself in {app.parent} (no permission to write there)"
     return None
 
 
@@ -564,14 +567,14 @@ def mount(dmg: Path, root: Path, run: Run = _run) -> Path:
     proc = run(["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", "-mountrandom", str(root),
                 "-plist", str(dmg)])
     if proc.returncode != 0:
-        raise UpdateError(f"the update's disk image could not be opened: {proc.stderr.strip()[:300]}")
+        raise UpdateError(f"the update's disk image could not be opened: {proc.stderr.strip()[:300]}", "mount_failed")
     try:
         info = plistlib.loads(proc.stdout.encode("utf-8"))
     except (plistlib.InvalidFileException, ValueError) as exc:
-        raise UpdateError(f"hdiutil said something unexpected: {exc}") from None
+        raise UpdateError(f"hdiutil said something unexpected: {exc}", "mount_failed") from None
     points = [e.get("mount-point") for e in info.get("system-entities") or [] if e.get("mount-point")]
     if not points:
-        raise UpdateError("the update's disk image has no volume")
+        raise UpdateError("the update's disk image has no volume", "mount_failed")
     return Path(points[0])
 
 
@@ -647,7 +650,7 @@ def stage(src: Path, dest: Path, run: Run = _run) -> Path:
     proc = run(["/usr/bin/ditto", "--noqtn", str(src), str(dest)], 900.0)
     if proc.returncode != 0:
         shutil.rmtree(dest, ignore_errors=True)
-        raise UpdateError(f"the new version could not be copied next to the app: {proc.stderr.strip()[:300]}")
+        raise UpdateError(f"the new version could not be copied next to the app: {proc.stderr.strip()[:300]}", "stage_failed")
     return dest
 
 
@@ -677,7 +680,7 @@ rm=/bin/rm
 open=/usr/bin/open
 xattr=/usr/bin/xattr
 codesign=/usr/bin/codesign
-old="$(dirname "$app")/.$(basename "$app" .app)-previous-$$.app"
+old="${app%/*}/.Voicestream-previous-$$.app"  # the same folder: moving it back is a rename too
 
 say() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$log"; }
 finish() { printf '%s\n' "$1" >"$result"; say "$1"; }
@@ -686,8 +689,8 @@ restore() {
     "$mv" "$old" "$app" || say "could not put the previous version back: it is at $old"
   fi
 }
-give_up() {
-  finish "failed: $1"
+give_up() {  # give_up <code> <what happened>
+  finish "failed: $1: $2"
   restore
   if [ -e "$new" ]; then "$rm" -rf "$new"; fi
   if [ "$relaunch" = 1 ]; then
@@ -700,7 +703,7 @@ give_up() {
 waited=0
 while kill -0 "$pid" 2>/dev/null; do
   if [ "$waited" -ge __WAIT__ ]; then
-    finish "failed: Voicestream did not quit"
+    finish "failed: not_quit: Voicestream did not quit"
     "$rm" -rf "$new"
     exit 1
   fi
@@ -708,13 +711,13 @@ while kill -0 "$pid" 2>/dev/null; do
   waited=$((waited + 1))
 done
 say "Voicestream quit: replacing $app"
-if [ ! -d "$new" ]; then give_up "the new version is missing"; fi
-if ! "$mv" "$app" "$old"; then give_up "macOS did not let the old version be moved (App Management?)"; fi
-if ! "$mv" "$new" "$app"; then give_up "the new version could not be moved in place"; fi
+if [ ! -d "$new" ]; then give_up missing "the new version is missing"; fi
+if ! "$mv" "$app" "$old"; then give_up app_management "macOS did not let the old version be moved"; fi
+if ! "$mv" "$new" "$app"; then give_up move_failed "the new version could not be moved in place"; fi
 "$xattr" -dr com.apple.quarantine "$app" 2>/dev/null || true
 if ! "$codesign" --verify --deep --strict "$app" >>"$log" 2>&1; then
   "$rm" -rf "$app"
-  give_up "the new version's signature broke on the way"
+  give_up bundle_invalid "the new version's signature broke on the way"
 fi
 "$rm" -rf "$old" || say "could not remove the previous version at $old"
 finish "installed"
@@ -778,6 +781,8 @@ class UpdateMachine:
     phase: Phase = "idle"
     release: Release | None = None
     error: str | None = None
+    error_code: str | None = None
+    """What :attr:`error` is about, for the window's words (``digest_mismatch``, ``app_management``…)."""
     progress: tuple[int, int] | None = None
     deferred: bool = False
     offer: bool = False
@@ -786,10 +791,10 @@ class UpdateMachine:
     def found(self, release: Release | None) -> bool:
         """A check's answer; returns whether the state changed."""
         if release is None or release.version <= self.current:
-            if self.phase in ("available", "failed") and (release is None or self.release is None
-                                                          or release.version >= self.release.version):
-                # nothing newer than this version any more (pulled, or this is it): nothing to offer
-                self.phase, self.release, self.error, self.deferred, self.offer = "idle", None, None, False, False
+            if self.phase in ("available", "failed"):
+                # nothing newer than this version any more (the release was pulled): nothing to offer
+                self.phase, self.release, self.error, self.error_code = "idle", None, None, None
+                self.deferred = self.offer = False
                 return True
             return False
         if self.release is not None and release.version == self.release.version:
@@ -798,14 +803,15 @@ class UpdateMachine:
             return False
         if self.phase in ("downloading", "installing"):
             return False  # the one under way finishes first; the next check offers the newer one
-        self.phase, self.release, self.error, self.progress = "available", release, None, None
+        self.phase, self.release, self.error, self.error_code, self.progress = "available", release, None, None, None
         self.deferred = self.offer = False
         return True
 
     def start_download(self) -> None:
         if self.release is None or self.phase not in ("available", "failed", "ready"):
             raise InvalidTransition(f"nothing to download ({self.phase})")
-        self.phase, self.error, self.progress = "downloading", None, (0, self.release.asset.size if self.release.asset else 0)
+        self.phase, self.error, self.error_code = "downloading", None, None
+        self.progress = (0, self.release.asset.size if self.release.asset else 0)
 
     def advance(self, done: int, total: int) -> None:
         if self.phase == "downloading":
@@ -834,15 +840,16 @@ class UpdateMachine:
             raise InvalidTransition(f"not downloaded ({self.phase})")
         self.phase, self.deferred, self.offer = "installing", False, False
 
-    def fail(self, error: str) -> None:
+    def fail(self, error: str, code: str = "unexpected") -> None:
         if self.release is None:
             raise InvalidTransition("no update to fail")
-        self.phase, self.error, self.progress, self.deferred = "failed", error, None, False
+        self.phase, self.error, self.error_code, self.progress, self.deferred = "failed", error, code, None, False
 
     def view(self) -> dict[str, Any]:
         done, total = self.progress or (0, 0)
         return {
-            "current": str(self.current), "phase": self.phase, "error": self.error, "deferred": self.deferred,
+            "current": str(self.current), "phase": self.phase, "error": self.error, "error_code": self.error_code,
+            "deferred": self.deferred,
             "offer": self.offer, "release": self.release.as_dict() if self.release else None,
             "progress": {"done": done, "total": total} if self.progress else None,
         }  # fmt: skip
@@ -919,8 +926,9 @@ class Updater:
             text = result.read_text(encoding="utf-8").strip()[:300]
             result.unlink()
             if text:
-                kind = "installed" if text == "installed" else "failed"
-                self.outcome = {"kind": kind, "detail": None if kind == "installed" else text.removeprefix("failed: ")}
+                # "installed", or "failed: <code>: <what happened>" (HELPER's give_up)
+                code = text.removeprefix("failed: ").split(":", 1)[0].strip() if text != "installed" else None
+                self.outcome = {"kind": "installed" if code is None else "failed", "detail": code}
                 log.info("update: the helper says %s", text)
         self._tidy()
 
@@ -1080,9 +1088,9 @@ class Updater:
         assert m.release is not None
         asset = m.release.asset
         if asset is None:
-            raise UpdateError(f"the release has no {asset_name(m.release.version)} to download")
+            raise UpdateError(f"the release has no {asset_name(m.release.version)} to download", "no_asset")
         if self.folder is None:
-            raise UpdateError("there is nowhere to download the update to")
+            raise UpdateError("there is nowhere to download the update to", "unexpected")
         dmg = self.folder / asset.name
         if m.phase == "ready" and self.dmg == dmg and await asyncio.to_thread(verify_file, dmg, asset):
             return dmg
@@ -1112,15 +1120,17 @@ class Updater:
     async def _download_only(self) -> None:
         try:
             await self._fetch()
-        except (UpdateError, OSError) as exc:
-            self._failed(str(exc))
+        except UpdateError as exc:
+            self._failed(str(exc), exc.code)
+        except OSError as exc:
+            self._failed(f"the download could not be saved: {exc}", "download_failed")
 
-    def _failed(self, message: str) -> None:
+    def _failed(self, message: str, code: str = "unexpected") -> None:
         log.warning("update: %s", message)
         if self.machine.release is not None:
             deferred = self.machine.deferred
-            self.machine.fail(message)
-            self.machine.deferred = deferred and message != "cancelled"
+            self.machine.fail(message, code)
+            self.machine.deferred = deferred and code != "cancelled"
         self._changed()
 
     async def _install(self, app: Path | None) -> None:
@@ -1130,7 +1140,7 @@ class Updater:
         try:
             problem = install_problem(app) if self.can_install else install_problem(None)
             if problem:
-                raise UpdateError(problem)
+                raise UpdateError(problem[1], problem[0])
             assert app is not None
             dmg = await self._fetch()
             if self.busy():  # a meeting started during the download
@@ -1143,7 +1153,7 @@ class Updater:
                 # the swap would fail too: the verified update, open in Finder, is one drag away instead
                 log.warning("update: macOS refuses changes to %s (App Management): opening the update in Finder", app)
                 open_in_finder(dmg)
-                self._failed("app_management")
+                self._failed("macOS refuses changes to the app's bundle (App Management)", "app_management")
                 return
             if self.busy():
                 await asyncio.to_thread(shutil.rmtree, staged, True)
@@ -1151,7 +1161,7 @@ class Updater:
                 self._changed()
                 return
             if self.quit_app is None:
-                raise UpdateError("Voicestream can't restart itself here")
+                raise UpdateError("Voicestream can't restart itself here", "cannot_restart")
             assert self.folder is not None
             script = write_helper(self.folder)
             start_helper(script, pid=os.getpid(), app=app, new=staged, dmg=dmg, result=self.folder / "result",
@@ -1161,8 +1171,8 @@ class Updater:
             log.info("update: %s is ready, quitting so the helper can put it in place", version)
             self.quit_app()
         except UpdateError as exc:
-            self._failed(str(exc))
-        except Exception as exc:
+            self._failed(str(exc), exc.code)
+        except Exception as exc:  # never a broken app: say it and leave everything as it was
             log.exception("update: failed")
             self._failed(f"{type(exc).__name__}: {exc}")
 
@@ -1171,20 +1181,20 @@ class Updater:
         :class:`AppManagementBlocked` first when macOS won't let the app change its own bundle."""
         assert self.folder is not None
         if app_management_blocked(app):
-            raise AppManagementBlocked("app_management")
+            raise AppManagementBlocked("macOS refuses changes to the app's bundle", "app_management")
         volume = mount(dmg, self.folder / "mnt", run)
         log.info("update: mounted the update at %s", volume)
         try:
             new = volume / f"{APP_NAME}.app"
             problems = bundle_problems(new, version, run)
             if problems:
-                raise UpdateError("the update's app failed its checks: " + "; ".join(problems))
+                raise UpdateError("the update's app failed its checks: " + "; ".join(problems), "bundle_invalid")
             log.info("update: the new app is Voicestream %s, signed, arm64", version)
             staged = stage(new, staged_path(app, version), run)
             problems = bundle_problems(staged, version, run)
             if problems:
                 shutil.rmtree(staged, ignore_errors=True)
-                raise UpdateError("the copy of the new app failed its checks: " + "; ".join(problems))
+                raise UpdateError("the copy of the new app failed its checks: " + "; ".join(problems), "bundle_invalid")
             log.info("update: staged at %s", staged)
             return staged
         finally:

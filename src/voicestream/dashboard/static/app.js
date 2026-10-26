@@ -564,6 +564,7 @@ function setApp(st) {
   renderTopbar();
   renderNotices();
   renderNav();
+  refreshUpdateSettings();
   if (S.route.name === 'live') renderLive();
 }
 
@@ -866,6 +867,8 @@ function renderNotices() {
         () => appNoticeBanner(n)]);
     }
   }
+  const upd = a && a.setup_done && !S.setup && a.update ? updateBanner(a.update) : null;
+  if (upd) out.push(upd);
   if (a && a.restart_pending) {
     out.push(['restart', () => notice('info', 'info', t('notice.restart_pending'),
       btn(t('notice.apply_now'), { cls: 'small', id: 'apply-now', onclick: (e) => applyNow(e.currentTarget) }))]);
@@ -879,6 +882,8 @@ function renderNotices() {
   });
   want.forEach((el, i) => { if (box.children[i] !== el) box.insertBefore(el, box.children[i] || null); });
   while (box.children.length > want.length) box.lastElementChild.remove();
+  const bar = $('update-progress');  // the download's progress, in place: the banner itself stays
+  if (bar && a && a.update) updateProgressBar(bar, a.update.progress);
 }
 
 const NOTICE_KINDS = ['ended_after_silence', 'link_refused'];
@@ -947,6 +952,153 @@ function appNoticeBanner(n) {
     onclick: () => { answer('notice/dismiss', null); } }, t('live.open_notes'));
   return notice('info', 'checkCircle', h('span', {}, h('strong', {}, t('notice.silence_title')), ' ', text),
     h('div', { class: 'notice-actions' }, open, ok));
+}
+
+// ------------------------------------------------------------------------ updates
+
+/** The update's banner, or nothing: a newer Voicestream on offer (what is new in it, Install and restart /
+ *  Later), its download, a meeting it waits for, what went wrong, and what the last restart for an update
+ *  did. Release notes come from the internet: they are only ever text here, never markup. Later hides it
+ *  for that version (the menu bar and Settings still offer it); a meeting never sees an Install button. */
+function updateBanner(u) {
+  const r = u.release, out = u.outcome;
+  if (out) return [updateKey(u), () => updateOutcomeBanner(u)];
+  if (!r || u.phase === 'idle') return null;
+  if (u.later === r.version && !u.offer && ['available', 'ready'].includes(u.phase)) return null;
+  return [updateKey(u), () => updateOfferBanner(u)];
+}
+
+function updateKey(u) {
+  const r = u.release || {}, o = u.outcome || {};
+  return ['update', u.phase, r.version, u.deferred, u.offer, u.error_code, u.error, u.can_install, o.kind, o.detail].join('|');
+}
+
+function updateOutcomeBanner(u) {
+  const o = u.outcome;
+  const ok = btn(t('common.ok'), { cls: 'small', id: 'update-ok', onclick: (e) => updateAction('later', e.currentTarget) });
+  if (o.kind === 'installed') {
+    return notice('info update', 'checkCircle', h('span', {}, h('strong', {}, t('upd.installed', { version: u.current }))),
+      h('div', { class: 'notice-actions' }, ok));
+  }
+  return notice('warn update', 'alert', h('span', {}, h('strong', {}, t('upd.not_installed')), ' ', updateWhy(o.detail, null)),
+    h('div', { class: 'notice-actions' }, ok));
+}
+
+/** Why an update wasn't installed, in the page's language (the host gives a code: ``upd.err.<code>``). */
+function updateWhy(code, error) {
+  if (code === 'app_management') return t('upd.app_management');
+  if (code === 'cancelled') return t('upd.cancelled');
+  const detail = code && has('upd.err.' + code) ? t('upd.err.' + code) : humanize(error || t('upd.err.unexpected'));
+  return t('upd.failed', { detail });
+}
+
+function updateOfferBanner(u) {
+  const r = u.release, v = r.version;
+  const later = btn(t('upd.later'), { cls: 'small ghost', id: 'update-later', onclick: (e) => updateAction('later', e.currentTarget) });
+  const install = u.can_install && btn(u.phase === 'failed' ? t('upd.retry') : t('upd.install'),
+    { cls: 'small', id: 'update-install', onclick: (e) => updateAction('install', e.currentTarget) }, 'download');
+  const page = safeUrl(r.url || u.releases_page);
+  const get = !u.can_install && page && h('a', { class: 'btn small', id: 'update-download', href: page, target: '_blank',
+    rel: 'noopener noreferrer' }, t('upd.download'));
+  if (u.phase === 'installing') {
+    return notice('info update', 'refresh', h('span', {}, h('strong', {}, t('upd.installing', { version: v })), ' ', t('upd.restarts')));
+  }
+  if (u.phase === 'downloading') {
+    const bar = h('div', { class: 'progress', id: 'update-progress', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100',
+      'aria-label': t('upd.downloading', { version: v }) }, h('div', { class: 'track' }, h('span')), h('span', { class: 'pct' }));
+    updateProgressBar(bar, u.progress);
+    return notice('info update', 'download', h('span', {}, h('strong', {}, t('upd.downloading', { version: v })),
+      u.deferred ? ' ' + t('upd.after_meeting') : ''), bar,
+    h('div', { class: 'notice-actions' }, btn(t('common.cancel'), { cls: 'small ghost', id: 'update-cancel',
+      onclick: (e) => updateAction('cancel', e.currentTarget) })));
+  }
+  if (u.deferred) {
+    return notice('info update', 'clock', h('span', {}, h('strong', {}, t('upd.available', { version: v })), ' ', t('upd.after_meeting')),
+      h('div', { class: 'notice-actions' }, later));
+  }
+  if (u.phase === 'failed') {
+    return notice('warn update', 'alert', h('span', {}, h('strong', {}, t('upd.not_installed')), ' ', updateWhy(u.error_code, u.error)),
+      h('div', { class: 'notice-actions' }, later, u.error_code === 'app_management' ? null : install || get));
+  }
+  const title = u.offer ? t('upd.offer', { version: v }) : t('upd.available', { version: v });
+  return notice('info update', 'download', h('div', {},
+    h('strong', {}, title), ' ', u.can_install ? t('upd.lead') : t('upd.lead_download'), updateNotes(r.notes)),
+  h('div', { class: 'notice-actions' }, later, install || get));
+}
+
+/** "New in this version", line by line as text: "• " lines as a list, the others as paragraphs. */
+function updateNotes(notes) {
+  const lines = String(notes || '').split('\n').map((s) => s.trim()).filter(Boolean);
+  if (!lines.length) return null;
+  const box = h('div', { class: 'update-notes', id: 'update-notes' }, h('span', { class: 'label' }, t('upd.new')));
+  let list = null;
+  for (const line of lines) {
+    if (line.startsWith('• ')) {
+      if (!list) box.append(list = h('ul'));
+      list.append(h('li', {}, line.slice(2)));
+    } else {
+      list = null;
+      box.append(h('p', {}, line));
+    }
+  }
+  return box;
+}
+
+function updateProgressBar(el, p) {
+  const done = (p && p.done) || 0, total = (p && p.total) || 0;
+  const pct = total ? Math.min(100, (done / total) * 100) : 0;
+  el.querySelector('.track span').style.transform = 'scaleX(' + (pct / 100).toFixed(3) + ')';
+  el.setAttribute('aria-valuenow', String(Math.round(pct)));
+  el.querySelector('.pct').textContent = t('stt.progress', { pct: fmtNum(Math.min(99, Math.round(pct))), done: fmtBytes(done), total: fmtBytes(total) });
+}
+
+async function updateAction(what, button) {
+  const res = await act(button, () => api('POST', '/api/update/' + what));
+  if (!res) return undefined;
+  setApp(res);
+  return res.result;
+}
+
+/** What the last check said, for Settings → General → Updates. */
+function updateCheckText(u) {
+  if (u.checking) return t('upd.checking');
+  const r = u.release;
+  switch (u.last_result) {
+    case 'available': return r ? t('upd.available', { version: r.version }) : '';
+    case 'up_to_date': return t('upd.up_to_date');
+    case 'offline': return t('upd.offline');
+    case 'rate_limited': return t('upd.rate_limited');
+    case 'error': return t('upd.check_failed');
+    default: return '';
+  }
+}
+
+function updateLastText(u) {
+  if (!u.last_checked) return t('upd.never');
+  return t('upd.last', { day: fmtDay(u.last_checked, { day: 'numeric', month: 'long' }), time: fmtClock(u.last_checked) });
+}
+
+/** Settings → General → Updates: this version, looking by itself (and for betas), Check now and what it said. */
+function updatesSection() {
+  const u = S.app.update || {};
+  const check = btn(t('upd.check_now'), { cls: 'small', id: 'update-check', onclick: (e) => updateAction('check', e.currentTarget) }, 'refresh');
+  const section = card(t('upd.title'), t('upd.section_lead'),
+    h('p', { class: 'update-current', id: 'update-current' }, t('upd.current', { version: u.current || S.app.version })),
+    prefSwitch('check_updates', t('upd.auto'), t('upd.auto_help')),
+    prefSwitch('update_prereleases', t('upd.beta'), t('upd.beta_help')),
+    h('div', { class: 'update-check' }, check,
+      h('span', { id: 'update-check-result', role: 'status', 'aria-live': 'polite' }, updateCheckText(u))),
+    h('p', { class: 'help', id: 'update-last' }, updateLastText(u)));
+  section.id = 'set-updates';
+  return section;
+}
+
+/** The Updates section follows the app's state without a redraw (a switch half changed stays as it is). */
+function refreshUpdateSettings() {
+  const u = (S.app && S.app.update) || {};
+  const result = $('update-check-result'), last = $('update-last');
+  if (result) result.textContent = updateCheckText(u);
+  if (last) last.textContent = updateLastText(u);
 }
 
 async function applyNow(button) {
@@ -3802,7 +3954,8 @@ function generalSection() {
       h('div', { class: 'field', dataset: { path: 'pref:ui_language' } },
         h('label', { for: 'p-ui_language' }, t('set.ui_language')),
         h('div', { class: 'control' }, uiLanguageSelect())),
-      prefSwitch('start_at_login', t('set.start_at_login'), loginHelp, { disabled: !caps.login_item })));
+      prefSwitch('start_at_login', t('set.start_at_login'), loginHelp, { disabled: !caps.login_item })),
+    updatesSection());
 }
 
 /** Settings → General → Starting meetings: when Voicestream records (by hand or by itself) and every
@@ -5413,6 +5566,43 @@ const STRINGS = {
     'setup.done.files': 'Notes and to-dos are saved in your Voicestream folder',
     'setup.done.start': 'Start listening', 'setup.done.start_after': 'Start listening when the download is done',
     'setup.done.later': 'Not now', 'setup.done.will_start': 'Voicestream starts listening as soon as the download is done.',
+    'upd.available': 'Voicestream {version} is available.', 'upd.offer': 'The meeting is over: Voicestream {version} can be installed now.',
+    'upd.lead': 'Installing it takes a minute: Voicestream restarts by itself, your settings and meetings stay as they are.',
+    'upd.lead_download': 'Download it from its release page.',
+    'upd.new': 'New in this version', 'upd.install': 'Install and restart', 'upd.retry': 'Try again', 'upd.later': 'Later',
+    'upd.download': 'Download', 'upd.downloading': 'Downloading Voicestream {version}…',
+    'upd.installing': 'Installing Voicestream {version}…', 'upd.restarts': 'Voicestream restarts by itself in a moment.',
+    'upd.after_meeting': 'It will be offered again once the meeting ends: nothing is installed during a meeting.',
+    'upd.not_installed': 'The update wasn’t installed.', 'upd.failed': '{detail} Voicestream is as it was.',
+    'upd.cancelled': 'The download was cancelled.',
+    'upd.app_management': 'macOS didn’t let Voicestream replace itself. The new version is open in Finder: drag Voicestream onto Applications, choose Replace, then open it.',
+    'upd.err.no_digest': 'GitHub gave no checksum for the download, so it couldn’t be checked.',
+    'upd.err.bad_size': 'The download’s size didn’t make sense.', 'upd.err.bad_source': 'The download wasn’t on GitHub.',
+    'upd.err.size_mismatch': 'The download isn’t the size the release says.',
+    'upd.err.digest_mismatch': 'The download didn’t match the release’s checksum, so it was deleted.',
+    'upd.err.download_failed': 'The download stopped (is the Mac online?).',
+    'upd.err.mount_failed': 'The update’s disk image couldn’t be opened.',
+    'upd.err.bundle_invalid': 'The app in the update failed its checks (its name, version or signature).',
+    'upd.err.stage_failed': 'The new version couldn’t be copied next to Voicestream.',
+    'upd.err.no_asset': 'This release has no download for a Mac with Apple Silicon.',
+    'upd.err.cannot_restart': 'Voicestream can’t restart itself here.',
+    'upd.err.not_packaged': 'Only the Voicestream app for Mac installs updates by itself: download the new version.',
+    'upd.err.translocated': 'Voicestream is running from a temporary copy macOS made of the download: drag it to Applications, open it from there and try again.',
+    'upd.err.on_dmg': 'Voicestream is running from its disk image: drag it to Applications, open it from there and try again.',
+    'upd.err.not_writable': 'Voicestream can’t write in the folder it is in: download the new version and install it by hand.',
+    'upd.err.not_quit': 'Voicestream didn’t quit, so the new version wasn’t put in place.',
+    'upd.err.missing': 'The new version was missing when Voicestream quit.',
+    'upd.err.move_failed': 'The new version couldn’t be moved into place.',
+    'upd.err.unexpected': 'Something unexpected went wrong.',
+    'upd.installed': 'Voicestream is up to date: version {version} is installed.',
+    'upd.title': 'Updates', 'upd.section_lead': 'New versions install from here, never during a meeting.',
+    'upd.current': 'This is Voicestream {version}.', 'upd.auto': 'Check for updates automatically',
+    'upd.auto_help': 'When Voicestream opens and every six hours. Nothing is installed unless you click Install.',
+    'upd.beta': 'Include beta versions', 'upd.beta_help': 'Offer pre-releases too: newer, less tested.',
+    'upd.check_now': 'Check now', 'upd.checking': 'Checking…', 'upd.up_to_date': 'Voicestream is up to date.',
+    'upd.offline': 'GitHub can’t be reached: you seem to be offline.', 'upd.rate_limited': 'GitHub asks to wait a little: try again later.',
+    'upd.check_failed': 'The check didn’t work: try again later.', 'upd.never': 'Not checked yet.',
+    'upd.last': 'Last checked on {day} at {time}.',
   },
 
   fr: {
@@ -5904,6 +6094,43 @@ const STRINGS = {
     'setup.done.files': 'Les notes et les tâches sont enregistrées dans votre dossier Voicestream',
     'setup.done.start': 'Commencer l’écoute', 'setup.done.start_after': 'Commencer l’écoute à la fin du téléchargement',
     'setup.done.later': 'Plus tard', 'setup.done.will_start': 'Voicestream commencera l’écoute dès la fin du téléchargement.',
+    'upd.available': 'Voicestream {version} est disponible.', 'upd.offer': 'La réunion est terminée : Voicestream {version} peut être installé maintenant.',
+    'upd.lead': 'L’installation prend une minute : Voicestream redémarre tout seul, vos réglages et vos réunions restent tels quels.',
+    'upd.lead_download': 'Téléchargez-le depuis sa page de publication.',
+    'upd.new': 'Nouveautés de cette version', 'upd.install': 'Installer et redémarrer', 'upd.retry': 'Réessayer', 'upd.later': 'Plus tard',
+    'upd.download': 'Télécharger', 'upd.downloading': 'Téléchargement de Voicestream {version}…',
+    'upd.installing': 'Installation de Voicestream {version}…', 'upd.restarts': 'Voicestream redémarre tout seul dans un instant.',
+    'upd.after_meeting': 'Elle vous sera proposée à la fin de la réunion : rien ne s’installe pendant une réunion.',
+    'upd.not_installed': 'La mise à jour n’a pas été installée.', 'upd.failed': '{detail} Voicestream n’a pas changé.',
+    'upd.cancelled': 'Le téléchargement a été annulé.',
+    'upd.app_management': 'macOS n’a pas laissé Voicestream se remplacer. La nouvelle version est ouverte dans le Finder : faites glisser Voicestream sur Applications, choisissez Remplacer, puis ouvrez-le.',
+    'upd.err.no_digest': 'GitHub n’a donné aucune somme de contrôle pour le téléchargement : impossible de le vérifier.',
+    'upd.err.bad_size': 'La taille du téléchargement n’est pas plausible.', 'upd.err.bad_source': 'Le téléchargement ne venait pas de GitHub.',
+    'upd.err.size_mismatch': 'Le téléchargement n’a pas la taille annoncée par la publication.',
+    'upd.err.digest_mismatch': 'Le téléchargement ne correspond pas à la somme de contrôle de la publication : il a été supprimé.',
+    'upd.err.download_failed': 'Le téléchargement s’est interrompu (le Mac est-il en ligne ?).',
+    'upd.err.mount_failed': 'L’image disque de la mise à jour n’a pas pu être ouverte.',
+    'upd.err.bundle_invalid': 'L’app de la mise à jour n’a pas passé ses vérifications (nom, version ou signature).',
+    'upd.err.stage_failed': 'La nouvelle version n’a pas pu être copiée à côté de Voicestream.',
+    'upd.err.no_asset': 'Cette publication n’a pas de téléchargement pour un Mac Apple Silicon.',
+    'upd.err.cannot_restart': 'Voicestream ne peut pas redémarrer tout seul ici.',
+    'upd.err.not_packaged': 'Seule l’app Voicestream pour Mac installe ses mises à jour toute seule : téléchargez la nouvelle version.',
+    'upd.err.translocated': 'Voicestream fonctionne depuis une copie temporaire faite par macOS : faites-le glisser dans Applications, ouvrez-le depuis là et réessayez.',
+    'upd.err.on_dmg': 'Voicestream fonctionne depuis son image disque : faites-le glisser dans Applications, ouvrez-le depuis là et réessayez.',
+    'upd.err.not_writable': 'Voicestream ne peut pas écrire dans son dossier : téléchargez la nouvelle version et installez-la à la main.',
+    'upd.err.not_quit': 'Voicestream ne s’est pas fermé : la nouvelle version n’a pas été mise en place.',
+    'upd.err.missing': 'La nouvelle version avait disparu à la fermeture de Voicestream.',
+    'upd.err.move_failed': 'La nouvelle version n’a pas pu être mise en place.',
+    'upd.err.unexpected': 'Une erreur inattendue s’est produite.',
+    'upd.installed': 'Voicestream est à jour : la version {version} est installée.',
+    'upd.title': 'Mises à jour', 'upd.section_lead': 'Les nouvelles versions s’installent d’ici, jamais pendant une réunion.',
+    'upd.current': 'Vous utilisez Voicestream {version}.', 'upd.auto': 'Rechercher les mises à jour automatiquement',
+    'upd.auto_help': 'À l’ouverture de Voicestream et toutes les six heures. Rien ne s’installe sans que vous cliquiez sur Installer.',
+    'upd.beta': 'Inclure les versions bêta', 'upd.beta_help': 'Proposer aussi les préversions : plus récentes, moins testées.',
+    'upd.check_now': 'Rechercher maintenant', 'upd.checking': 'Recherche…', 'upd.up_to_date': 'Voicestream est à jour.',
+    'upd.offline': 'GitHub est injoignable : vous semblez hors ligne.', 'upd.rate_limited': 'GitHub demande de patienter : réessayez plus tard.',
+    'upd.check_failed': 'La recherche n’a pas abouti : réessayez plus tard.', 'upd.never': 'Pas encore recherchée.',
+    'upd.last': 'Dernière recherche le {day} à {time}.',
   },
 };
 
