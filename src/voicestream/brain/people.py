@@ -440,9 +440,18 @@ def finalize(meeting: Meeting, final: Iterable[str], user_name: str = "") -> Non
         add_person(meeting, f, user_name, model=True)
 
 
-def other_side(meeting: Meeting) -> str | None:
-    """The one other person in the meeting, when there is exactly one: the meeting audio is them."""
-    return meeting.participants[0] if len(meeting.participants) == 1 else None
+def other_side(meeting: Meeting, sure: bool = False) -> str | None:
+    """The one other person in the meeting, when there is exactly one: the meeting audio is them.
+
+    ``sure``: only when that person is more than a guess from a weak pattern (Claude or you confirmed
+    them, or you addressed them unmistakably) — what Claude reads, so it doesn't just agree with a guess."""
+    if len(meeting.participants) != 1:
+        return None
+    name = meeting.participants[0]
+    info = meeting.people.get(name)
+    if sure and info is not None and not (info.confirmed() or info.strong):
+        return None
+    return name
 
 
 def speaker_label(seg: TranscriptSegment, other: str | None, others_label: str = "Others") -> str:

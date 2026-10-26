@@ -350,3 +350,22 @@ def test_people_route(tmp_path: Path) -> None:
         assert c.post("/api/meetings/../people", json={"add": ["Sam"]}).status_code == 404
         assert c.post("/api/meetings/nope/people", json={"add": ["Sam"]}).status_code == 404
     assert load_meeting(folder)[0].people_removed == ["Sam Lefèvre"]
+
+
+def test_claude_is_never_told_a_guess_as_a_fact() -> None:
+    from datetime import date
+
+    from voicestream.brain.prompts import meeting_context
+
+    m = Meeting(title="Sync")
+    m.segments.append(seg("Hello", "system"))
+    add_person(m, "Julie", heard=True)  # a weak guess
+    context = meeting_context(m, "Alex", date(2026, 10, 14), ["Sarah"])
+    assert "Known participants: Sarah\n" in context
+    assert "00:00 Others]" in full_transcript(m)  # nor does the summary read her name on the other side
+    assert other_side(m) == "Julie"  # the windows show it, as a guess
+    add_person(m, "Julie", model=True)
+    remove_person(m, "Marc")
+    context = meeting_context(m, "Alex", date(2026, 10, 14), ["Sarah"])
+    assert "Known participants: Julie, Sarah\n" in context and "Not in this meeting (the user said so): Marc" in context
+    assert "00:00 Julie]" in full_transcript(m)

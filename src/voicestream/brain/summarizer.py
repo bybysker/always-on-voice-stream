@@ -23,7 +23,7 @@ MAX_SUMMARY_CHARS = 600_000  # ~150k tokens
 def full_transcript(meeting: Meeting, others_label: str = "Others") -> str:
     """The whole meeting as the summary reads it. With one other person in the meeting, the meeting
     audio's lines carry their name instead of ``others_label`` (the stored transcript keeps the label)."""
-    other = other_side(meeting)
+    other = other_side(meeting, sure=True)
     events = [(s.t_start, render_segment(i, s, speaker_label(s, other, others_label))) for i, s in enumerate(meeting.segments)]
     events += [(n.t, render_screen(n)) for n in meeting.screen_notes]
     events.sort(key=lambda e: e[0])
@@ -48,16 +48,14 @@ async def summarize(
     if llm is not None and budget_ok and meeting.segments:
         try:
             others = cfg.capture.system.label
-            other = other_side(meeting)
+            other = other_side(meeting, sure=True)
             named = (f"\nThe other side of the meeting ('{others}' lines) is {other}: their lines carry that name."
                      if other else "")
-            removed = (f"\nNot in this meeting (the user said so): {', '.join(meeting.people_removed)}"
-                       if meeting.people_removed else "")
             content = [
                 text_block(f"<transcript>\n{full_transcript(meeting, others)}\n</transcript>", cache=True),
                 text_block(
                     meeting_context(meeting, cfg.user_name, today, cfg.brain.attendees, cfg.brain.language)
-                    + named + removed
+                    + named
                     + f"\n\nItems captured live:\n{render_items([i for i in meeting.items.values() if not i.dismissed])}"
                 ),
             ]

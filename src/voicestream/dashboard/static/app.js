@@ -1811,6 +1811,7 @@ function probable(info) { return Boolean(info && info.heard && !info.model && !i
 class PeopleLine {
   constructor(id, send, changed) {
     this.id = id;
+    this.lang = LANG;  // its words: a page draws a new one in another language
     this.send = send;
     this.changed = changed;
     this.people = { participants: [], people: {}, people_removed: [] };
@@ -2789,7 +2790,8 @@ function drawDetail() {
   panel.setAttribute('aria-labelledby', 'tab-' + D.tab);
   panel.append(detailPanel(D));
 
-  if (!D.people) {
+  if (!D.people || D.people.lang !== LANG) {
+    D.editing.delete('people');
     D.people = new PeopleLine('detail', (body) => api('POST', `/api/meetings/${enc(D.folder)}/people`, body),
       (people) => setDetailPeople(D, people));
     D.people.onAdding = (on) => { if (on) D.editing.add('people'); else D.editing.delete('people'); };

@@ -61,7 +61,7 @@ summary_model = "claude-sonnet-5-5" # end-of-meeting consolidation + notes
 extract_interval_s = 90
 wake_phrases = ["hey claude", "okay claude", "ok claude", "hey assistant", "dis claude", "hé claude"]
 commands_from = ["mic"]    # only YOU can give the assistant voice commands
-# attendees = ["Ashley", "Sam", "Sarah"]
+# attendees = ["Ashley", "Sam", "Sarah"]   # people you meet often; others are remembered by themselves (people.json)
 # vocabulary = ["Acme", "Monday.com", "OKR"]   # names/jargon: helps transcription and extraction
 
 [screen]
