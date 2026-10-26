@@ -534,7 +534,7 @@ def install_problem(app: Path | None) -> tuple[str, str] | None:
         return "not_packaged", "updates install by themselves only in the Voicestream app for Mac"
     if "AppTranslocation" in app.parts:
         return "translocated", "Voicestream runs from a temporary copy macOS made of the download (App Translocation)"
-    if app.parts[:2] == ("/", "Volumes") or _read_only(app):
+    if app.as_posix().startswith("/Volumes/") or _read_only(app):
         return "on_dmg", "Voicestream runs from its disk image"
     if not os.access(app.parent, os.W_OK) or not os.access(app, os.W_OK):
         return "not_writable", f"Voicestream can't replace itself in {app.parent} (no permission to write there)"
@@ -758,8 +758,9 @@ def start_helper(script: Path, *, pid: int, app: Path, new: Path, dmg: Path, res
                  relaunch: bool = True) -> subprocess.Popen:
     """Start the helper detached: its own session (``setsid``), so it isn't in the app's process group and
     outlives it; no inherited descriptors, nothing to read or write but its log."""
-    args = ["/bin/sh", str(script), str(pid), str(app), str(new), str(dmg), str(result), str(log_file),
-            "1" if relaunch else "0"]
+    # a Mac's /bin/sh reads them: paths in / form whatever system built them (the tests run on Windows too)
+    args = ["/bin/sh", script.as_posix(), str(pid), app.as_posix(), new.as_posix(), dmg.as_posix(), result.as_posix(),
+            log_file.as_posix(), "1" if relaunch else "0"]
     log.info("update: starting the helper (it waits for process %d to quit)", pid)
     return subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             close_fds=True, start_new_session=True, cwd="/")

@@ -532,7 +532,7 @@ def test_the_helper_is_started_in_its_own_session(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr(upd.subprocess, "Popen", Popen)
     upd.start_helper(tmp_path / "h.sh", pid=42, app=Path("/Applications/Voicestream.app"), new=Path("/x y/new.app"),
                      dmg=Path("/d.dmg"), result=Path("/r"), log_file=Path("/l"))
-    assert seen["args"] == ["/bin/sh", str(tmp_path / "h.sh"), "42", "/Applications/Voicestream.app", "/x y/new.app",
+    assert seen["args"] == ["/bin/sh", (tmp_path / "h.sh").as_posix(), "42", "/Applications/Voicestream.app", "/x y/new.app",
                             "/d.dmg", "/r", "/l", "1"]
     assert seen["start_new_session"] is True and seen["close_fds"] is True and seen["stdin"] == subprocess.DEVNULL
     script = upd.write_helper(tmp_path / "support")
