@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import json
 import os
 import plistlib
@@ -48,8 +49,8 @@ def test_versions_are_ordered_as_pep_440_orders_them() -> None:
     ordered = ["0.3.0", "0.4.0.dev1", "0.4.0a1", "0.4.0-beta.1", "0.4.0b2", "0.4.0rc1", "0.4.0", "0.4.0.post1", "0.4.1",
                "0.10.0", "1.0.0"]
     parsed = [V(v) for v in ordered]
-    assert sorted(reversed(parsed), key=lambda v: v.key) == parsed
-    assert all(a < b for a, b in zip(parsed, parsed[1:], strict=False))
+    assert sorted(parsed[5:] + parsed[:5], key=lambda v: v.key) == parsed
+    assert all(a < b for a, b in itertools.pairwise(parsed))
     assert V("0.4") == V("0.4.0") == V("v0.4.0") and str(V("v0.4.0")) == "0.4.0"
     assert V("0.10.0") > V("0.9.9")  # numbers, not text
     assert V("0.4.0-rc.1") == V("0.4.0rc1") and V("1.0.0-alpha") < V("1.0.0-alpha.1") < V("1.0.0-beta")
@@ -757,3 +758,44 @@ def test_the_automatic_check_waits_for_the_setup_and_the_preference(tmp_path: Pa
 
     asyncio.run(run())
     assert h.updater.machine.phase == "available"
+
+
+# ------------------------------------------------------------------------------- self-test
+
+
+def test_tls_certificates_and_no_proxy_for_the_local_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert upd.tls_context().cert_store_stats()["x509_ca"] > 0  # what GitHub's certificate is checked with
+    monkeypatch.setenv("http_proxy", "http://proxy.invalid:3128")
+    local = upd._opener(True)
+    assert not any(isinstance(h, upd.urllib.request.ProxyHandler) and h.proxies for h in local.handlers)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a POSIX shell")
+def test_the_packaged_apps_update_selftest_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the macOS CI's self-test runs (updater.selftest), here with macOS's tools as stand-ins: a local
+    feed, a refused wrong digest, a verified download, the mounted app checked, the helper's swap into a copy
+    of the app — which then is the new version."""
+    dmg = tmp_path / "Voicestream-99.0.0-arm64.dmg"
+    dmg.write_bytes(b"a disk image " * 5000)
+    volume = tmp_path / "volume"
+    _bundle(volume, "99.0.0")
+    running = _bundle(tmp_path / "running", __version__)
+    tools = FakeTools(volume)
+    script, calls = _stub_helper(tmp_path)
+    monkeypatch.setattr(upd, "HELPER", script.read_text())  # the helper with stand-ins for mv, codesign, xattr, open
+    monkeypatch.setattr(upd, "_read_only", lambda path: path == volume)  # hdiutil's -readonly mount
+    work = tmp_path / "work"
+    work.mkdir()
+    out = upd.selftest(dmg, running, work, tools)
+    assert out["checks"] == dict.fromkeys(upd.SELFTEST_CHECKS, True), out
+    assert out["version"] == "99.0.0" and out["swap"]["version"] == "99.0.0" and out["swap"]["result"] == "installed"
+    assert out["wrong_digest"].startswith("refused") and out["download"]["quarantined"] is False
+    assert out["check"]["again"] == "not_modified" and out["check"]["tls_certificates"] > 0
+    assert out["install_problem"] is None and out["app_management_blocked"] is False
+    # the app it runs as was copied, never touched
+    assert plistlib.loads((running / "Contents" / "Info.plist").read_bytes())["CFBundleShortVersionString"] == __version__
+
+
+def test_the_selftest_says_when_it_has_no_dmg(tmp_path: Path) -> None:
+    out = upd.selftest(tmp_path / "nothing.dmg", None, tmp_path)
+    assert out["checks"] == {} and "no test DMG" in out["error"]

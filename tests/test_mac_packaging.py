@@ -418,6 +418,9 @@ def test_release_job_publishes_tagged_builds_only() -> None:
     assert "sparse-checkout: packaging/mac/release-notes.md" in release
     notes = (ROOT / "packaging" / "mac" / "release-notes.md").read_text(encoding="utf-8")
     assert "**Open Anyway**" in notes and "**Ouvrir quand même**" in notes and "Apple Silicon" in notes
+    # the last Open Anyway: the versions after this one install from inside the app (voicestream/app/updater.py)
+    assert "install from inside the app" in notes and "s'installent depuis l'app" in notes
+    assert "### New in this version" in notes  # the section the update's banner shows (updater.whats_new)
     assert "dmg: ${{ steps.dmg.outputs.name }}" in wf
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "https://github.com/bybysker/always-on-voice-stream/releases" in readme

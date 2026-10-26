@@ -52,6 +52,7 @@ import os
 import plistlib
 import re
 import shutil
+import ssl
 import stat
 import struct
 import subprocess
@@ -362,9 +363,23 @@ class _Redirects(urllib.request.HTTPRedirectHandler):
         return new
 
 
+def tls_context() -> ssl.SSLContext:
+    """Certificates to check GitHub's with. The packaged app's Python has no system certificate file of its
+    own (python.org's build looks for one that only its installer makes), so certifi's — bundled, as httpx
+    uses it — when it is there; else Python's defaults."""
+    try:
+        import certifi
+    except ImportError:
+        return ssl.create_default_context()
+    return ssl.create_default_context(cafile=certifi.where())
+
+
 def _opener(local: bool) -> urllib.request.OpenerDirector:
-    # no proxy handler beyond the default (a Mac's proxy settings apply); no cookies, no credentials
-    return urllib.request.build_opener(_Redirects(local))
+    # no cookies, no credentials; a Mac's proxy settings apply, except to the self-test's own local server
+    handlers: list[Any] = [_Redirects(local), urllib.request.HTTPSHandler(context=tls_context())]
+    if local:
+        handlers.append(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(*handlers)
 
 
 @dataclass(frozen=True)
@@ -881,6 +896,8 @@ class Updater:
         self.last_checked: float | None = None
         self.last_result: str | None = None
         self.etag: str | None = None
+        self.etag_url: str | None = None
+        """What :attr:`etag` was the answer to (the latest release, or the list with pre-releases)."""
         self.cached: Release | None = None
         self.later: str | None = None
         """The version put off with Later: no banner for it (the menu still offers it)."""
@@ -915,6 +932,7 @@ class Updater:
             self.last_checked = data.get("last_checked") if isinstance(data.get("last_checked"), (int, float)) else None
             self.last_result = data.get("last_result") if isinstance(data.get("last_result"), str) else None
             self.etag = data.get("etag") if isinstance(data.get("etag"), str) else None
+            self.etag_url = data.get("etag_url") if isinstance(data.get("etag_url"), str) else None
             self.later = data.get("later") if isinstance(data.get("later"), str) else None
             cached = data.get("release")
             self.cached = Release.from_dict(cached) if isinstance(cached, dict) else None
@@ -939,6 +957,7 @@ class Updater:
         from .files import write_private
 
         data = {"last_checked": self.last_checked, "last_result": self.last_result, "etag": self.etag,
+                "etag_url": self.etag_url,
                 "later": self.later, "release": self.cached.as_dict() if self.cached else None}
         try:
             write_private(path, json.dumps(data, indent=1) + "\n")
@@ -994,19 +1013,19 @@ class Updater:
         self.checked_this_launch = True
         self._changed()
         url = self.feed or (LIST_URL if prereleases else LATEST_URL)
-        etag = self.etag if self.cached is not None and self.cached.prerelease == prereleases else None
+        etag = self.etag if self.cached is not None and self.etag_url == url else None
         try:
             res = await asyncio.to_thread(fetch_release, url, etag, prereleases=prereleases, local=self.local,
                                           now=self.now)
         finally:
             self.checking = False
-        outcome = self._take(res, prereleases)
+        outcome = self._take(res, prereleases, url)
         if outcome not in ("offline",) or manual:
             log.info("update: checked for a new version (%s%s)", outcome, f": {res.detail}" if res.detail else "")
         self._changed()
         return outcome
 
-    def _take(self, res: CheckResult, prereleases: bool) -> str:
+    def _take(self, res: CheckResult, prereleases: bool, url: str) -> str:
         now = self.now()
         if res.status == "rate_limited":
             self.retry_at = res.retry_at
@@ -1021,7 +1040,7 @@ class Updater:
             release = self.cached
         else:
             release = res.release
-            self.cached, self.etag = release, (res.etag if release is not None else None)
+            self.cached, self.etag, self.etag_url = release, (res.etag if release is not None else None), url
         if release is not None and release.prerelease and not prereleases:
             release = None
         self.last_checked = now
@@ -1252,9 +1271,10 @@ def _feed_server(routes: dict[str, tuple[bytes | Path, str, str | None]]) -> _Fe
 def selftest(dmg: Path, app: Path | None, work: Path, run: Run = _run) -> dict[str, Any]:
     """The packaged app's proof that updating works, without the network (``packaging/mac/build.sh selftest``
     builds ``dmg``: this app with a newer version, re-signed). Against a local stand-in for GitHub's API:
-    check (and check again: the ETag's "not modified"), refuse a download whose digest is wrong, download and
-    verify the right one (no quarantine on it), mount it, check its app, stage it next to a temporary copy of
-    this app (never the real one), run the helper against that copy, and read the swapped bundle's version.
+    check (and check again: the ETag's "not modified"; the certificates GitHub's TLS is checked with are
+    there), refuse a download whose digest is wrong, download and verify the right one (no quarantine on it),
+    mount it, check its app, stage it next to a temporary copy of this app (never the real one), run the
+    helper against that copy, and read the swapped bundle's version.
     Returns the report; its ``checks`` say what passed."""
     out: dict[str, Any] = {"checks": {}}
     checks = out["checks"]
@@ -1290,11 +1310,14 @@ def selftest(dmg: Path, app: Path | None, work: Path, run: Run = _run) -> dict[s
         first = fetch_release(f"{base}/latest", local=True)
         again = fetch_release(f"{base}/latest", first.etag, local=True)
         r = first.release
+        # the real check reaches GitHub over TLS: the packaged app must have certificates to check it with
+        cas = tls_context().cert_store_stats().get("x509_ca", 0)
         out["check"] = {"status": first.status, "found": str(r.version) if r else None, "etag": first.etag is not None,
-                        "again": again.status, "notes": r.notes if r else None}
+                        "again": again.status, "notes": r.notes if r else None, "tls_certificates": cas}
         checks["update_check"] = (first.status == "ok" and r is not None and r.version == version
                                   and r.version > current_version() and again.status == "not_modified"
-                                  and bool(r.notes) and r.asset is not None and r.asset.sha256 == sha.hexdigest())
+                                  and bool(r.notes) and r.asset is not None and r.asset.sha256 == sha.hexdigest()
+                                  and cas > 0)
 
         downloads = work / "downloads"
         wrong = fetch_release(f"{base}/wrong", local=True).release

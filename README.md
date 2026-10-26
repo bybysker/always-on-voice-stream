@@ -58,8 +58,8 @@ For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. No terminal 
 3. macOS says it can't verify the app, because it isn't notarized by Apple. Close that message
    (don't choose Move to Trash), open **System Settings → Privacy & Security**, scroll down to
    "Voicestream was blocked…", click **Open Anyway**, enter your password and click **Open**.
-   This is needed once for each version you download. Since macOS Sequoia, Control-click → Open
-   no longer skips it.
+   This is needed for a version you download yourself (since macOS Sequoia, Control-click → Open
+   no longer skips it); the versions after it install from inside the app, without it.
 4. Follow the setup: your name and languages, speech-to-text ("On this Mac" is free and private;
    it downloads a 547 MB model), your Claude key (saved in the macOS Keychain), then click the two
    permission tests so macOS asks for **Microphone** and **System Audio Recording**. Allow both.
@@ -84,9 +84,20 @@ For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. No terminal 
    (it needs no extra permission); the menu-bar menu shows it next to **Start Meeting** (**Resume
    Meeting** when paused). In Safari ⌥⌘R also reloads a page: pick another shortcut if you use that.
 
-**After an update**, install the new DMG the same way (step 3 again). macOS ties permissions to
-each build of an app that isn't notarized, so they may have to be granted again, even when System
-Settings still shows them as on. In **Privacy & Security → Microphone** and **Privacy & Security →
+**Updates install from inside the app** (from the version after 0.3.0: that one is still
+installed by hand, as above). When a new version is out, the window shows **Voicestream 0.4.0 is
+available** with what is new in it: click **Install and restart**, or **Later**. The menu-bar menu
+has **Install Update…** too, and **Settings → General → Updates** shows your version, **Check now**
+and the automatic check (on: when the app opens, then every six hours). Nothing is installed during
+a meeting: Voicestream offers again once the meeting ends. It downloads the DMG from the GitHub
+release, checks its size and SHA-256 against what GitHub publishes with it, checks the app inside
+(its name, version, signature and Apple Silicon code), then quits, puts the new version in place
+of the old one (kept until the new one is in) and opens it. There is no Open Anyway step: macOS
+only asks that for an app downloaded by a browser. If macOS doesn't let Voicestream replace itself,
+the new version opens in Finder: drag **Voicestream** onto **Applications** and choose **Replace**.
+
+**After an update**, macOS ties permissions to each build of an app that isn't notarized, so they
+may have to be granted again, even when System Settings still shows them as on. In **Privacy & Security → Microphone** and **Privacy & Security →
 Screen & System Audio Recording**, remove Voicestream with the **−** button (or switch it off and
 on again), open Voicestream and allow it when asked. The Keychain may also ask once whether the new
 version may read your saved keys: click **Always Allow**.
@@ -113,8 +124,9 @@ Pour un Mac Apple Silicon (M1 ou plus récent) sous macOS 14.2 ou plus. Aucun te
    message (sans choisir « Placer dans la corbeille »), ouvrez **Réglages Système →
    Confidentialité et sécurité**, descendez jusqu'à « L'ouverture de Voicestream a été
    bloquée… », cliquez sur **Ouvrir quand même**, saisissez votre mot de passe puis cliquez sur
-   **Ouvrir**. À refaire une fois pour chaque version téléchargée. Depuis macOS Sequoia, le
-   Contrôle-clic → Ouvrir ne suffit plus.
+   **Ouvrir**. Nécessaire pour une version que vous téléchargez vous-même (depuis macOS Sequoia,
+   le Contrôle-clic → Ouvrir ne suffit plus) ; les versions suivantes s'installent depuis l'app,
+   sans cette étape.
 4. Suivez l'assistant : votre nom et vos langues, la transcription (« Sur ce Mac » est gratuit et
    privé ; un modèle de 547 Mo est téléchargé), votre clé Claude (enregistrée dans le trousseau de
    macOS), puis cliquez sur les deux tests d'autorisation pour que macOS demande l'accès au
@@ -142,9 +154,24 @@ Pour un Mac Apple Silicon (M1 ou plus récent) sous macOS 14.2 ou plus. Aucun te
    menus l'affiche à côté de **Démarrer une réunion** (de **Reprendre la réunion** en pause). Dans
    Safari, ⌥⌘R recharge aussi la page : choisissez un autre raccourci si vous vous en servez.
 
-**Après une mise à jour**, installez le nouveau DMG de la même façon (étape 3 à refaire). macOS
-associe les autorisations à chaque version d'une app non notariée : il faut parfois les accorder à
-nouveau, même si Réglages Système les affiche encore comme activées. Dans **Confidentialité et
+**Les mises à jour s'installent depuis l'app** (à partir de la version qui suit la 0.3.0 : celle-ci
+s'installe encore à la main, comme ci-dessus). Quand une nouvelle version sort, la fenêtre affiche
+**Voicestream 0.4.0 est disponible** avec ses nouveautés : cliquez sur **Installer et redémarrer**,
+ou sur **Plus tard**. Le menu de la barre des menus propose aussi **Installer la mise à jour…**, et
+**Réglages → Général → Mises à jour** affiche votre version, **Rechercher maintenant** et la
+recherche automatique (activée : à l'ouverture de l'app, puis toutes les six heures). Rien ne
+s'installe pendant une réunion : Voicestream vous le propose à nouveau quand elle se termine. Il
+télécharge le DMG de la publication GitHub, vérifie sa taille et sa somme SHA-256 avec celles que
+GitHub publie, vérifie l'app qu'il contient (nom, version, signature, code Apple Silicon), puis
+quitte, met la nouvelle version à la place de l'ancienne (gardée jusqu'à ce que la nouvelle soit en
+place) et l'ouvre. Pas d'étape « Ouvrir quand même » : macOS ne la demande que pour une app
+téléchargée par un navigateur. Si macOS ne laisse pas Voicestream se remplacer, la nouvelle version
+s'ouvre dans le Finder : faites glisser **Voicestream** sur **Applications** et choisissez
+**Remplacer**.
+
+**Après une mise à jour**, macOS associe les autorisations à chaque version d'une app non
+notariée : il faut parfois les accorder à nouveau, même si Réglages Système les affiche encore comme
+activées. Dans **Confidentialité et
 sécurité → Micro** et **Confidentialité et sécurité → Enregistrement de l'écran et de l'audio du
 système**, retirez Voicestream avec le bouton **−** (ou désactivez-le puis réactivez-le), rouvrez
 Voicestream et autorisez-le quand il le demande. Le trousseau peut aussi demander une fois si la

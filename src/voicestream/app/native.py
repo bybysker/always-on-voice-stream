@@ -1663,6 +1663,9 @@ class MacShell:
         """pywebview's ``func`` thread: check the real window, menu bar and lifecycle, then quit."""
         from PyObjCTools import AppHelper
 
+        # here, not at the top: urllib.request may not import where native.py does (its tests)
+        from .updater import SELFTEST_CHECKS
+
         started = time.monotonic()
         self._arm_watchdog((self.selftest or 0) + WATCHDOG_EXTRA_S, "the self-test did not finish in time")
         report = self.report = launcher.selftest_report(self.host, self.url, mode="native")
@@ -1720,8 +1723,6 @@ class MacShell:
             report["microphone"] = native_hooks.microphone_authorization()
             report["login_item"] = native_hooks.login_item_status()
             report["app_location"] = native_hooks.app_location_problem()
-            from .updater import SELFTEST_CHECKS  # urllib.request: not imported where native.py is tested bare
-
             report["update"] = upd = self._check_update()
             for name in SELFTEST_CHECKS:
                 checks[name] = bool((upd.get("checks") or {}).get(name))
