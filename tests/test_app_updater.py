@@ -720,6 +720,74 @@ def test_the_host_never_installs_during_a_meeting(host: AppHost) -> None:
     assert not host.update_busy()  # always-on listening between meetings: it starts again after the restart
     host._start_queued = True
     assert host.update_busy()
+    host._start_queued = False
+    host._retiring[object()] = None  # type: ignore[index]  # an earlier meeting's agents, still at work
+    assert host.update_busy()
+
+
+def _deferred(host: AppHost) -> upd.UpdateMachine:
+    """Install was asked for during the meeting: downloaded, put off until it is over."""
+    m = host.updater.machine
+    m.current = V("0.3.0")
+    m.found(_r("0.4.0"))
+    m.start_download()
+    m.downloaded()
+    m.defer()
+    return m
+
+
+async def test_an_update_waits_for_an_automatic_meeting_s_wrap_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Always-on: a meeting closed on a silence is wrapped up in the background while listening goes on.
+    Offered as it closed, Install would quit mid-summary: the notes bare, the pushes skipped."""
+    from helpers import seg
+    from test_app_host import _host, _until
+    from test_app_meeting_start import Wall, _clocked, _events, _slow_wrap_up
+
+    gate = _slow_wrap_up(monkeypatch)
+    wall = Wall()
+    built: list[Any] = []
+    host = _host(tmp_path, factory=_clocked(wall, built), mode="automatic")  # meetings close after 10 min
+    try:
+        await host.listen_start()
+        await built[0]._route(seg("Let's start.", "mic", t=1.0))
+        assert host.update_busy()
+        m = _deferred(host)
+        wall.advance(11)
+        await _until(lambda: bool(_events(host, "meeting.ending")))
+        await asyncio.sleep(0.1)
+        assert not _events(host, "meeting.ended") and not host.in_meeting() and host.status == "listening"
+        assert host.update_busy() and m.deferred and not m.offer  # its summary and pushes are still to come
+        gate.set()
+        await _until(lambda: bool(_events(host, "meeting.ended")))
+        assert not host.update_busy() and m.offer and not m.deferred  # offered once its notes are written
+    finally:
+        gate.set()
+        await host.shutdown()
+
+
+async def test_an_update_waits_for_a_meeting_started_by_hand_to_be_wrapped_up(tmp_path: Path,
+                                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    from helpers import seg
+    from test_app_host import _until
+    from test_app_meeting_start import _events, _manual, _slow_wrap_up
+
+    gate = _slow_wrap_up(monkeypatch)
+    built: list[Any] = []
+    host = _manual(tmp_path, built=built)
+    m = _deferred(host)
+    try:
+        await host.meeting_start()
+        await built[0]._route(seg("I'll send the deck to Sam by Friday.", "mic", t=1.0))
+        assert await host.meeting_stop() == "stop"
+        await _until(lambda: bool(_events(host, "meeting.ending")))
+        await asyncio.sleep(0.1)
+        assert host.update_busy() and m.deferred and not m.offer
+        gate.set()
+        await _until(lambda: host.status == "stopped")
+        assert _events(host, "meeting.ended") and not host.update_busy() and m.offer
+    finally:
+        gate.set()
+        await host.shutdown()
 
 
 def test_the_automatic_check_waits_for_the_setup_and_the_preference(tmp_path: Path, feed: Feed,

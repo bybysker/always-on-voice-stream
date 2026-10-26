@@ -138,6 +138,9 @@ class MeetingSession:
         self.asked = False
         """"Still in a meeting?" was asked during the silence going on now (:meth:`Assistant._check_silence`)."""
         self.finished = False
+        self.wrapped_up = False
+        """:meth:`finish` is done with it: notes written, pushed, its agents done (or cut short). Until then
+        quitting would cut the wrap-up short, so no update is installed (``AppHost.update_busy``)."""
         self._tasks: list[asyncio.Task[Any]] = []
         self._save_handle: asyncio.TimerHandle | None = None
         self._unlisten = app.bus.listen(self._on_event)
@@ -260,6 +263,13 @@ class MeetingSession:
         """Final extraction, summary, push, notes. Idempotent."""
         if self.finished:
             return None
+        try:
+            return await self._finish(reason)
+        except BaseException:
+            self.wrapped_up = True  # cut short (a forced stop) or failed: nothing more to wait for
+            raise
+
+    async def _finish(self, reason: str) -> Path | None:
         self.finished = True
         cfg = self.app.cfg
         self.app.bus.publish("meeting.ending", meeting_id=self.meeting.id, reason=reason)
@@ -276,6 +286,7 @@ class MeetingSession:
             self._unlisten()
             self.store.close()
             self._cleanup_empty()
+            self.wrapped_up = True  # before meeting.ended: what hears it may offer the update put off for it
             # the dashboard waits for this to leave "wrapping up…"
             self.app.bus.publish("meeting.ended", meeting_id=self.meeting.id, title=self.meeting.title, notes=None, items=0)
             return None
@@ -334,6 +345,7 @@ class MeetingSession:
             self.app.track(asyncio.ensure_future(self.dispatcher.retry_failed()))
         self.store.save()
         notes_path = self.store.dir / "notes.md"
+        self.wrapped_up = not self.agents.busy  # else once its agents are done (_late_agents)
         self.app.bus.publish(
             "meeting.ended",
             meeting_id=self.meeting.id,
@@ -360,6 +372,12 @@ class MeetingSession:
             log.exception("could not write notes.md")
 
     async def _late_agents(self) -> None:
+        try:
+            await self._finish_late_agents()
+        finally:
+            self.wrapped_up = True  # cut short, or failed: nothing more to wait for
+
+    async def _finish_late_agents(self) -> None:
         ac = self.app.cfg.agents
         while self.agents.busy:
             # agents run max_concurrent at a time, each within its own time limit: wait for the whole queue
@@ -379,6 +397,7 @@ class MeetingSession:
         )
         await self._shutdown_tasks()
         self._unlisten()
+        self.wrapped_up = True  # before the event: what hears it may offer the update put off for it
         self.app.bus.publish("meeting.notes_updated", meeting_id=self.meeting.id, notes=str(self.store.dir / "notes.md"))
 
     def _rename(self) -> bool:
@@ -562,6 +581,12 @@ class Assistant:
     def track(self, task: asyncio.Task[Any]) -> None:
         self._background.add(task)
         task.add_done_callback(self._background.discard)
+
+    @property
+    def wrapping_up(self) -> bool:
+        """A meeting that ended is still being wrapped up in the background (summary, notes, pushes, its
+        agents): always-on listening goes on meanwhile, with no meeting in progress."""
+        return any(not s.wrapped_up for s in self.finished_meetings)
 
     @property
     def auto_meetings(self) -> bool:
