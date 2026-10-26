@@ -10,6 +10,7 @@ from ..config import Config
 from ..models import FollowUpEmail, Item, ItemKind, ItemStatus, Meeting, fmt_ts
 from ..transcribe.echo import words
 from .llm import LLM, LLMError, text_block
+from .people import finalize, other_side, speaker_label
 from .prompts import SUMMARY_SYSTEM, meeting_context, render_items, render_screen, render_segment
 from .schema import WireSummary, wire_new_to_item, wire_update_to_update
 from .tracker import ExtractionResult, ItemTracker
@@ -19,8 +20,11 @@ log = logging.getLogger(__name__)
 MAX_SUMMARY_CHARS = 600_000  # ~150k tokens
 
 
-def full_transcript(meeting: Meeting) -> str:
-    events = [(s.t_start, render_segment(i, s)) for i, s in enumerate(meeting.segments)]
+def full_transcript(meeting: Meeting, others_label: str = "Others") -> str:
+    """The whole meeting as the summary reads it. With one other person in the meeting, the meeting
+    audio's lines carry their name instead of ``others_label`` (the stored transcript keeps the label)."""
+    other = other_side(meeting)
+    events = [(s.t_start, render_segment(i, s, speaker_label(s, other, others_label))) for i, s in enumerate(meeting.segments)]
     events += [(n.t, render_screen(n)) for n in meeting.screen_notes]
     events.sort(key=lambda e: e[0])
     text = "\n".join(t for _, t in events)
@@ -43,10 +47,17 @@ async def summarize(
     today = today or date.today()
     if llm is not None and budget_ok and meeting.segments:
         try:
+            others = cfg.capture.system.label
+            other = other_side(meeting)
+            named = (f"\nThe other side of the meeting ('{others}' lines) is {other}: their lines carry that name."
+                     if other else "")
+            removed = (f"\nNot in this meeting (the user said so): {', '.join(meeting.people_removed)}"
+                       if meeting.people_removed else "")
             content = [
-                text_block(f"<transcript>\n{full_transcript(meeting)}\n</transcript>", cache=True),
+                text_block(f"<transcript>\n{full_transcript(meeting, others)}\n</transcript>", cache=True),
                 text_block(
                     meeting_context(meeting, cfg.user_name, today, cfg.brain.attendees, cfg.brain.language)
+                    + named + removed
                     + f"\n\nItems captured live:\n{render_items([i for i in meeting.items.values() if not i.dismissed])}"
                 ),
             ]
@@ -58,19 +69,20 @@ async def summarize(
                 max_tokens=8000,
                 effort=cfg.brain.summary_effort,
             )
-            if wire.participants:
-                # the whole meeting tells who took part better than the live pass, which may have kept
-                # someone who was only mentioned (and sinks like HubSpot file the notes on these people)
-                meeting.participants = []
             tracker.apply(
                 ExtractionResult(
                     # found after the fact: never a live voice command that may auto-run an agent
                     new_items=[wire_new_to_item(i).model_copy(update={"explicit_request": False}) for i in wire.missing_items],
                     updates=[wire_update_to_update(u) for u in wire.updates],
-                    participants=wire.participants,
                 ),
                 {i: s.id for i, s in enumerate(meeting.segments)},
             )
+            if wire.participants:
+                # the whole meeting tells who took part better than the live pass, which may have kept
+                # someone who was only mentioned (and sinks like HubSpot file the notes on these people);
+                # names you added or clearly spoke to stay (brain.people.finalize)
+                finalize(meeting, wire.participants, cfg.user_name)
+                tracker.publish_people()
             if wire.title.strip():
                 meeting.title = wire.title.strip()[:120]
             meeting.tldr = wire.tldr.strip() or None

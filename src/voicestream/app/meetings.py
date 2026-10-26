@@ -32,13 +32,23 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 from zoneinfo import ZoneInfo
 
+from .. import known_people
+from ..brain.people import other_side, people_event, speaker_label
 from ..brain.summarizer import rerender, summarize
 from ..brain.tracker import ItemTracker
 from ..config import Config
 from ..dispatch import Dispatcher
 from ..events import EventBus
 from ..models import Event, ItemKind, Meeting
-from ..storage import RECORDING_LOCK, atomic_write, is_recording, list_sessions, load_meeting, read_transcript
+from ..storage import (
+    RECORDING_LOCK,
+    atomic_write,
+    is_recording,
+    list_sessions,
+    load_meeting,
+    read_transcript,
+    write_transcript_md,
+)
 
 if TYPE_CHECKING:
     from ..brain.llm import LLM
@@ -428,6 +438,21 @@ class Meetings:
         self._sync_later(meeting, d, item_id)
         return meeting.items[item_id].model_dump(mode="json")
 
+    def edit_people(self, folder: str, add: list[str], remove: list[str]) -> dict[str, Any]:
+        """Who the meeting was with, as you correct it (``known_people.edit_meeting``). Its notes and
+        transcript.md are written again with the names; what your tools have changes with the next push."""
+        s = self.live_session(folder)
+        if s is not None:
+            s.edit_people(add, remove)
+            return {**people_event(s.meeting), "folder": s.store.dir.name}
+        meeting, d = self._editable(folder)
+        known_people.edit_meeting(self.cfg.data_path, meeting, add, remove, self.cfg.user_name)
+        self._write(d, meeting)
+        label, other = self.cfg.capture.system.label, other_side(meeting)
+        write_transcript_md(d, meeting, lambda seg: speaker_label(seg, other, label))
+        self.host.bus.publish("meeting.people", **people_event(meeting), folder=d.name)
+        return {**people_event(meeting), "folder": d.name}
+
     def _write(self, d: Path, meeting: Meeting) -> None:
         """Save an edited past meeting; its notes list the items, so they are rebuilt too."""
         notes = rerender(meeting, self.cfg.user_name) if (d / "notes.md").is_file() else None
@@ -534,6 +559,7 @@ class Meetings:
                     async with held.lock:
                         notes = await summarize_meeting(self.cfg, meeting, llm, budget_ok=budget_ok)
                         save_meeting(d, meeting, notes)
+                        known_people.remember_meeting(self.cfg.data_path, meeting, self.cfg.user_name)
                 finally:
                     self._release(folder, held)
         except Exception as exc:

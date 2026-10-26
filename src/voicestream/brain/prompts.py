@@ -125,8 +125,9 @@ answer exactly "nothing relevant".
 """
 
 
-def render_segment(index: int, seg: TranscriptSegment) -> str:
-    return f"[#{index} {fmt_ts(seg.t_start)} {seg.speaker}] {seg.text}"
+def render_segment(index: int, seg: TranscriptSegment, speaker: str | None = None) -> str:
+    """``speaker``: the name to show instead of the stored label (see :func:`.people.speaker_label`)."""
+    return f"[#{index} {fmt_ts(seg.t_start)} {speaker or seg.speaker}] {seg.text}"
 
 
 def render_screen(note: ScreenNote) -> str:

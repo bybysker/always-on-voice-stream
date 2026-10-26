@@ -57,9 +57,9 @@ def _phrases(*phrases: str) -> tuple[tuple[str, ...], ...]:
 
 GREETINGS = _phrases(
     "hi", "hey", "hello", "hiya", "morning", "good morning", "good afternoon", "good evening", "welcome",
-    "thanks", "thank you", "thanks a lot", "thank you so much", "thanks so much", "many thanks", "cheers",
+    "thanks", "thanks again", "thank you", "thanks a lot", "thank you so much", "thanks so much", "many thanks", "cheers",
     "bye", "goodbye", "bye bye", "see you", "see ya", "congrats", "congratulations", "sorry",
-    "bonjour", "bonsoir", "salut", "coucou", "hello", "merci", "merci beaucoup", "merci bien", "mille mercis",
+    "bonjour", "bonsoir", "salut", "coucou", "hello", "merci", "merci encore", "merci beaucoup", "merci bien", "mille mercis",
     "au revoir", "à plus", "à bientôt", "à demain", "bienvenue", "bravo", "félicitations", "pardon", "désolé", "désolée",
 )
 """Words that open a clause and are said *to* someone: the name right after them is who."""
@@ -355,7 +355,7 @@ def same_person(a: str, b: str) -> bool:
 
 def is_user(name: str, user_name: str) -> bool:
     key, me = fold(name), fold(user_name)
-    if key in {"me", "moi", "i", "myself", "user", "the user", "assistant", "claude", "ai", "the assistant", "agent", ""}:
+    if key in {"me", "moi", "i", "myself", "self", "user", "the user", "assistant", "claude", "ai", "the assistant", "agent", ""}:
         return True
     return bool(me) and (key == me or key == me.split()[0])
 

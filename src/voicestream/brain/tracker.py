@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 from ..events import EventBus
 from ..models import AgentRun, AgentStatus, Item, ItemKind, ItemStatus, Meeting, next_item_id, utcnow
 from .dates import is_iso_date, resolve_due
+from .people import add_person, people_event
 
 log = logging.getLogger(__name__)
 
@@ -160,11 +161,9 @@ class ItemTracker:
         if result.meeting_title and not self.meeting.title:
             self.meeting.title = result.meeting_title.strip()[:120]
             self._publish("meeting.updated", title=self.meeting.title)
-        me = {self.user_name.strip().lower(), *_FIRST_PERSON, *_ASSISTANT}
-        for p in result.participants:
-            p = p.strip()
-            if p and p.lower() not in {x.lower() for x in self.meeting.participants} and p.lower() not in me:
-                self.meeting.participants.append(p[:80])
+        # Claude's word on a name you addressed confirms it; a name you removed stays out (brain.people)
+        if any([add_person(self.meeting, p, self.user_name, model=True) for p in result.participants]):
+            self.publish_people()
 
         for upd in result.updates:
             item = self.meeting.items.get(upd.id.strip())
@@ -355,6 +354,11 @@ class ItemTracker:
     def _publish(self, type: str, **data: object) -> None:
         if self.bus is not None:
             self.bus.publish(type, meeting_id=self.meeting.id, **data)
+
+    def publish_people(self) -> None:
+        """``meeting.people``: who the meeting is with changed (the windows' "With …" line)."""
+        if self.bus is not None:
+            self.bus.publish("meeting.people", **people_event(self.meeting))
 
 
 def _default_agent_prompt(item: Item) -> str:

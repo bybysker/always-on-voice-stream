@@ -15,7 +15,7 @@ import secrets
 from collections.abc import Coroutine
 from datetime import date, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import Field
 from starlette.exceptions import HTTPException
@@ -107,6 +107,17 @@ class PrefsPatch(_Body):
     silence_end_minutes: Minutes | None = None
 
 
+PersonName = Annotated[str, Field(min_length=1, max_length=80, pattern=r"^[^\x00-\x1f\x7f]+$")]
+"""A name as typed in a "With …" line: one line, no control characters."""
+
+
+class PeopleEdit(_Body):
+    """``POST /api/meetings/{folder}/people``: names to add to the meeting and names to take out."""
+
+    add: list[PersonName] = Field(default_factory=list, max_length=20)
+    remove: list[PersonName] = Field(default_factory=list, max_length=20)
+
+
 class HotkeyRecording(_Body):
     active: bool
 
@@ -186,6 +197,7 @@ class AppApi:
             Route(f"{m}/push", self.push_meeting, methods=["POST"]),
             Route(f"{m}/summarize", self.summarize_meeting, methods=["POST"]),
             Route(f"{m}/items", self.add_item, methods=["POST"]),
+            Route(f"{m}/people", self.edit_people, methods=["POST"]),
             Route(item, self.edit_item, methods=["PATCH"]),
             Route(f"{item}/dismiss", self.dismiss_item, methods=["POST"]),
             Route(f"{item}/restore", self.restore_item, methods=["POST"]),
@@ -383,6 +395,13 @@ class AppApi:
             request.path_params["folder"], new.kind.value, new.title, owner=new.owner or None, due_text=new.due_text or None
         )
         return JSONResponse(item, status_code=201)
+
+    async def edit_people(self, request: Request) -> JSONResponse:
+        """Who the meeting is with, corrected: the Live screen's and a meeting page's "With …" line."""
+        body = await _parse(request, PeopleEdit)
+        if not body.add and not body.remove:
+            raise HTTPException(400, "nothing to change: give names to add or remove")
+        return JSONResponse(self.host.meetings.edit_people(request.path_params["folder"], body.add, body.remove))
 
     async def edit_item(self, request: Request) -> JSONResponse:
         fields = (await _parse(request, ItemEdit)).model_dump(mode="json", exclude_unset=True)
