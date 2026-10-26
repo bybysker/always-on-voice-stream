@@ -125,8 +125,9 @@ answer exactly "nothing relevant".
 """
 
 
-def render_segment(index: int, seg: TranscriptSegment) -> str:
-    return f"[#{index} {fmt_ts(seg.t_start)} {seg.speaker}] {seg.text}"
+def render_segment(index: int, seg: TranscriptSegment, speaker: str | None = None) -> str:
+    """``speaker``: the name to show instead of the stored label (see :func:`.people.speaker_label`)."""
+    return f"[#{index} {fmt_ts(seg.t_start)} {speaker or seg.speaker}] {seg.text}"
 
 
 def render_screen(note: ScreenNote) -> str:
@@ -169,11 +170,15 @@ def output_language(setting: str, meeting: Meeting | None = None) -> str:
 def meeting_context(
     meeting: Meeting, user_name: str, today: date, attendees: list[str], language: str = "auto"
 ) -> str:
-    people = sorted({*attendees, *meeting.participants})
+    # a name only guessed from how the user spoke stays out: Claude's own reading is the second opinion
+    confirmed = [p for p in meeting.participants if (info := meeting.people.get(p)) is None or info.confirmed()]
+    people = sorted({*attendees, *confirmed})
+    removed = f"Not in this meeting (the user said so): {', '.join(meeting.people_removed)}\n" if meeting.people_removed else ""
     return (
         f"User (speaker 'Me'): {user_name}\n"
         f"Today: {today.isoformat()} ({today.strftime('%A')})\n"
         f"Meeting title: {meeting.title or '(not set yet)'}\n"
         f"Known participants: {', '.join(people) if people else '(unknown)'}\n"
+        f"{removed}"
         f"Write titles, details, notes and agent briefs in: {output_language(language, meeting)}"
     )

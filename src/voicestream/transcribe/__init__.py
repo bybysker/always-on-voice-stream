@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from .. import known_people
 from ..config import Config
 from .base import ChunkTranscriber, FakeTranscriber, Transcriber, TranscriptionError, UsageCallback
 
@@ -11,8 +12,11 @@ PartialCallback = Callable[[str, str, str], None]
 
 
 def keywords_for(cfg: Config) -> list[str]:
+    """Words speech recognition should expect: your vocabulary, your attendees, your name, and the
+    people you met lately (:mod:`voicestream.known_people`)."""
     seen: dict[str, None] = {}
-    for word in [*cfg.brain.vocabulary, *cfg.brain.attendees, cfg.user_name]:
+    met = known_people.names(cfg.data_path, known_people.VOCABULARY)
+    for word in [*cfg.brain.vocabulary, *cfg.brain.attendees, cfg.user_name, *met]:
         w = (word or "").strip()
         if w and w.lower() not in {"me", "others"}:
             seen.setdefault(w, None)

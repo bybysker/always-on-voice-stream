@@ -415,6 +415,7 @@ const S = {
     segs: [],                // transcript lines and screen notes, in order: [kind, data]
     seen: new Set(),
     partials: new Map(),     // source -> {speaker, text, at}
+    people: null,            // {participants, people, people_removed}: who the meeting is with
     meters: new Map(),       // source -> {el, fill, at}
     editing: new Set(),      // item ids with an open form: left alone while you type
     expanded: new Set(),
@@ -452,6 +453,7 @@ const S = {
 const EVENT_TYPES = [
   'state', 'app.state', 'app.warning', 'assistant.started', 'assistant.stopped', 'assistant.paused', 'assistant.resumed',
   'meeting.started', 'meeting.updated', 'meeting.ending', 'meeting.ended', 'meeting.notes_updated', 'meeting.saved',
+  'meeting.people',
   'segment', 'transcript.partial', 'level', 'extraction', 'item.added', 'item.updated', 'agent.updated', 'item.pushed',
   'sink.error', 'notes.pushed', 'cost', 'screen', 'source.error', 'source.stopped', 'agent.budget', 'agent.held',
   'model.download', 'settings.changed', 'app.focus',
@@ -525,6 +527,9 @@ function handle(type, ev) {
       return onSettingsChanged(d);
     case 'meeting.saved':
       return onMeetingSaved(d);
+    case 'meeting.people':
+      onDetailPeople(d);
+      break;
     case 'cost':
       return setCost(d);
     case 'assistant.started':
@@ -1404,10 +1409,13 @@ function buildLive() {
   LV.clockTime = h('span', { class: 'num rec-time', role: 'timer', 'aria-label': t('live.clock_label') });
   LV.clock = h('div', { class: 'rec-clock', id: 'rec-clock' }, h('span', { class: 'rec-dot', 'aria-hidden': 'true' }), LV.clockTime);
   LV.controls = h('div', { class: 'live-actions', id: 'meeting-controls' });
+  LV.people = new PeopleLine('live', livePeopleSend, (people) => setLivePeople(people));
   const head = LV.head = h('div', { class: 'live-head' },
     h('div', { class: 'title' }, LV.title,
       h('div', { class: 'sub' }, LV.elapsed, LV.elapsedSep, LV.subText, LV.pausedPill), LV.meterSlot),
-    h('div', { class: 'live-side' }, LV.clock, LV.controls, LV.end));
+    h('div', { class: 'live-side' }, LV.clock, LV.controls, LV.end),
+    // after the meeting's controls, which the keyboard reaches first from its title
+    LV.people.el);
 
   LV.transcript = h('div', { class: 'scroll transcript', id: 'transcript', role: 'log', 'aria-label': t('live.transcript'), tabindex: '0' });
   LV.tEmpty = h('p', { class: 'empty-line' }, t('live.nothing_yet'));
@@ -1423,7 +1431,7 @@ function buildLive() {
   const transcriptPane = h('section', { class: 'card pane', 'aria-labelledby': 'tp-h' },
     h('div', { class: 'pane-head' }, h('h2', { id: 'tp-h' }, t('live.transcript'))), LV.transcript, LV.jump);
 
-  LV.voices = new VoiceStrip('live');
+  LV.voices = new VoiceStrip('live', S.live.other || null);
   LV.board = new ItemBoard(liveCtx);
   LV.addForm = addItemForm(LV.board, (body) => api('POST', '/api/items', body), { compact: true });
   const dismissed = h('input', { type: 'checkbox', id: 'live-show-dismissed', checked: liveCtx.showDismissed });
@@ -1443,6 +1451,7 @@ function buildLive() {
   for (const item of S.live.items.values()) markSaid(LV.lines, item);
   LV.voices.setItems(S.live.items.values());  // and its legend, once
   LV.tEmpty.hidden = S.live.segs.length > 0;
+  LV.people.set(S.live.people || {}, false);
   renderPartials();
 }
 
@@ -1785,6 +1794,143 @@ function person(name, mine = false) {
   return h('span', { class: 'who' + (mine ? ' you' : '') }, disc, label);
 }
 
+// ------------------------------------------------------------- who the meeting is with
+
+/** The one other person, when a meeting is with exactly one: the meeting audio is them (brain/people.py). */
+function otherSide(people) {
+  const names = (people && people.participants) || [];
+  return names.length === 1 ? names[0] : null;
+}
+
+/** A guess not confirmed yet: you called them by name, and neither Claude nor you said so too. */
+function probable(info) { return Boolean(info && info.heard && !info.model && !info.you); }
+
+/**
+ * "With Sam, Julie": a name per person, a guess marked "probably", each one removable (×) and "Add a
+ * name" — on Live while recording, and on a meeting's page. ``send({add, remove})`` makes the change
+ * and answers with the meeting's people as they are then; ``changed(people)`` is told.
+ */
+class PeopleLine {
+  constructor(id, send, changed) {
+    this.id = id;
+    this.lang = LANG;  // its words: a page draws a new one in another language
+    this.send = send;
+    this.changed = changed;
+    this.people = { participants: [], people: {}, people_removed: [] };
+    this.readOnly = false;
+    this.adding = false;
+    this.onAdding = () => {};  // told when "Add a name" opens and closes (a page leaves an open form alone)
+    this.list = h('ul', { class: 'person-chips', role: 'list' });
+    this.input = h('input', { id: id + '-person-in', class: 'person-in', placeholder: t('people.add_ph'),
+      'aria-label': t('people.add_label'), maxlength: 80, autocomplete: 'off' });
+    this.form = h('form', { class: 'entry person-add', id: id + '-person-form', autocomplete: 'off' }, this.input,
+      h('button', { type: 'submit', class: 'btn small', id: id + '-person-save' }, t('people.add_save')),
+      h('button', { type: 'button', class: 'btn ghost small icon-only', id: id + '-person-cancel', 'aria-label': t('common.cancel'),
+        title: t('common.cancel'), onclick: () => this.close(true) }, icon('x')));
+    this.form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const name = this.input.value.trim().replace(/\s+/g, ' ');
+      if (!name) return this.input.focus();
+      this.edit({ add: [name] }, e.submitter || null, () => { this.input.value = ''; this.close(true); });
+    });
+    this.form.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); this.close(true); } });
+    this.addBtn = btn(t('people.add'), { cls: 'ghost small', id: id + '-person-add', onclick: () => this.open() }, 'plus');
+    this.el = h('div', { class: 'people-line', id: id + '-people', role: 'group', 'aria-labelledby': id + '-people-h' },
+      h('span', { class: 'people-label', id: id + '-people-h' }, t('people.with')), this.list, this.addBtn, this.form);
+    this.render();
+  }
+
+  set(people, readOnly = this.readOnly) {
+    this.people = { participants: [], people: {}, people_removed: [], ...(people || {}) };
+    this.readOnly = readOnly;
+    if (readOnly) this.adding = false;
+    keepFocus(this.el, () => this.render());
+  }
+
+  render() {
+    const { participants, people } = this.people;
+    fill(this.list, ...participants.map((name, i) => {
+      const guess = probable(people[name]);
+      return h('li', { class: 'person-chip' + (guess ? ' probable' : ''), title: guess ? t('people.probable_help') : null },
+        h('span', { class: 'person-name' }, name),
+        guess && h('span', { class: 'probably' }, t('people.probably')),
+        !this.readOnly && h('button', { type: 'button', class: 'chip-x', id: `${this.id}-person-x-${i}`,
+          'aria-label': t('people.remove', { name }), title: t('people.remove', { name }),
+          onclick: (e) => this.remove(name, i, e.currentTarget) }, icon('x')));
+    }));
+    if (!participants.length) this.list.append(h('li', { class: 'muted person-none' }, t('people.none')));
+    this.addBtn.hidden = this.readOnly || this.adding;
+    this.form.hidden = this.readOnly || !this.adding;
+  }
+
+  open() {
+    this.adding = true;
+    this.onAdding(true);
+    this.render();
+    this.input.focus();
+  }
+
+  close(focus) {
+    this.adding = false;
+    this.onAdding(false);
+    this.render();
+    if (focus) this.addBtn.focus();
+  }
+
+  remove(name, index, button) {
+    // the focus goes on to the next name's ×, or back to the one before, or to "Add a name"
+    this.edit({ remove: [name] }, button, () => {
+      const xs = this.list.querySelectorAll('.chip-x');
+      (xs[Math.min(index, xs.length - 1)] || this.addBtn).focus();
+    });
+  }
+
+  edit(body, button, then) {
+    return act(button, async () => {
+      const people = await this.send(body);
+      this.set(people);
+      this.changed(people);
+      then();
+    });
+  }
+}
+
+/** Who the meeting on Live is with: its "With …" line, and the other side's name on its lines and strip. */
+function setLivePeople(m) {
+  const L = S.live;
+  L.people = m ? { participants: m.participants || [], people: m.people || {}, people_removed: m.people_removed || [] } : null;
+  const other = otherSide(L.people);
+  if (!LV.root) { L.other = other; return; }
+  LV.people.set(L.people || {}, false);
+  if (other === L.other) return;
+  L.other = other;
+  for (const spk of LV.lines.querySelectorAll('.spk.lane-others')) spk.textContent = other || t('live.others');
+  LV.voices.setOther(other);
+  renderPartials();
+}
+
+function livePeopleSend(body) {
+  const folder = S.live.meeting && S.live.meeting.folder;
+  if (!folder) return Promise.reject(new ApiError(409, t('people.not_yet')));
+  return api('POST', `/api/meetings/${enc(folder)}/people`, body);
+}
+
+/** ``meeting.people`` for the meeting page on show: its line, and the names on its strip and transcript. */
+function onDetailPeople(d) {
+  const D = S.detail;
+  if (!D || !D.data || D.data.meeting.id !== d.meeting_id) return;
+  setDetailPeople(D, d);
+}
+
+function setDetailPeople(D, people) {
+  const m = D.data.meeting;
+  const same = JSON.stringify([m.participants, m.people, m.people_removed])
+    === JSON.stringify([people.participants, people.people, people.people_removed]);
+  if (same) return;
+  Object.assign(m, { participants: people.participants || [], people: people.people || {}, people_removed: people.people_removed || [] });
+  if (S.route.name === 'meetings' && S.detail === D) keepFocus($('screen-meetings'), drawDetail);
+}
+
 function renderLastMeeting() {
   if (!S.lastMeetingLoaded && !S.lastMeetingFailed) { refreshLast(); }
   renderWeek();
@@ -1873,6 +2019,7 @@ function applyLiveState(st) {
     if (!L.meeting || L.meeting.id !== m.id) startMeeting({ id: m.id, title: m.title, started_at: m.started_at, folder: basename(st.meeting_dir) });
     else if (L.phase !== 'ending') L.phase = 'live';
     L.meeting.title = m.title || L.meeting.title;
+    setLivePeople(m);
     const timeline = [
       ...(m.segments || []).map((s) => [s.t_start, () => addSegment(s)]),
       ...(m.screen_notes || []).map((n) => [n.t, () => addScreen(n)]),
@@ -1912,9 +2059,11 @@ function startMeeting(m) {
   L.phase = 'live';
   L.lastEnded = null;
   L.segs = [];
+  L.people = null;
   for (const set of [L.seen, L.partials, L.editing, L.expanded]) set.clear();
   liveBoard().clear();
   LV.voices.clear();
+  setLivePeople(null);
   fill(LV.lines);
   fill(LV.partials);
   LV.tEmpty.hidden = false;
@@ -1935,6 +2084,8 @@ function liveEvent(type, d, ev) {
     case 'meeting.updated':
       if (d.title) L.meeting.title = d.title;
       break;
+    case 'meeting.people':
+      return setLivePeople(d);
     case 'meeting.ending':
       L.phase = 'ending';
       break;
@@ -2018,15 +2169,24 @@ function markSaid(box, item) {
   }
 }
 
-function speakerOf(seg) {
+/** Whether ``seg`` carries the meeting audio's own label ("Others"), not a name (an imported transcript's). */
+function othersLane(seg) {
+  return seg.source !== 'mic' && (!seg.speaker || seg.speaker === 'Others');
+}
+
+/** ``other``: the one other person in the meeting (otherSide), who the meeting audio's lines are then. */
+function speakerOf(seg, other = null) {
   const mine = seg.source === 'mic';
+  if (other && othersLane(seg)) return other;
   // the default labels (capture.mic.label = "Me"…) follow the app's language; a name you set is kept
   if (!seg.speaker || seg.speaker === (mine ? 'Me' : 'Others')) return mine ? t('live.me') : t('live.others');
   return seg.speaker;
 }
 
 function segLine(seg) {
-  return line(seg.source === 'mic' ? 'me' : 'others', fmtTs(seg.t_start), fmtClock(seg.wall_time), speakerOf(seg), seg.text, seg.id);
+  const el = line(seg.source === 'mic' ? 'me' : 'others', fmtTs(seg.t_start), fmtClock(seg.wall_time), speakerOf(seg, S.live.other), seg.text, seg.id);
+  if (othersLane(seg)) el.querySelector('.spk').classList.add('lane-others');  // renamed when the other side is known
+  return el;
 }
 
 function screenLine(note) {
@@ -2066,7 +2226,7 @@ function stick() {
 function renderPartials() {
   if (!LV.partials) return;
   fill(LV.partials, ...[...S.live.partials].map(([src, p]) =>
-    line('partial ' + (src === 'mic' ? 'me' : 'others'), '', '', speakerOf({ source: src, speaker: p.speaker }), p.text + '…')));
+    line('partial ' + (src === 'mic' ? 'me' : 'others'), '', '', speakerOf({ source: src, speaker: p.speaker }, S.live.other), p.text + '…')));
   stick();
 }
 
@@ -2084,8 +2244,10 @@ function axisStep(total) { return AXIS_STEPS.find((s) => total / s <= 6) || AXIS
  * Positions are fractions of ``--total`` (CSS), so a live meeting's strip only updates that.
  */
 class VoiceStrip {
-  constructor(id) {
+  /** ``other``: the one other person in the meeting, the meeting audio's lane then has their name. */
+  constructor(id, other = null) {
     this.id = id;
+    this.other = other;
     this.at = new Map();  // segment id -> its start, for the items' marks
     this.talk = { me: 0, others: 0 };
     this.end = 0;
@@ -2093,15 +2255,17 @@ class VoiceStrip {
     this.step = 0;
     this.counts = { action: 0, decision: 0 };
     this.tracks = {};
+    this.names = {};
     const lane = (name, label) => {
       const track = h('div', { class: 'track' });
       this.tracks[name] = track;
-      return h('div', { class: 'lane ' + name }, h('span', { class: 'lane-name' }, label), track);
+      this.names[name] = h('span', { class: 'lane-name' }, label);
+      return h('div', { class: 'lane ' + name }, this.names[name], track);
     };
     this.legend = h('div', { class: 'legend', id: id + '-voices-legend' });
     this.axis = h('div', { class: 'track axis' });
     this.plot = h('div', { class: 'voices-plot', role: 'img' },
-      lane('kept', t('voices.kept')), lane('me', t('live.me')), lane('others', t('live.others')),
+      lane('kept', t('voices.kept')), lane('me', t('live.me')), lane('others', this.othersName()),
       h('div', { class: 'lane axis-lane', 'aria-hidden': 'true' }, h('span', { class: 'lane-name' }), this.axis));
     this.el = h('section', { class: 'voices', 'aria-labelledby': id + '-voices-h' },
       h('div', { class: 'voices-head' }, h('h2', { id: id + '-voices-h' }, t('voices.title')), this.legend), this.plot);
@@ -2125,7 +2289,8 @@ class VoiceStrip {
     this.at.set(seg.id, seg.t_start || 0);
     this.talk[lane] += dur;
     this.end = Math.max(this.end, seg.t_end || 0);
-    const bar = h('i', { title: fmtTs(seg.t_start) + ' · ' + speakerOf(seg) });
+    const bar = h('i', { title: fmtTs(seg.t_start) + ' · ' + speakerOf(seg, this.other) });
+    if (othersLane(seg)) bar.dataset.at = String(seg.t_start || 0);  // its title follows the other side's name
     bar.style.setProperty('--s', String(seg.t_start || 0));
     bar.style.setProperty('--d', String(dur));
     this.tracks[lane].append(bar);
@@ -2175,19 +2340,30 @@ class VoiceStrip {
     if (last && last !== this.axis.firstElementChild) last.classList.toggle('end', (total - this.count * step) / total < 0.06);
   }
 
+  othersName() { return this.other || t('live.others'); }
+
+  /** The other side turned out to be one person (or no longer is): the lane, its bars and the legend say so. */
+  setOther(other) {
+    if (other === this.other) return;
+    this.other = other;
+    this.names.others.textContent = this.othersName();
+    for (const bar of this.tracks.others.querySelectorAll('i[data-at]')) bar.title = fmtTs(Number(bar.dataset.at)) + ' · ' + this.othersName();
+    this.renderLegend();
+  }
+
   renderLegend() {
     const talked = this.talk.me + this.talk.others;
     const me = talked ? Math.round((this.talk.me / talked) * 100) : 0;
     const parts = [];
     if (talked) {  // the two shares add up to 100: the second is what the first leaves
       parts.push(h('span', {}, h('i', { class: 'key me' }), t('voices.share', { who: t('live.me'), pct: fmtNum(me) })));
-      parts.push(h('span', {}, h('i', { class: 'key others' }), t('voices.share', { who: t('live.others'), pct: fmtNum(100 - me) })));
+      parts.push(h('span', {}, h('i', { class: 'key others' }), t('voices.share', { who: this.othersName(), pct: fmtNum(100 - me) })));
     }
     if (this.counts.action) parts.push(h('span', {}, h('i', { class: 'key mark action' }), tp('count.actions', this.counts.action)));
     if (this.counts.decision) parts.push(h('span', {}, h('i', { class: 'key mark decision' }), tp('count.decisions', this.counts.decision)));
     fill(this.legend, ...parts);
     this.plot.setAttribute('aria-label', talked
-      ? [t('voices.share', { who: t('live.me'), pct: fmtNum(me) }), t('voices.share', { who: t('live.others'), pct: fmtNum(100 - me) }),
+      ? [t('voices.share', { who: t('live.me'), pct: fmtNum(me) }), t('voices.share', { who: this.othersName(), pct: fmtNum(100 - me) }),
         this.counts.action ? tp('count.actions', this.counts.action) : '', this.counts.decision ? tp('count.decisions', this.counts.decision) : '']
         .filter(Boolean).join(', ')
       : t('live.nothing_yet'));
@@ -2617,8 +2793,16 @@ function drawDetail() {
   panel.setAttribute('aria-labelledby', 'tab-' + D.tab);
   panel.append(detailPanel(D));
 
+  if (!D.people || D.people.lang !== LANG) {
+    D.editing.delete('people');
+    D.people = new PeopleLine('detail', (body) => api('POST', `/api/meetings/${enc(D.folder)}/people`, body),
+      (people) => setDetailPeople(D, people));
+    D.people.onAdding = (on) => { if (on) D.editing.add('people'); else D.editing.delete('people'); };
+  }
+  D.people.set({ participants: m.participants, people: m.people, people_removed: m.people_removed }, readOnly);
+
   // the meeting as it went: who spoke when, and where each to-do and decision was said
-  const voices = new VoiceStrip('detail');
+  const voices = new VoiceStrip('detail', otherSide(m));
   for (const seg of m.segments || []) voices.add(seg, false);
   voices.setItems(Object.values(m.items || {}));  // and its legend, once
   voices.setTotal(duration);
@@ -2629,6 +2813,7 @@ function drawDetail() {
       h('div', { class: 'meta-line' }, meta.map((el, i) => (i
         ? h('span', { class: 'with-sep' + (typeof el === 'string' ? ' facts-here' : '') }, h('span', { 'aria-hidden': 'true', class: 'sep' }, '·'), el)
         : el))),
+      D.people.el,
       m.tldr && h('p', { class: 'tldr' }, m.tldr), actions),
     ...notes.map((n) => h('div', { class: 'readonly-note' }, n)),
     (m.segments || []).length ? voices.el : null,
@@ -2724,15 +2909,16 @@ function detailUpsert(item) {
 
 function transcriptPanel(D) {
   const segs = D.data.meeting.segments || [];
+  const other = otherSide(D.data.meeting);
   if (!segs.length) return h('div', { class: 'empty-state' }, icon('mic', 'xl'), h('strong', {}, t('meetings.no_transcript')));
   const filter = h('input', { type: 'search', placeholder: t('meetings.find_ph'), 'aria-label': t('meetings.find'), value: D.filter });
   const list = h('div', { class: 'tlines', id: 'transcript-lines' });
   const draw = () => {
     const needle = D.filter.toLowerCase();
-    const rows = segs.filter((s) => !needle || s.text.toLowerCase().includes(needle) || (s.speaker || '').toLowerCase().includes(needle));
+    const rows = segs.filter((s) => !needle || s.text.toLowerCase().includes(needle) || speakerOf(s, other).toLowerCase().includes(needle));
     fill(list, ...rows.map((s) => h('div', { class: 'tline ' + (s.source === 'mic' ? 'me' : 'others'), dataset: { seg: s.id } },
       h('span', { class: 'ts', title: fmtClock(s.wall_time) }, fmtTs(s.t_start)),
-      h('div', { class: 'body' }, h('span', { class: 'spk' }, speakerOf(s)), h('span', {}, s.text)))));
+      h('div', { class: 'body' }, h('span', { class: 'spk' }, speakerOf(s, other)), h('span', {}, s.text)))));
     for (const item of Object.values(D.data.meeting.items || {})) markSaid(list, item);
     if (!rows.length) list.append(h('p', { class: 'muted' }, t('meetings.find_none')));
   };
@@ -5093,6 +5279,11 @@ const STRINGS = {
     'live.week.decisions': 'Decisions', 'live.earlier': 'Before that', 'live.none_earlier': 'No other meeting yet.',
     'live.last_items_none': 'No to-dos or decisions came out of this meeting.', 'live.more_items': 'and {n} more in the notes',
     'live.me': 'Me', 'live.others': 'Others', 'live.screen': 'Screen',
+    'people.with': 'With', 'people.none': 'nobody named yet', 'people.probably': 'probably',
+    'people.probable_help': 'You called them by name: a guess until Claude or you confirm it',
+    'people.remove': 'Remove {name}', 'people.add': 'Add a name', 'people.add_ph': 'Name',
+    'people.add_label': 'Name of someone in this meeting', 'people.add_save': 'Add',
+    'people.not_yet': 'The meeting is still starting: try again in a moment.',
     'voices.title': 'Who spoke when', 'voices.kept': 'Noted', 'voices.share': '{who} {pct}%',
     'src.mic': 'Your microphone', 'src.system': 'Meeting audio',
     'md.done': 'done', 'md.todo': 'to do',
@@ -5587,6 +5778,11 @@ const STRINGS = {
     'live.week.decisions': 'Décisions', 'live.earlier': 'Avant', 'live.none_earlier': 'Pas d’autre réunion pour l’instant.',
     'live.last_items_none': 'Aucune tâche ni décision n’est sortie de cette réunion.', 'live.more_items': 'et {n} autres dans les notes',
     'live.me': 'Moi', 'live.others': 'Les autres', 'live.screen': 'Écran',
+    'people.with': 'Avec', 'people.none': 'personne de nommé pour l’instant', 'people.probably': 'probablement',
+    'people.probable_help': 'Vous l’avez appelé par son nom : une supposition, tant que Claude ou vous ne l’avez pas confirmée',
+    'people.remove': 'Retirer {name}', 'people.add': 'Ajouter un nom', 'people.add_ph': 'Nom',
+    'people.add_label': 'Nom d’une personne de cette réunion', 'people.add_save': 'Ajouter',
+    'people.not_yet': 'La réunion démarre encore : réessayez dans un instant.',
     'voices.title': 'Qui a parlé, et quand', 'voices.kept': 'Noté', 'voices.share': '{who} {pct} %',
     'src.mic': 'Votre micro', 'src.system': 'Son de la réunion',
     'md.done': 'fait', 'md.todo': 'à faire',

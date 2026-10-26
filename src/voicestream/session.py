@@ -33,11 +33,13 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
+from . import known_people
 from .agents.runner import AgentRunner, Engine
 from .audio import AudioSource, CaptureSetupError, Clock, build_source
 from .audio.base import aclose_quietly
 from .brain.extractor import Extractor
 from .brain.llm import LLM, ClaudeLLM, LLMUnavailable
+from .brain.people import add_person, addressed, other_side, speaker_label
 from .brain.summarizer import is_short_clip, known_language, rerender, summarize
 from .brain.tracker import ItemTracker
 from .config import Config
@@ -46,7 +48,7 @@ from .dispatch import Dispatcher
 from .events import EventBus
 from .models import AudioFrame, Event, ItemKind, Meeting, ScreenNote, TranscriptSegment, utcnow
 from .sinks.base import Sink, build_sinks
-from .storage import SessionStore, private_dir
+from .storage import SessionStore, private_dir, write_transcript_md
 from .transcribe import Transcriber, TranscriptionError, build_transcriber
 from .transcribe.echo import EchoFilter
 
@@ -125,6 +127,11 @@ class MeetingSession:
             on_change=self.save_soon,
             commands_trusted=lambda: not app.echo_unprotected,
         )
+        self.known_names = [*cfg.brain.attendees, *known_people.names(cfg.data_path)]
+        """Names known before this meeting: addressed in any vocative way, they count (:mod:`.brain.people`)."""
+        self.not_names = [cfg.user_name, cfg.capture.mic.label, cfg.capture.system.label,
+                          *(w for phrase in cfg.brain.wake_phrases for w in phrase.split())]
+        """Never someone you speak to: you, the lanes' labels, the words that wake the assistant."""
         self.last_speech_wall = app.wall()
         """When speech was last heard, on :attr:`Assistant.wall` (time asleep counts as silence)."""
         self.last_heard_at = utcnow()
@@ -181,6 +188,47 @@ class MeetingSession:
         self.app.bus.publish(
             "segment", meeting_id=self.meeting.id, segment=seg.model_dump(mode="json"), index=len(self.meeting.segments) - 1
         )
+        if seg.source == "mic":
+            self.hear_names(seg)
+
+    def hear_names(self, seg: TranscriptSegment) -> None:
+        """You addressed someone by name ("Sam, can you…", "Merci Julie"): they are in the meeting, now —
+        a guess Claude's extraction confirms or not, shown as one you can remove."""
+        known = [*self.known_names, *self.meeting.participants]
+        changed = False
+        for who in addressed(seg.text, known, self.not_names):
+            changed |= add_person(self.meeting, who.name, self.app.cfg.user_name, heard=True, strong=who.strong)
+        if changed:
+            self.tracker.publish_people()
+            self.save_soon()
+
+    # ------------------------------------------------------------------ people
+
+    def edit_people(self, add: list[str], remove: list[str]) -> bool:
+        """Your corrections to who the meeting is with. Added names are remembered as people you
+        know; a removed name is not added back to this meeting, and forgotten when this meeting was
+        all that taught it. An ended meeting's notes and transcript are written again with them."""
+        cfg = self.app.cfg
+        changed = known_people.edit_meeting(cfg.data_path, self.meeting, add, remove, cfg.user_name)
+        self.tracker.publish_people()
+        if self.finished:
+            self.write_names()
+        else:
+            self.save_soon()
+        return changed
+
+    def speaker(self, seg: TranscriptSegment) -> str:
+        return speaker_label(seg, other_side(self.meeting), self.app.cfg.capture.system.label)
+
+    def write_names(self) -> None:
+        """An ended meeting's notes (their "with …") and transcript.md (the other side's name) as its
+        people are now; its tools get them with the next push."""
+        try:
+            self.store.save_notes(rerender(self.meeting, self.app.cfg.user_name))
+        except OSError:
+            log.exception("could not write notes.md")
+        write_transcript_md(self.store.dir, self.meeting, self.speaker)
+        self.store.save()
 
     def add_screen(self, note: ScreenNote) -> None:
         note = note.model_copy(update={"t": max(0.0, note.t - self.t0)})
@@ -273,6 +321,9 @@ class MeetingSession:
         if self._rename():
             notes = rerender(self.meeting, cfg.user_name)  # the agents' files moved with the folder
         self._save_notes(notes)
+        known_people.remember_meeting(cfg.data_path, self.meeting, cfg.user_name)
+        if other_side(self.meeting):
+            write_transcript_md(self.store.dir, self.meeting, self.speaker)
         try:
             # a short clip's to-dos go out like any others, its notes stay on this computer
             await self.app.unless_forced(self.dispatcher.finalize(None if short else notes))

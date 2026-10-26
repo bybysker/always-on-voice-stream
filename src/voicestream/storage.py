@@ -27,6 +27,7 @@ import sys
 import time
 import unicodedata
 import wave
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -188,9 +189,7 @@ class SessionStore:
         self._transcript_md = self.dir / "transcript.md"
         if not self._transcript_md.exists():
             try:
-                self._transcript_md.write_text(
-                    f"# Transcript — {meeting.started_at.astimezone():%Y-%m-%d %H:%M}\n\n", encoding="utf-8"
-                )
+                self._transcript_md.write_text(transcript_header(meeting), encoding="utf-8")
             except OSError as exc:  # the meeting still runs in memory (meeting.json saves log their own errors)
                 log.error("could not write transcript: %s", exc)
 
@@ -311,6 +310,22 @@ class SessionStore:
             self._titled = True
         except OSError as exc:
             log.debug("could not rename session dir: %s", exc)
+
+
+def transcript_header(meeting: Meeting) -> str:
+    return f"# Transcript — {meeting.started_at.astimezone():%Y-%m-%d %H:%M}\n\n"
+
+
+def write_transcript_md(folder: Path, meeting: Meeting, speaker: Callable[[TranscriptSegment], str]) -> None:
+    """Write ``transcript.md`` again from the meeting's lines, each speaker as ``speaker`` names them
+    (the meeting audio as the one other person once they are known). ``transcript.jsonl`` keeps the
+    raw labels: this file is only for reading."""
+    lines = [transcript_header(meeting)]
+    lines += [f"**[{fmt_ts(seg.t_start)}] {speaker(seg)}:** {seg.text}\n\n" for seg in meeting.segments]
+    try:
+        atomic_write(folder / "transcript.md", "".join(lines))
+    except OSError as exc:
+        log.warning("could not rewrite the transcript: %s", exc)
 
 
 def load_meeting(path: str | Path) -> tuple[Meeting, Path]:
