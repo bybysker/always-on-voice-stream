@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime
 
+from .. import known_people
 from ..config import Config
 from ..models import FollowUpEmail, Item, ItemKind, ItemStatus, Meeting, fmt_ts
 from ..transcribe.echo import words
@@ -78,8 +79,9 @@ async def summarize(
             if wire.participants:
                 # the whole meeting tells who took part better than the live pass, which may have kept
                 # someone who was only mentioned (and sinks like HubSpot file the notes on these people);
-                # names you added or clearly spoke to stay (brain.people.finalize)
-                finalize(meeting, wire.participants, cfg.user_name)
+                # names you added, or known ones you clearly spoke to, stay (brain.people.finalize)
+                known = [*cfg.brain.attendees, *known_people.known_before(cfg.data_path, meeting.id)]
+                finalize(meeting, wire.participants, cfg.user_name, known)
                 tracker.publish_people()
             if wire.title.strip():
                 meeting.title = wire.title.strip()[:120]

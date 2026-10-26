@@ -373,6 +373,10 @@ def test_the_update_state_machine() -> None:
     m2 = upd.UpdateMachine(current=V("0.3.0"))
     m2.found(_r("0.4.0"))
     assert m2.found(None) and m2.phase == "idle" and m2.release is None
+    m2.found(_r("0.4.0"))
+    m2.start_download()
+    m2.downloaded()
+    assert m2.found(_r("0.3.0")) and m2.phase == "idle" and m2.release is None  # downloaded, then pulled
 
 
 def test_an_install_during_a_meeting_waits_for_it_to_end() -> None:
@@ -629,6 +633,103 @@ def test_install_prepares_the_swap_then_quits(tmp_path: Path, feed: Feed, monkey
     assert any(c[:2] == ["/usr/bin/hdiutil", "detach"] for c in tools.calls)  # unmounted once staged
 
 
+def _held_install(tmp_path: Path, feed: Feed, monkeypatch: pytest.MonkeyPatch) -> tuple[upd.Updater, Path, dict[str, Any]]:
+    """An updater whose install stops while it stages the new app (``held["preparing"]``) until
+    ``held["go_on"]`` is set; ``held["started"]``: the helpers started, ``held["quits"]``: the quits."""
+    feed.publish("/latest", feed.release())
+    u, _ = _updater(tmp_path, feed)
+    held: dict[str, Any] = {"preparing": threading.Event(), "go_on": threading.Event(), "started": [], "quits": []}
+    u.quit_app = lambda: held["quits"].append(1)
+    u.can_install = True
+    app = _bundle(tmp_path / "Applications", "0.3.0")
+    volume = tmp_path / "volume"
+    _bundle(volume, "0.4.0")
+    tools = FakeTools(volume)
+    monkeypatch.setattr(upd, "_run", tools)
+    monkeypatch.setattr(upd, "start_helper", lambda script, **kw: held["started"].append(kw))
+    real = upd.Updater._prepare
+
+    def slow(self: upd.Updater, dmg: Path, app: Path, version: upd.Version, run: Any = tools) -> Path:
+        held["preparing"].set()
+        held["go_on"].wait(10)
+        return real(self, dmg, app, version, run)
+
+    monkeypatch.setattr(upd.Updater, "_prepare", slow)
+    return u, app, held
+
+
+async def _until_preparing(held: dict[str, Any]) -> None:
+    for _ in range(500):
+        if held["preparing"].is_set():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the install never got to staging the new app")
+
+
+def test_a_check_during_the_install_leaves_its_release_alone(tmp_path: Path, feed: Feed,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """A newer release published while the update is being staged: the install goes on with the one it
+    staged (the next check offers the newer one), rather than failing with its helper already waiting."""
+    u, app, held = _held_install(tmp_path, feed, monkeypatch)
+
+    async def run() -> None:
+        await u.check()
+        assert u.install(app) == "started"
+        await _until_preparing(held)
+        feed.publish("/latest", feed.release("v0.5.0"), etag='"v2"')
+        assert await u.check() == "available"
+        assert u.machine.phase == "ready" and str(u.machine.release.version) == "0.4.0"
+        feed.publish("/latest", feed.release("v0.3.0"), etag='"v3"')  # or pulled: likewise
+        assert await u.check() == "up_to_date"
+        assert u.machine.phase == "ready" and str(u.machine.release.version) == "0.4.0"
+        held["go_on"].set()
+        await u._task
+
+    asyncio.run(run())
+    assert u.machine.phase == "installing" and held["quits"] == [1], u.machine.error
+    (call,) = held["started"]
+    assert call["new"] == upd.staged_path(app, "0.4.0")
+
+
+def test_no_helper_is_started_for_a_release_no_longer_on_offer(tmp_path: Path, feed: Feed,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    u, app, held = _held_install(tmp_path, feed, monkeypatch)
+
+    async def run() -> None:
+        await u.check()
+        assert u.install(app) == "started"
+        await _until_preparing(held)
+        u.machine.found(_r("0.5.0"))  # however the release on offer changed meanwhile
+        held["go_on"].set()
+        await u._task
+
+    asyncio.run(run())
+    assert held["started"] == [] and held["quits"] == []  # no helper waiting to swap in what nobody installs
+    assert u.machine.phase == "available" and str(u.machine.release.version) == "0.5.0"
+    assert not upd.staged_path(app, "0.4.0").exists() and u.staged is None
+
+
+def test_a_downloaded_release_that_was_pulled_is_no_longer_offered(tmp_path: Path, feed: Feed) -> None:
+    feed.publish("/latest", feed.release())
+    u, _ = _updater(tmp_path, feed, [True])  # in a meeting: downloaded, not installed
+
+    async def run() -> None:
+        await u.check()
+        assert u.install(None) == "deferred"
+        await u._task
+        assert u.machine.phase == "ready" and u.dmg is not None and u.dmg.is_file()
+        dmg = u.dmg
+        u.staged = tmp_path / "Applications" / ".Voicestream-0.4.0.update.app"
+        (u.staged / "Contents").mkdir(parents=True)
+        staged = u.staged
+        feed.publish("/latest", feed.release("v0.3.0"), etag='"v2"')  # the maintainer took 0.4.0 back
+        assert await u.check() == "up_to_date"
+        assert u.machine.phase == "idle" and u.machine.release is None and not u.machine.deferred
+        assert not dmg.exists() and not staged.exists() and u.dmg is None and u.staged is None
+
+    asyncio.run(run())
+
+
 def test_app_management_opens_the_update_in_finder_instead(tmp_path: Path, feed: Feed,
                                                            monkeypatch: pytest.MonkeyPatch) -> None:
     feed.publish("/latest", feed.release())
@@ -720,6 +821,74 @@ def test_the_host_never_installs_during_a_meeting(host: AppHost) -> None:
     assert not host.update_busy()  # always-on listening between meetings: it starts again after the restart
     host._start_queued = True
     assert host.update_busy()
+    host._start_queued = False
+    host._retiring[object()] = None  # type: ignore[index]  # an earlier meeting's agents, still at work
+    assert host.update_busy()
+
+
+def _deferred(host: AppHost) -> upd.UpdateMachine:
+    """Install was asked for during the meeting: downloaded, put off until it is over."""
+    m = host.updater.machine
+    m.current = V("0.3.0")
+    m.found(_r("0.4.0"))
+    m.start_download()
+    m.downloaded()
+    m.defer()
+    return m
+
+
+async def test_an_update_waits_for_an_automatic_meeting_s_wrap_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Always-on: a meeting closed on a silence is wrapped up in the background while listening goes on.
+    Offered as it closed, Install would quit mid-summary: the notes bare, the pushes skipped."""
+    from helpers import seg
+    from test_app_host import _host, _until
+    from test_app_meeting_start import Wall, _clocked, _events, _slow_wrap_up
+
+    gate = _slow_wrap_up(monkeypatch)
+    wall = Wall()
+    built: list[Any] = []
+    host = _host(tmp_path, factory=_clocked(wall, built), mode="automatic")  # meetings close after 10 min
+    try:
+        await host.listen_start()
+        await built[0]._route(seg("Let's start.", "mic", t=1.0))
+        assert host.update_busy()
+        m = _deferred(host)
+        wall.advance(11)
+        await _until(lambda: bool(_events(host, "meeting.ending")))
+        await asyncio.sleep(0.1)
+        assert not _events(host, "meeting.ended") and not host.in_meeting() and host.status == "listening"
+        assert host.update_busy() and m.deferred and not m.offer  # its summary and pushes are still to come
+        gate.set()
+        await _until(lambda: bool(_events(host, "meeting.ended")))
+        assert not host.update_busy() and m.offer and not m.deferred  # offered once its notes are written
+    finally:
+        gate.set()
+        await host.shutdown()
+
+
+async def test_an_update_waits_for_a_meeting_started_by_hand_to_be_wrapped_up(tmp_path: Path,
+                                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    from helpers import seg
+    from test_app_host import _until
+    from test_app_meeting_start import _events, _manual, _slow_wrap_up
+
+    gate = _slow_wrap_up(monkeypatch)
+    built: list[Any] = []
+    host = _manual(tmp_path, built=built)
+    m = _deferred(host)
+    try:
+        await host.meeting_start()
+        await built[0]._route(seg("I'll send the deck to Sam by Friday.", "mic", t=1.0))
+        assert await host.meeting_stop() == "stop"
+        await _until(lambda: bool(_events(host, "meeting.ending")))
+        await asyncio.sleep(0.1)
+        assert host.update_busy() and m.deferred and not m.offer
+        gate.set()
+        await _until(lambda: host.status == "stopped")
+        assert _events(host, "meeting.ended") and not host.update_busy() and m.offer
+    finally:
+        gate.set()
+        await host.shutdown()
 
 
 def test_the_automatic_check_waits_for_the_setup_and_the_preference(tmp_path: Path, feed: Feed,

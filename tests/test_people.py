@@ -79,6 +79,8 @@ STRONG = [
     ("Bonsoir Jean-Pierre.", "Jean-Pierre"),
     ("Élodie, tu peux présenter ?", "Élodie Martin"),  # the known form of the name
     ("Elodie, tu peux présenter ?", "Élodie Martin"),  # without its accent, as the transcriber may write it
+    ("Thanks Emily!", "Emily"),  # a name with an adverb's ending
+    ("Merci Clément.", "Clément"),
 ]
 
 
@@ -124,6 +126,15 @@ NEGATIVE = [
     "Bref, vous voyez l'idée ?", "Écoute, tu peux regarder ?", "Ensuite, tu ajoutes la ligne.",
     "Dis Claude, fais un résumé.", "Thanks April.", "Merci Mai.", "Hi CEO.", "Thanks, everybody!",
     "Lundi, tu peux ?", "Guys, can you hear me?", "Basically, you need a key.", "Ben, tu vois, c'est compliqué.",
+    # adverbs, discourse markers and imperatives that open a sentence put to someone
+    "Remember, you said Friday.", "Lastly, can you send it?", "Firstly, you need a key.", "Secondly, can you check?",
+    "Later, can you call him?", "Similarly, you can add it.", "Frankly, you know it.", "Briefly, can you explain?",
+    "Seriously, can you stop?", "Hopefully, you can come.", "No Way!", "Look, can you check?", "Listen, you know it.",
+    "Wait, can you repeat?", "Sorry, can you repeat?", "Anyway, what do you think?", "Imagine, you win.",
+    "Pourtant, tu l'as dit.", "Attention, tu vas tomber.", "Pareil, tu peux voir ?", "Remarque, tu as raison.",
+    "Sérieux, tu crois ?", "Écoute, tu vois ?", "Regarde, tu cliques là.", "Attends, tu peux répéter ?",
+    "Bref, tu vois ?", "Enfin, tu sais bien.", "Voilà, tu as compris.", "Justement, tu peux voir ?",
+    "Normal, tu vois ?", "Évidemment, tu as raison.",
 ]
 
 
@@ -176,10 +187,11 @@ def test_add_remove_and_never_back() -> None:
 def test_claude_s_final_word_keeps_what_you_said() -> None:
     m = Meeting(participants=["Legacy"])  # saved before people were tracked: Claude's
     add_person(m, "Sam", heard=True, strong=True)  # "Thanks Sam" — Claude may miss someone who never spoke
+    add_person(m, "Remember", heard=True, strong=True)  # "Remember, you said…": nobody knew that name
     add_person(m, "Julie", heard=True)  # "Julie, c'est bon." — a weak guess
     add_person(m, "Marc", model=True)  # the live pass thought so
     add_person(m, "Inès", you=True)
-    finalize(m, ["Paul", "Julie"])
+    finalize(m, ["Paul", "Julie"], known=["Sam Lefèvre"])
     assert m.participants == ["Sam", "Julie", "Inès", "Paul"]
     assert m.people["Julie"].model and m.people["Paul"] == PersonInfo(model=True)
 
@@ -220,6 +232,7 @@ def test_notes_say_who_and_the_summary_reads_the_other_side_by_name() -> None:
 
 async def test_the_summary_keeps_your_corrections(cfg: Config) -> None:
     cfg.brain.provider = "anthropic"
+    known_people.remember(cfg.data_path, ["Sam"], "earlier")
     m = Meeting(title="Sync")
     m.segments.append(seg("Thanks Sam, Marc, see you.", "mic"))
     add_person(m, "Sam", heard=True, strong=True)
@@ -230,6 +243,19 @@ async def test_the_summary_keeps_your_corrections(cfg: Config) -> None:
     assert m.participants == ["Sam", "Inès", "Julie"]
     sent = llm.calls[0]["content"][1]["text"]
     assert "Not in this meeting (the user said so): Marc" in sent
+
+
+async def test_a_strong_name_nobody_knew_goes_when_claude_does_not_list_it(cfg: Config) -> None:
+    cfg.brain.provider = "anthropic"
+    cfg.brain.attendees = ["Priya"]
+    m = Meeting(title="Sync")
+    m.segments.append(seg("Thanks Priya. Thanks Tom. Hi Nadia.", "mic"))
+    for name in ("Priya", "Tom", "Nadia"):
+        add_person(m, name, heard=True, strong=True)
+    known_people.remember(cfg.data_path, ["Nadia"], "earlier")
+    known_people.remember(cfg.data_path, ["Tom"], m.id)  # learned from this very meeting: not known before it
+    await summarize(cfg, m, ItemTracker(m, None, cfg.user_name), ScriptedLLM([_summary(participants=["Julie"])]))
+    assert m.participants == ["Priya", "Nadia", "Julie"]
 
 
 # ------------------------------------------------------------------ known people

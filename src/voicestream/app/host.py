@@ -761,8 +761,11 @@ class AppHost:
                 self.still_there = None
             # it is over (no longer current) and wraps up in the background: an automatic one closed on a
             # silence or by "End meeting now" says nothing else until its notes are written, and the shell's
-            # floating button and menu bar would show it recording meanwhile
+            # floating button and menu bar would show it recording meanwhile. An update put off for it is
+            # not offered yet (update_busy): installing it now would cut the wrap-up short; meeting.ended does
             self._publish_state()
+        elif ev.type == "meeting.notes_updated":
+            self.updater.meeting_over()  # its agents were the last of its wrap-up
         elif ev.type == "meeting.ended":
             note = self.notice
             if note is not None and note.get("meeting_id") == ev.data.get("meeting_id"):
@@ -942,6 +945,8 @@ class AppHost:
                 # it had handed listening over already (see _stop): its agents are done now
                 if settled:
                     self._publish_state()
+                else:
+                    self.updater.meeting_over()  # an update put off for them is offered now
             else:
                 if self._assistant is assistant:
                     self._assistant = None
@@ -1636,8 +1641,13 @@ class AppHost:
 
     def update_busy(self) -> bool:
         """A meeting is being recorded, or about to be, or wrapped up: no update is installed now (quitting
-        would end it). Always-on listening between meetings is not one: it starts again after the restart."""
-        if self.in_meeting() or self._start_queued or self.status == "stopping":
+        would end it, or cut its summary and pushes short). Always-on listening between meetings is not
+        one: it starts again after the restart — but a meeting that just closed on a silence is wrapped up
+        in the background while it goes on, and an assistant stopped earlier may still be finishing one's
+        agents (:attr:`_retiring`)."""
+        if self.in_meeting() or self._start_queued or self.status == "stopping" or self._retiring:
+            return True
+        if any(a.wrapping_up for a in self.assistants):
             return True
         return self.prefs.meeting_start == "manual" and self.status in ("starting", "listening", "paused")
 

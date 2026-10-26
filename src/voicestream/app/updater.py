@@ -787,7 +787,9 @@ class UpdateMachine:
     ``idle`` (nothing newer) → ``available`` (a newer release) → ``downloading`` → ``ready`` (downloaded
     and verified) → ``installing`` (the helper is started, the app quits); any of the middle ones →
     ``failed`` (with :attr:`error`; the release is kept, so it can be tried again). A check that finds
-    the same release changes nothing; one that finds a newer one starts over at ``available``.
+    the same release changes nothing; one that finds a newer one starts over at ``available``; one that
+    finds nothing newer than this version (the release was pulled) goes back to ``idle``, a downloaded
+    one too.
 
     :attr:`deferred`: Install was asked for during a meeting. The download goes on, nothing is installed;
     when the meeting ends (:meth:`meeting_over`) the window offers it again (:attr:`offer`)."""
@@ -806,8 +808,9 @@ class UpdateMachine:
     def found(self, release: Release | None) -> bool:
         """A check's answer; returns whether the state changed."""
         if release is None or release.version <= self.current:
-            if self.phase in ("available", "failed"):
-                # nothing newer than this version any more (the release was pulled): nothing to offer
+            if self.phase in ("available", "failed", "ready"):
+                # nothing newer than this version any more (the release was pulled): nothing to offer, and
+                # a download of it is not to be installed (the host deletes it)
                 self.phase, self.release, self.error, self.error_code = "idle", None, None, None
                 self.deferred = self.offer = False
                 return True
@@ -909,6 +912,9 @@ class Updater:
         """The native shell says this is the packaged app, which can replace itself."""
         self.quit_app: Callable[[], None] | None = None
         self.dmg: Path | None = None
+        self.staged: Path | None = None
+        """The new app staged next to the running one, until the helper takes it (or it is given up)."""
+        self._pulled: list[Path] = []
         self._cancel = threading.Event()
         self._task: asyncio.Task[Any] | None = None
         self._last_progress = 0.0
@@ -1020,6 +1026,9 @@ class Updater:
         finally:
             self.checking = False
         outcome = self._take(res, prereleases, url)
+        if self._pulled:
+            pulled, self._pulled = self._pulled, []
+            await asyncio.to_thread(_discard, pulled)
         if outcome not in ("offline",) or manual:
             log.info("update: checked for a new version (%s%s)", outcome, f": {res.detail}" if res.detail else "")
         self._changed()
@@ -1044,11 +1053,23 @@ class Updater:
         if release is not None and release.prerelease and not prereleases:
             release = None
         self.last_checked = now
-        self.machine.found(release)
+        # the release being downloaded, checked or installed stays as it is: the next check says what's new
+        if not self.working:
+            ready = self.machine.phase == "ready"
+            self.machine.found(release)
+            if ready and self.machine.phase == "idle":
+                log.info("update: the release downloaded is no longer offered: deleting it")
+                self._pulled = [p for p in (self.dmg, self.staged) if p is not None]
+                self.dmg = self.staged = None
         newer = release is not None and release.version > self.machine.current
         self.last_result = "available" if newer else "up_to_date"
         self._save()
         return self.last_result
+
+    @property
+    def working(self) -> bool:
+        """A download, the checks of the new app or the install is under way (:attr:`_task`)."""
+        return self._task is not None and not self._task.done()
 
     # ----------------------------------------------------------------- user choices
 
@@ -1174,19 +1195,28 @@ class Updater:
                 open_in_finder(dmg)
                 self._failed("macOS refuses changes to the app's bundle (App Management)", "app_management")
                 return
+            self.staged = staged
             if self.busy():
                 await asyncio.to_thread(shutil.rmtree, staged, True)
+                self.staged = None
                 m.defer()
                 self._changed()
                 return
             if self.quit_app is None:
                 raise UpdateError("Voicestream can't restart itself here", "cannot_restart")
+            if m.phase != "ready" or m.release is None or m.release.version != version:
+                # what was staged is no longer what is on offer: never start a helper for it
+                await asyncio.to_thread(shutil.rmtree, staged, True)
+                self.staged = None
+                log.info("update: %s is no longer the update on offer: not installed", version)
+                self._changed()
+                return
             assert self.folder is not None
+            m.installing()  # first: nothing moves the release from under the helper once it waits
+            self._changed()
             script = write_helper(self.folder)
             start_helper(script, pid=os.getpid(), app=app, new=staged, dmg=dmg, result=self.folder / "result",
                          log_file=self.folder / "update.log")
-            m.installing()
-            self._changed()
             log.info("update: %s is ready, quitting so the helper can put it in place", version)
             self.quit_app()
         except UpdateError as exc:
@@ -1266,6 +1296,16 @@ def _feed_server(routes: dict[str, tuple[bytes | Path, str, str | None]]) -> _Fe
     server = _Feed(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, name="voicestream-update-feed", daemon=True).start()
     return server
+
+
+def _discard(paths: list[Path]) -> None:
+    """(Worker thread.) Delete a download, or a staged app, that is no longer to be installed."""
+    for path in paths:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            with contextlib.suppress(OSError):
+                path.unlink()
 
 
 def selftest(dmg: Path, app: Path | None, work: Path, run: Run = _run) -> dict[str, Any]:

@@ -62,6 +62,11 @@ def names(data_path: Path, limit: int | None = None) -> list[str]:
     return [p["name"] for p in load(data_path)[:limit]]
 
 
+def known_before(data_path: Path, meeting_id: str) -> list[str]:
+    """The names some other meeting than ``meeting_id`` vouches for: known before it, not learned from it."""
+    return [p["name"] for p in load(data_path) if any(m != meeting_id for m in p["meetings"])]
+
+
 def _save(data_path: Path, people: list[dict[str, Any]]) -> None:
     people.sort(key=lambda p: p["last_seen"], reverse=True)
     try:
