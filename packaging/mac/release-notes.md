@@ -34,7 +34,8 @@ For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. You need a C
 3. macOS says it can't verify the app, because it isn't notarized by Apple. Close that message
    (don't choose Move to Trash), open **System Settings → Privacy & Security**, scroll down to
    "Voicestream was blocked…", click **Open Anyway**, enter your password and click **Open**.
-   This is needed once for each version.
+   This is the last time: the versions after this one install from inside the app (**Install
+   and restart** in the window, or **Install Update…** in the menu bar), without this step.
 4. Follow the setup: your name and languages, speech-to-text (**On this Mac** is free and
    private; it downloads a 547 MB model), your Claude key (saved in the macOS Keychain), then
    allow **Microphone** and **System Audio Recording**.
@@ -52,7 +53,9 @@ says how.
    ce message (sans choisir « Placer dans la corbeille »), ouvrez **Réglages Système →
    Confidentialité et sécurité**, descendez jusqu'à « L'ouverture de Voicestream a été
    bloquée… », cliquez sur **Ouvrir quand même**, saisissez votre mot de passe puis cliquez sur
-   **Ouvrir**. À refaire une fois pour chaque version.
+   **Ouvrir**. C'est la dernière fois : les versions suivantes s'installent depuis l'app
+   (**Installer et redémarrer** dans la fenêtre, ou **Installer la mise à jour…** dans la barre des
+   menus), sans cette étape.
 4. Suivez l'assistant : votre nom et vos langues, la transcription (**Sur ce Mac** est gratuit
    et privé ; un modèle de 547 Mo est téléchargé), votre clé Claude (enregistrée dans le
    trousseau de macOS), puis autorisez le **Micro** et l'**Enregistrement audio du système**.
@@ -70,7 +73,8 @@ writing the to-dos and notes. A soft cap of $3 a day by default. The app itself 
 
 ### Known limits
 
-- Not notarized by Apple, hence the Open Anyway step for each version.
+- Not notarized by Apple, hence the Open Anyway step for a version you download yourself; updates
+  installed from inside the app don't need it.
 - Built and tested on GitHub's virtual Mac (the packaged app's window and menu bar, French and
   English speech through the bundled whisper.cpp), not yet on a physical Mac. If transcription
   can't keep up, the app says so: choose the faster "small" model in Settings, or cloud

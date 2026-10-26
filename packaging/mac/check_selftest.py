@@ -25,7 +25,12 @@ The app's own report says ``ok`` when every check it ran passed, which is not en
 * the Spotlight launcher written into a temporary folder must be valid (plutil reads its Info.plist,
   its script may run, the app's icon is in it) and removed again; the microphone probe behind call
   suggestions must answer from Core Audio, naming the processes that capture;
-* the Meeting menu must be in the app's menu bar, with its entries (no unit test sees the real one).
+* the Meeting menu must be in the app's menu bar, with its entries (no unit test sees the real one);
+* updating, without the network: against a local stand-in for GitHub's API, the test DMG this step makes
+  (this app as a newer version, re-signed) must be found (and found unchanged through its ETag), a wrong
+  digest refused, the right download verified and free of quarantine, its app's id, version, signature
+  and arm64 code checked, and the helper must swap it into a temporary copy of the app, whose version is
+  then the new one.
 
 Prints the report and every problem; exits 1 when there is one. Standard library only.
 """
@@ -42,7 +47,8 @@ NATIVE_CHECKS = (
     "app_delegate_patched", "hide_on_close_and_reopen", "whisper_server_bundled",
     "hotkey_registered", "hotkey_reaches_host", "hotkey_in_menu", "keyboard_layout",
     "floating_panel", "floating_panel_states", "url_handler", "url_reaches_host", "spotlight_launcher", "mic_probe",
-    "meeting_menu",
+    "meeting_menu", "update_check", "update_digest_refused", "update_download_verified", "update_bundle_valid",
+    "update_swap",
 )  # fmt: skip
 """What native mode checks in the packaged app (voicestream/app/native.py MacShell._selftest)."""
 
@@ -87,6 +93,11 @@ def problems(report: dict[str, Any], app: Path) -> list[str]:
                    "the menu and Settings don't show it")
     for error in report.get("errors") or []:
         out.append(f"error: {error}")
+    upd = report.get("update") or {}
+    if upd.get("error"):
+        out.append(f"the update's test: {upd['error']}")
+    if checks.get("update_swap") and str((upd.get("swap") or {}).get("version")) != str(upd.get("version")):
+        out.append("the update's test swapped in another version than the release's")
     if "quit" not in report:
         out.append("the app did not finish quitting (its last report, written as it quits, is missing)")
     if not report.get("ok") and not out:

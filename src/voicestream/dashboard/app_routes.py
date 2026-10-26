@@ -57,6 +57,8 @@ MEETING_ACTIONS = ("start", "stop", "toggle", "keep")
 """``POST /api/meeting/<action>``; ``/api/meeting/end`` is the dashboard's own (:mod:`.server`)."""
 ANSWERS = ("suggestion/accept", "suggestion/dismiss", "notice/dismiss")
 """``POST /api/<answer>``: the answers to what the window and the floating button ask or tell."""
+UPDATE_ACTIONS = ("check", "install", "later", "cancel")
+"""``POST /api/update/<action>`` (:mod:`voicestream.app.updater`): what the banner, Settings and the menu bar ask."""
 START_ANSWER_S = START_WAIT_S + 5.0
 """A start is answered once listening is up (within about :data:`.host.START_WAIT_S`), except one that waits
 for the last meeting's wrap-up, which can take minutes: after this long, with what it will do."""
@@ -105,6 +107,8 @@ class PrefsPatch(_Body):
     call_suggestions: bool | None = None
     silence_ask_minutes: Minutes | None = None
     silence_end_minutes: Minutes | None = None
+    check_updates: bool | None = None
+    update_prereleases: bool | None = None
 
 
 PersonName = Annotated[str, Field(min_length=1, max_length=80, pattern=r"^[^\x00-\x1f\x7f]+$")]
@@ -209,6 +213,8 @@ class AppApi:
             Route("/api/setup/complete", self.setup_complete, methods=["POST"]),
             Route("/api/prefs", self.patch_prefs, methods=["PATCH"]),
             Route("/api/hotkey/recording", self.hotkey_recording, methods=["POST"]),
+            Route("/api/update", self.update_state, methods=["GET"]),
+            *(Route(f"/api/update/{name}", self.update_action, methods=["POST"]) for name in UPDATE_ACTIONS),
             Route("/api/reveal", self.reveal, methods=["POST"]),
             Route("/api/open-settings", self.open_settings, methods=["POST"]),
             Route("/api/permissions/{kind}", self.permission, methods=["POST"]),
@@ -473,6 +479,28 @@ class AppApi:
         body = await _parse(request, HotkeyRecording)
         self.host.record_hotkey(body.active)
         return JSONResponse(self.host.state())
+
+    # ------------------------------------------------------------------ updates
+
+    async def update_state(self, request: Request) -> JSONResponse:
+        return JSONResponse(self.host.state()["update"])
+
+    async def update_action(self, request: Request) -> JSONResponse:
+        """Check now (answered once GitHub has, with ``result``), Install and restart (answered at once: the
+        download and its checks go on, ``app.state`` events tell the rest; ``result``: ``started``,
+        ``deferred`` while a meeting is recorded, ``busy``, ``none``), Later and Cancel. The reply is the
+        app's state with ``result``."""
+        name, host = request.url.path.rsplit("/", 1)[-1], self.host
+        result: Any
+        if name == "check":
+            result = await host.update_check()
+        elif name == "install":
+            result = host.update_install()
+        elif name == "later":
+            result = host.update_later()
+        else:
+            result = host.update_cancel()
+        return JSONResponse({**host.state(), "result": result})
 
     # ------------------------------------------------------------------ desktop
 

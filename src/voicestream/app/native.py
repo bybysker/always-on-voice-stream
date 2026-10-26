@@ -90,7 +90,7 @@ BACKGROUND = {"light": "#F8F8F8", "dark": "#0F0F0F"}  # the UI's --ground, shown
 LOAD_TIMEOUT_S = 45.0
 MAIN_THREAD_TIMEOUT_S = 10.0
 SELFTEST_PAUSE_S = 3.0  # time for CI's screenshot at each self-test phase
-WATCHDOG_EXTRA_S = 90.0
+WATCHDOG_EXTRA_S = 360.0  # the update's test copies the whole app twice and checks its signature
 SELFTEST_QUIT_S = launcher.GRACEFUL_STOP_S + launcher.FORCE_STOP_S + 15.0
 """After the self-test asks the app to quit: longer than the capped host shutdown, then the
 process ends itself (report written) so the CI job never waits on a quit that went nowhere."""
@@ -180,6 +180,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "quit_button": "Quit",
         "cancel": "Cancel",
         "start_failed": "Voicestream could not start",
+        "update": "Install Update {version}…",
+        "update_downloading": "Downloading Update {version}…",
+        "update_installing": "Installing Update {version}…",
     },
     "fr": {
         "listening": "À l'écoute",
@@ -216,6 +219,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "quit_button": "Quitter",
         "cancel": "Annuler",
         "start_failed": "Voicestream n'a pas pu démarrer",
+        "update": "Installer la mise à jour {version}…",
+        "update_downloading": "Téléchargement de la mise à jour {version}…",
+        "update_installing": "Installation de la mise à jour {version}…",
     },
 }
 
@@ -353,6 +359,19 @@ def _cancel_title(state: dict[str, Any], lang: str) -> str:
     return s["cancel_next"] if is_manual(state) else s["cancel_listen"]
 
 
+def update_entry(state: dict[str, Any], lang: str, *, quitting: bool = False) -> MenuEntry:
+    """Install Update 0.4.0… while a newer version is on offer and this app can replace itself (the window's
+    banner says the rest, and waits for a meeting to end); Downloading/Installing… while it is under way."""
+    s = STRINGS.get(lang, STRINGS["en"])
+    upd = state.get("update") or {}
+    release = upd.get("release") or {}
+    phase = str(upd.get("phase") or "idle")
+    there = bool(release.get("version")) and bool(upd.get("can_install")) and phase != "idle"
+    title = {"downloading": s["update_downloading"], "installing": s["update_installing"]}.get(phase, s["update"])
+    return MenuEntry("update", title.format(version=release.get("version") or ""), visible=there,
+                     enabled=there and not quitting and phase not in ("downloading", "installing"))
+
+
 def menu_model(state: dict[str, Any], lang: str, login: str, *, now: datetime | None = None,
                quitting: bool = False) -> list[MenuEntry]:
     """The status item's menu for this state, always the same keys in the same order (the native
@@ -383,6 +402,7 @@ def menu_model(state: dict[str, Any], lang: str, login: str, *, now: datetime | 
         MenuEntry("status", state_line(state, lang, now, quitting=quitting), enabled=False),
         MenuEntry("sep1"),
         MenuEntry("open", s["open"], enabled=not quitting),
+        update_entry(state, lang, quitting=quitting),
         MenuEntry("sep2"),
         MenuEntry("pause", resume if current == "paused" else s["pause"], enabled=not busy,
                   visible=current in ("listening", "paused"), **on_pause),
@@ -651,6 +671,11 @@ def run(host: launcher.Host, *, selftest: float | None = None, report_path: Path
         # the launcher opens a voicestream:// link, which only the packaged app (with its Info.plist) handles
         caps["spotlight"] = native_hooks.bundle_path() is not None
         caps["call_detection"] = calls.available()
+        # the packaged app can put a new version in its own place (voicestream/app/updater.py)
+        caps["self_update"] = native_hooks.bundle_path() is not None
+        updater = getattr(host, "updater", None)
+        if updater is not None:
+            updater.can_install = caps["self_update"]
     try:
         # not listening at launch yet: a voicestream:// link from any web page can launch the app, and must not
         # have started a recording before it is looked at — the shell asks once it knows (_start_menu_bar)
@@ -750,6 +775,7 @@ class MacShell:
         self._url_handler: str | None = None  # "registered", or why the voicestream:// handler is not
         self._urls = 0  # links received (the self-test's check)
         self._url_probe: list[Any] | None = None  # the self-test's links: the host's answers, nothing done
+        self._for_update = False  # quitting so the update helper can put the new version in place
 
     # ------------------------------------------------------------ startup
 
@@ -788,6 +814,9 @@ class MacShell:
         # state updates queued later run after it (the main thread's queue is first in, first out)
         AppHelper.callAfter(self._start_menu_bar)
         self.host.add_state_listener(self._on_host_state)
+        updater = getattr(self.host, "updater", None)
+        if updater is not None:
+            updater.quit_app = self._quit_for_update
         storage = native_hooks.app_support_dir() / "web"
         try:
             webview.start(
@@ -1215,6 +1244,10 @@ class MacShell:
                 self._post(self._on_loop("update_prefs", {"floating_button": True}))
         elif key == "login":
             self._toggle_login()
+        elif key == "update":
+            # the window shows how it goes (the download, a meeting it waits for, what went wrong)
+            self.show_window()
+            self._post(self._on_loop("update_install"))
         elif key == "quit":
             self.quit()
 
@@ -1459,6 +1492,17 @@ class MacShell:
         ask = getattr(self.host, "meeting_action", None)
         return {"action": action, "key_ok": ok, "would": ask(action) if ok and ask is not None else None}
 
+    def _quit_for_update(self) -> None:
+        """Host loop thread: the update helper is waiting for the app to quit (no meeting is being recorded:
+        the host checked). Quit as the menu does, without asking: you clicked Install and restart."""
+        from PyObjCTools import AppHelper
+
+        def go() -> None:
+            self._for_update = True
+            self.quit()
+
+        AppHelper.callAfter(_guard, go)
+
     def quit(self) -> None:
         """Main thread: Quit in the menu (and the self-test's own quit)."""
         if not _PATCHED:  # pywebview's own quit asks the window, which would only hide itself
@@ -1531,8 +1575,8 @@ class MacShell:
         """``applicationShouldTerminate:`` (main thread)."""
         if self._terminating:
             return TERMINATE_LATER  # a quit is already under way; it will answer for both
-        if (self.selftest is None and needs_quit_confirmation(self.state) and not _system_is_quitting_us()
-                and not self._confirm_quit()):
+        if (self.selftest is None and not self._for_update and needs_quit_confirmation(self.state)
+                and not _system_is_quitting_us() and not self._confirm_quit()):
             return TERMINATE_CANCEL
         self._terminating = True
         self.quitting = True
@@ -1619,6 +1663,9 @@ class MacShell:
         """pywebview's ``func`` thread: check the real window, menu bar and lifecycle, then quit."""
         from PyObjCTools import AppHelper
 
+        # here, not at the top: urllib.request may not import where native.py does (its tests)
+        from .updater import SELFTEST_CHECKS
+
         started = time.monotonic()
         self._arm_watchdog((self.selftest or 0) + WATCHDOG_EXTRA_S, "the self-test did not finish in time")
         report = self.report = launcher.selftest_report(self.host, self.url, mode="native")
@@ -1676,6 +1723,9 @@ class MacShell:
             report["microphone"] = native_hooks.microphone_authorization()
             report["login_item"] = native_hooks.login_item_status()
             report["app_location"] = native_hooks.app_location_problem()
+            report["update"] = upd = self._check_update()
+            for name in SELFTEST_CHECKS:
+                checks[name] = bool((upd.get("checks") or {}).get(name))
         except Exception as exc:  # noqa: BLE001
             log.exception("self-test failed")
             report["errors"].append(f"{type(exc).__name__}: {exc}")
@@ -1995,6 +2045,24 @@ class MacShell:
         finally:
             shutil.rmtree(folder, ignore_errors=True)
         return out
+
+    def _check_update(self) -> dict[str, Any]:
+        """Updating, end to end without the network (:func:`.updater.selftest`): against a local stand-in for
+        GitHub's API, the test DMG build.sh made (this app, a newer version, re-signed) is found, a wrong digest
+        refused, the right download verified, mounted and checked, then swapped by the helper into a temporary
+        copy of this app — never the app itself — whose version is read back. No thread of AppKit's."""
+        import shutil
+
+        from . import updater
+
+        dmg = os.environ.get(updater.SELFTEST_DMG_ENV)
+        if not dmg:
+            return {"error": f"no test DMG: build.sh selftest sets {updater.SELFTEST_DMG_ENV}"}
+        work = updater.selftest_dir()
+        try:
+            return updater.selftest(Path(dmg), native_hooks.bundle_path(), work)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
     def _check_mic_probe(self) -> dict[str, Any]:
         """The call detection's look at the microphone: Core Audio answers whether another app captures, and

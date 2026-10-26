@@ -7,11 +7,12 @@ It starts the same app host as the UI tests (``UIApp`` in tests/test_app_ui.py: 
 and event stream, scripted speech, fake model downloads and permission checks) once for each state,
 because one app can only be in one state at a time. Meetings started by hand (the default): between
 meetings, in one, in one asking "Still in a meeting?", with a call detected, one being wrapped up with
-the next one waiting for its notes, and after one that ended by itself and whose wrap-up never
-finished; listening all the time (automatic): not listening, listening between meetings, in a meeting;
-and a new install on its first-run setup. The apps that start meetings by hand say they have what
-the Mac app has (its menu bar, the floating button, Spotlight, call detection and the keyboard
-shortcut), so their screens show all of it. Everything lives in a temporary folder that is removed on
+the next one waiting for its notes, after one that ended by itself and whose wrap-up never finished,
+and with a new version on offer (from a local stand-in for GitHub's releases); listening all the
+time (automatic): not listening, listening between meetings, in a meeting; and a new install on its
+first-run setup. The apps that start meetings by hand say they have what the Mac app has (its menu
+bar, the floating button, Spotlight, call detection and the keyboard shortcut), so their screens
+show all of it. Everything lives in a temporary folder that is removed on
 exit, with a temporary home too, so no real key, Keychain item or meeting is touched.
 
 The sample data holds together: the past meetings are imported from transcripts with the real
@@ -43,7 +44,7 @@ os.environ["VOICESTREAM_SECRET_STORE"] = "file"  # never the real Keychain
 
 # imported once the home is private, so nothing below can reach the real ~/.voicestream
 import pytest
-from test_app_ui import UIApp, _mac_features
+from test_app_ui import UIApp, _mac_features, _update_feed
 
 from voicestream import stt_models
 
@@ -381,6 +382,7 @@ def main() -> int:
     mp = pytest.MonkeyPatch()
     base = Path(tempfile.mkdtemp(prefix="voicestream-demo-"))
     apps: list[DemoApp] = []
+    feeds: list[Any] = []
     try:
         stopped = make(base / "stopped", mp, provider="anthropic", setup_done=True, meetings=True)
         apps.append(stopped)
@@ -418,6 +420,11 @@ def main() -> int:
         apps.append(unfinished)
         _mac_features(unfinished)
         ended_unfinished(unfinished)
+        update = make(base / "by-hand-update", mp, setup_done=True, meetings=True, meeting_start="manual")
+        apps.append(update)
+        _mac_features(update)
+        feeds.append(_update_feed(update, (HERE.parent / "packaging" / "mac" / "release-notes.md").read_text("utf-8")))
+        update.host.call(update.host.update_check()).result(10)
         # last: each app's hold on wrap-ups wraps the summary for the whole process, so once this one holds
         # its wrap-up, the sample meetings of an app made after it could not be imported
         wrap_up_with_the_next_waiting(queued)
@@ -434,7 +441,9 @@ def main() -> int:
             ("Live, a call detected", call, "#/live"),
             ("Live, wrapping up, the next meeting waiting", queued, "#/live"),
             ("Live, ended by itself, wrap-up unfinished", unfinished, "#/live"),
+            ("Live, a new version on offer", update, "#/live"),
             ("Settings: starting meetings", idle, "#/settings/general/starting"),
+            ("Settings: updates", update, "#/settings/general"),
             ("Live, automatic, not listening", stopped, "#/live"),
             ("Live, automatic, listening", listening, "#/live"),
             ("Live, automatic, meeting in progress", meeting, "#/live"),
@@ -462,6 +471,8 @@ def main() -> int:
                 app.close()
             except Exception as exc:  # noqa: BLE001 - close the others anyway
                 print(f"closing: {exc}", file=sys.stderr)
+        for feed in feeds:
+            feed.close()
         mp.undo()
     return 0
 
