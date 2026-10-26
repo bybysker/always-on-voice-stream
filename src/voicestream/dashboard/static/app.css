@@ -429,6 +429,30 @@ main { flex: 1; outline: none; }
 }
 .who.you { color: var(--hue-text); font-weight: 500; }
 
+/* who the meeting is with: a name per person, a guess drawn dashed with "probably", each removable */
+.people-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 8px; min-width: 0; }
+.people-label { color: var(--muted); font-size: var(--fs-small); }
+.person-chips { display: contents; list-style: none; }
+.person-chip {
+  display: inline-flex; align-items: center; gap: 4px; min-height: 26px; max-width: 100%; padding: 0 2px 0 10px;
+  border: 1px solid var(--border); border-radius: 999px; background: var(--pill-bg); color: var(--pill-ink);
+  font-size: var(--fs-small); font-weight: 500;
+}
+.person-chip .person-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.person-chip.probable { background: transparent; border-style: dashed; color: var(--text); font-weight: 400; }
+.person-chip .probably { color: var(--muted); font-style: italic; font-weight: 400; }
+.person-chip:not(:has(.chip-x)) { padding-right: 10px; }
+.chip-x {
+  display: inline-flex; align-items: center; justify-content: center; flex: none; width: 22px; height: 22px;
+  border: 0; border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; padding: 0;
+}
+.chip-x:hover { background: var(--raised); color: var(--text); }
+.chip-x .icon { width: 12px; height: 12px; }
+.person-none { font-size: var(--fs-small); }
+form.person-add { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+form.person-add[hidden] { display: none; }
+form.person-add .person-in { width: 14em; max-width: 100%; }
+
 /* -------------------------------------------------------------- live: idle */
 .screen-live { max-width: 1440px; }
 .idle { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--gap); }
@@ -1152,6 +1176,7 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
 @media (max-width: 640px), (pointer: coarse) {
   .btn, .btn.small, .btn.big, .recorder-actions .btn { min-height: 44px; }
   .btn.icon-only { width: 44px; }
+  .chip-x { width: 44px; height: 44px; margin: -9px -2px -9px -8px; }
   .toast .x { width: 44px; height: 44px; margin: -10px -8px -8px 0; }
   .menu-btn { width: 44px; height: 44px; }
   .nav a { height: 44px; }

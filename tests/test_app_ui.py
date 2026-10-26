@@ -2885,3 +2885,119 @@ def test_google_bridge_script_route(tmp_path: Path) -> None:
         assert c.get("/api/google-bridge").status_code == 401
         r = c.get("/api/google-bridge", headers={TOKEN_HEADER: "tok-123"})
     assert r.status_code == 200 and "function doPost(e)" in r.json()["script"]
+
+
+def test_who_the_meeting_is_with_on_live_and_on_its_page(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """Calling someone by name puts them on Live's "With …" line at once, as a guess ("probably"); the
+    meeting audio then carries their name. Names are added and removed from the keyboard, a removed name
+    doesn't come back when it is heard again, and a meeting's page corrects them the same way."""
+    from playwright.sync_api import expect
+
+    from voicestream.storage import list_sessions, load_meeting
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    p = open_page(app)
+    pg = p.page
+    pg.click("#live-start")
+    _wait_state(app, "listening")
+    line = pg.locator("#live-people")
+    expect(line).to_contain_text("With")
+    expect(line).to_contain_text("nobody named yet")
+
+    app.say("Hello, can you hear me?", source="system")
+    expect(pg.locator("#lines .seg.others .spk")).to_have_text("Others")
+    app.say("I'll ask Sam about the budget later.")  # talked about: nobody joins
+    expect(pg.locator("#lines .seg")).to_have_count(2)
+    expect(line.locator(".person-chip")).to_have_count(0)
+    app.say("Thanks Sam, can you share your screen?")
+    chip = line.locator(".person-chip")
+    expect(chip).to_have_count(1)
+    expect(chip).to_have_class(re.compile(r"\bprobable\b"))
+    expect(chip).to_contain_text("Sam")
+    expect(chip.locator(".probably")).to_have_text("probably")
+    # one other person: the meeting audio is Sam, on the lines already there, the strip and its legend
+    expect(pg.locator("#lines .seg.others .spk")).to_have_text("Sam")
+    expect(pg.locator("#screen-live .lane.others .lane-name")).to_have_text("Sam")
+    expect(pg.locator("#live-voices-legend")).to_contain_text("Sam")
+    app.say("Sure, sharing now.", source="system")
+    expect(pg.locator("#lines .seg.others .spk")).to_have_text(["Sam", "Sam"])
+    p.shot("live-people-guess")
+
+    # add a name from the keyboard: two people, so the meeting audio is "Others" again
+    pg.focus("#live-person-add")
+    pg.keyboard.press("Enter")
+    expect(pg.locator("#live-person-in")).to_be_focused()
+    pg.keyboard.type("Julie")
+    pg.keyboard.press("Enter")
+    expect(line.locator(".person-chip")).to_have_count(2)
+    expect(line.locator(".person-chip", has_text="Julie")).not_to_have_class(re.compile(r"\bprobable\b"))
+    expect(pg.locator("#live-person-add")).to_be_focused()
+    expect(pg.locator("#lines .seg.others .spk")).to_have_text(["Others", "Others"])
+    # Escape closes "Add a name" without adding anything
+    pg.keyboard.press("Enter")
+    pg.keyboard.type("Nobody")
+    pg.keyboard.press("Escape")
+    expect(pg.locator("#live-person-form")).to_be_hidden()
+    expect(line.locator(".person-chip")).to_have_count(2)
+
+    # remove Sam with the keyboard: the focus goes on to the next name's ×
+    x = pg.locator("#live-person-x-0")
+    expect(x).to_have_attribute("aria-label", "Remove Sam")
+    x.focus()
+    pg.keyboard.press("Enter")
+    expect(line.locator(".person-chip")).to_have_count(1)
+    expect(line.locator(".person-chip")).to_contain_text("Julie")
+    expect(pg.locator("#live-person-x-0")).to_be_focused()
+    expect(pg.locator("#lines .seg.others .spk")).to_have_text(["Julie", "Julie"])
+    app.say("Merci Sam !")  # heard again: still out
+    expect(pg.locator("#lines .seg")).to_have_count(5)
+    expect(line.locator(".person-chip")).to_have_count(1)
+    meeting = app.host.assistant.current.meeting  # type: ignore[union-attr]
+    assert meeting.participants == ["Julie"] and meeting.people_removed == ["Sam"]
+    assert meeting.segments[0].speaker == "Others"  # the stored line keeps its label
+
+    pg.click("#live-stop")
+    expect(pg.locator(".toast", has_text="The notes are ready")).to_be_visible(timeout=15000)
+    _wait_state(app, "stopped")
+
+    # the meeting's page: the same line, corrected the same way, saved with the meeting
+    (folder,) = list_sessions(app.root / "data")
+    pg.goto(app.url.split("#")[0] + "#/meetings/" + folder.name + "/transcript")
+    detail = pg.locator("#detail-people")
+    expect(detail.locator(".person-chip")).to_have_text(["Julie"])
+    expect(pg.locator(".tline.others .spk").first).to_have_text("Julie")
+    pg.click("#detail-person-add")
+    pg.fill("#detail-person-in", "Paul Martin")
+    pg.click("#detail-person-save")
+    expect(detail.locator(".person-name")).to_have_text(["Julie", "Paul Martin"])
+    expect(pg.locator(".tline.others .spk").first).to_have_text("Others")
+    pg.click("#detail-person-x-0")
+    expect(detail.locator(".person-name")).to_have_text(["Paul Martin"])
+    expect(pg.locator(".tline.others .spk").first).to_have_text("Paul Martin")
+    saved, _ = load_meeting(folder)
+    assert saved.participants == ["Paul Martin"] and saved.people_removed == ["Sam", "Julie"]
+    assert "with Paul Martin" in (folder / "notes.md").read_text(encoding="utf-8")
+    p.shot("meeting-people")
+
+
+def test_who_the_meeting_is_with_in_french(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    p = open_page(app, locale="fr-FR")
+    pg = p.page
+    pg.click("#live-start")
+    _wait_state(app, "listening")
+    line = pg.locator("#live-people")
+    expect(line).to_contain_text("Avec")
+    expect(line).to_contain_text("personne de nommé pour l’instant")
+    expect(pg.locator("#live-person-add")).to_have_text("Ajouter un nom")
+    app.say("Bonjour à tous.")
+    app.say("Julie, tu peux partager ton écran ?")
+    expect(line.locator(".person-chip .probably")).to_have_text("probablement")
+    expect(pg.locator("#live-person-x-0")).to_have_attribute("aria-label", "Retirer Julie")
+    app.say("Oui, je partage.", source="system")
+    expect(pg.locator("#lines .seg.others .spk")).to_have_text("Julie")
+    pg.click("#live-person-add")
+    expect(pg.locator("#live-person-in")).to_have_attribute("placeholder", "Nom")
+    expect(pg.locator("#live-person-save")).to_have_text("Ajouter")
