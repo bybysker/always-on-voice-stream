@@ -23,7 +23,7 @@ Limits, by design: whisper's punctuation is what the patterns read, so a line it
 commas finds less; a place or a product called like a person ("Bonjour Paris") passes; a name said to
 someone who isn't in the meeting (on the phone to them, say) is taken as a participant. Every name
 found this way is shown as a guess you can remove, and Claude's extraction has the last word on the
-weak ones (:func:`finalize`).
+weak ones, and on any name nobody knew before the meeting (:func:`finalize`).
 
 The rest of the module keeps a meeting's people in order: one list of names (``Meeting.participants``,
 what the notes and your tools read), where each came from (``Meeting.people``), and the names you
@@ -104,6 +104,11 @@ STOP = _words(
     "world god lord jesus christ mister miss missus doctor guy girls boys kids "
     "marketing sales finance design engineering product support legal ops it hr dev devs tech management "
     "everyone's whatever whoever cool super nope yup hmm mhm aha huh yo",
+    # discourse markers and imperatives that open a sentence put to someone ("Remember, you said…")
+    "remember remind imagine suppose say guess believe trust promise agree mind never nevermind hang stop "
+    "careful note notice later earlier soon sooner rather anyhow plus except unless though although whereas "
+    "hence thus moreover furthermore regardless way true honest speaking personally oops damn gosh geez "
+    "fact story news reminder",
     # French
     "bon alors donc oui non ouais si voilà voila bref enfin ensuite puis bien très parfait super génial top "
     "nickel impeccable excellent d'accord dac ok entendu ça ca cela ceci ce c'est là ici voici ah oh euh hum "
@@ -116,6 +121,11 @@ STOP = _words(
     "exactement absolument cool chouette allez tiens tenez regarde regardez voyons madame monsieur "
     "mademoiselle messieurs mesdames chef patron gars équipe monde mec perso soir matin semaine week-end "
     "mois an année heure question point truc chose dieu bravo félicitations",
+    "pourtant attention pareil remarque remarquez sérieux bref enfin voilà écoute regarde attends imagine "
+    "imaginez figure-toi sache sachez note notez rappelle-toi rappel prudence vite dommage tant pis cependant "
+    "néanmoins toutefois ainsi surtout plutôt presque peut-être sauf selon ouf mince zut punaise oups hop allô "
+    "allo grave trop vas-y voyez normal logique idem nan mouais vrai faux mieux pire prochain dernier "
+    "première premier deuxième",
     # days and months
     "monday tuesday wednesday thursday friday saturday sunday january february march april may june july "
     "august september october november december",
@@ -125,7 +135,12 @@ STOP = _words(
     "claude assistant siri alexa google",
 )
 """Capitalized words that are not names in the places this module looks (a known name gets past it)."""
-_ADVERB = re.compile(r"(?:ally|ously|ately|ively|ently|antly|fully|ment)$")
+_ADVERB = re.compile(r"(?:ly|ment)$")
+"""An adverb's ending ("Lastly", "Frankly", "Justement"): a capitalized word nobody knows with it,
+five letters or more, is not taken for a name…"""
+_ADVERB_NAMES = _words("emily kelly molly holly sally lily billy polly dolly shelly nelly milly tilly wally "
+                       "willy beverly kimberly carly charly marly clément")
+"""…except for these first names."""
 SENTENCE_END = frozenset(".!?…;:")
 
 
@@ -251,7 +266,7 @@ class _Finder:
         if one is not None and not surname:
             return None if self._excluded(one) else (one, 1, True)
         key = fold(toks[i])
-        if key in self.exclude or (one is None and (key in STOP or (len(key) >= 7 and _ADVERB.search(key)))):
+        if key in self.exclude or (one is None and (key in STOP or (len(key) >= 5 and _ADVERB.search(key) and key not in _ADVERB_NAMES))):
             return None
         return (f"{two[0]} {two[1]}", 2, False) if surname else (toks[i], 1, False)
 
@@ -423,16 +438,20 @@ def remove_person(meeting: Meeting, name: str) -> bool:
     return bool(gone)
 
 
-def finalize(meeting: Meeting, final: Iterable[str], user_name: str = "") -> None:
+def finalize(meeting: Meeting, final: Iterable[str], user_name: str = "", known: Iterable[str] = ()) -> None:
     """Claude's final word on who took part (the end-of-meeting summary). It replaces what the live
-    extraction guessed, except for what you said: names you added stay, and so do names you addressed
-    in a strong pattern ("Thanks Sam", "Sam, can you…") — Claude may well have missed someone who never
-    spoke. A name only heard in a weak pattern, that Claude doesn't list, goes."""
+    extraction guessed, except for what you said: names you added stay, and so do names known before
+    the meeting (``known``: your attendees, people from earlier meetings) that you addressed in a strong
+    pattern ("Thanks Sam", "Sam, can you…") — Claude may well have missed someone who never spoke. Any
+    other name heard, that Claude doesn't list, goes: a capitalized word nobody knew ("Remember, you
+    said…") is as likely a word as a name."""
     final = [f for f in (" ".join(x.split()) for x in final) if f]
+    known = [k for k in known if k.strip()]
     keep: list[str] = []
     for p in meeting.participants:
         info = meeting.people.get(p) or PersonInfo(model=True)
-        if info.you or (info.heard and info.strong) or any(same_person(p, f) for f in final):
+        heard_known = info.heard and info.strong and any(same_person(p, k) for k in known)
+        if info.you or heard_known or any(same_person(p, f) for f in final):
             keep.append(p)
     meeting.participants = keep
     meeting.people = {p: meeting.people[p] for p in keep if p in meeting.people}
