@@ -781,7 +781,7 @@ def test_the_packaged_apps_update_selftest_end_to_end(tmp_path: Path, monkeypatc
     _bundle(volume, "99.0.0")
     running = _bundle(tmp_path / "running", __version__)
     tools = FakeTools(volume)
-    script, calls = _stub_helper(tmp_path)
+    script, _calls = _stub_helper(tmp_path)
     monkeypatch.setattr(upd, "HELPER", script.read_text())  # the helper with stand-ins for mv, codesign, xattr, open
     monkeypatch.setattr(upd, "_read_only", lambda path: path == volume)  # hdiutil's -readonly mount
     work = tmp_path / "work"
@@ -799,3 +799,26 @@ def test_the_packaged_apps_update_selftest_end_to_end(tmp_path: Path, monkeypatc
 def test_the_selftest_says_when_it_has_no_dmg(tmp_path: Path) -> None:
     out = upd.selftest(tmp_path / "nothing.dmg", None, tmp_path)
     assert out["checks"] == {} and "no test DMG" in out["error"]
+
+
+# ------------------------------------------------------------------------- the menu bar
+
+
+def test_the_menu_bar_offers_the_update() -> None:
+    from voicestream.app import native
+
+    def state(phase: str, can: bool = True) -> dict[str, Any]:
+        return {"state": "stopped", "update": {"phase": phase, "can_install": can,
+                                               "release": {"version": "0.4.0"} if phase != "idle" else None}}
+
+    entry = native.update_entry(state("available"), "en")
+    assert (entry.title, entry.visible, entry.enabled) == ("Install Update 0.4.0…", True, True)
+    assert native.update_entry(state("available"), "fr").title == "Installer la mise à jour 0.4.0…"
+    assert not native.update_entry(state("idle"), "en").visible
+    assert not native.update_entry(state("available", can=False), "en").visible  # not the packaged app
+    down = native.update_entry(state("downloading"), "en")
+    assert (down.title, down.enabled) == ("Downloading Update 0.4.0…", False)
+    assert not native.update_entry(state("available"), "en", quitting=True).enabled
+    keys = [e.key for e in native.menu_model(state("available"), "en", "disabled")]
+    assert keys == [e.key for e in native.menu_model(state("idle"), "en", "disabled")]  # built once, updated in place
+    assert keys.index("update") == keys.index("open") + 1
