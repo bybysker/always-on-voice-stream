@@ -1412,8 +1412,10 @@ function buildLive() {
   LV.people = new PeopleLine('live', livePeopleSend, (people) => setLivePeople(people));
   const head = LV.head = h('div', { class: 'live-head' },
     h('div', { class: 'title' }, LV.title,
-      h('div', { class: 'sub' }, LV.elapsed, LV.elapsedSep, LV.subText, LV.pausedPill), LV.people.el, LV.meterSlot),
-    h('div', { class: 'live-side' }, LV.clock, LV.controls, LV.end));
+      h('div', { class: 'sub' }, LV.elapsed, LV.elapsedSep, LV.subText, LV.pausedPill), LV.meterSlot),
+    h('div', { class: 'live-side' }, LV.clock, LV.controls, LV.end),
+    // after the meeting's controls, which the keyboard reaches first from its title
+    LV.people.el);
 
   LV.transcript = h('div', { class: 'scroll transcript', id: 'transcript', role: 'log', 'aria-label': t('live.transcript'), tabindex: '0' });
   LV.tEmpty = h('p', { class: 'empty-line' }, t('live.nothing_yet'));
@@ -2752,7 +2754,8 @@ function drawDetail() {
     h('span', {}, fmtClock(m.started_at) + (m.ended_at ? '–' + fmtClock(m.ended_at) : '')),
     duration > 0 && fmtDuration(duration),
     lang,
-  ].filter(Boolean);  // who it was with: the line under it, where you can correct it
+    m.participants && m.participants.length && t('meetings.with', { names: m.participants.join(', ') }),
+  ].filter(Boolean);
   const mac = S.app && S.app.platform === 'darwin';
   const actions = h('div', { class: 'row' },
     btn(t('meetings.push'), { id: 'push-meeting', disabled: readOnly, onclick: (e) => pushMeeting(e.currentTarget) }, 'send'),
@@ -5292,7 +5295,7 @@ const STRINGS = {
     'meetings.empty': 'No meetings yet', 'meetings.empty_text': 'They appear here as soon as one starts.',
     'meetings.group.today': 'Today', 'meetings.group.yesterday': 'Yesterday', 'meetings.group.week': 'This week',
     'meetings.group.earlier': 'Earlier', 'meetings.more': 'Show more ({n} left)', 'meetings.untitled': 'Untitled meeting',
-    'meetings.all': 'All meetings', 'meetings.gone': 'This meeting is no longer there.',
+    'meetings.all': 'All meetings', 'meetings.gone': 'This meeting is no longer there.', 'meetings.with': 'with {names}',
     'meetings.finding.one': '{n} to-do for you is still open in these meetings.',
     'meetings.finding.other': '{n} to-dos for you are still open in these meetings.',
     'meetings.facts': 'This meeting', 'meetings.fact.length': 'Length', 'meetings.fact.language': 'Language',
@@ -5791,7 +5794,7 @@ const STRINGS = {
     'meetings.empty': 'Aucune réunion pour l’instant', 'meetings.empty_text': 'Elles apparaissent ici dès que l’une commence.',
     'meetings.group.today': 'Aujourd’hui', 'meetings.group.yesterday': 'Hier', 'meetings.group.week': 'Cette semaine',
     'meetings.group.earlier': 'Plus tôt', 'meetings.more': 'Voir plus ({n} restantes)', 'meetings.untitled': 'Réunion sans titre',
-    'meetings.all': 'Toutes les réunions', 'meetings.gone': 'Cette réunion n’existe plus.',
+    'meetings.all': 'Toutes les réunions', 'meetings.gone': 'Cette réunion n’existe plus.', 'meetings.with': 'avec {names}',
     'meetings.finding.one': '{n} tâche pour vous est encore ouverte dans ces réunions.',
     'meetings.finding.other': '{n} tâches pour vous sont encore ouvertes dans ces réunions.',
     'meetings.facts': 'Cette réunion', 'meetings.fact.length': 'Durée', 'meetings.fact.language': 'Langue',

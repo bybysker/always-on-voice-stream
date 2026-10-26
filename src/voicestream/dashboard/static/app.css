@@ -431,6 +431,7 @@ main { flex: 1; outline: none; }
 
 /* who the meeting is with: a name per person, a guess drawn dashed with "probably", each removable */
 .people-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 8px; min-width: 0; }
+.live-head > .people-line { flex: 1 1 100%; margin-top: -4px; }
 .people-label { color: var(--muted); font-size: var(--fs-small); }
 .person-chips { display: contents; list-style: none; }
 .person-chip {
