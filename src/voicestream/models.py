@@ -207,6 +207,27 @@ class FollowUpEmail(BaseModel):
     """Recipient e-mail addresses when known (otherwise left for you to fill in)."""
 
 
+class PersonInfo(BaseModel):
+    """How a name came to be among a meeting's :attr:`Meeting.participants` (see :mod:`.brain.people`).
+
+    A name with none of these set — or with no entry at all, as in meetings saved before this
+    existed — came from Claude."""
+
+    heard: bool = False
+    """You addressed them by name ("Sam, can you…", "Merci Julie")."""
+    strong: bool = False
+    """…in a way that leaves little doubt (a greeting, a question put to them): kept even when
+    Claude's final notes don't list them."""
+    model: bool = False
+    """Claude listed them."""
+    you: bool = False
+    """You added them by hand."""
+
+    def confirmed(self) -> bool:
+        """Claude or you agree: not just a guess from how you spoke."""
+        return self.model or self.you or not self.heard
+
+
 class Meeting(BaseModel):
     # microseconds: back-to-back meetings (always-on mode) can start within the same second, and
     # sinks key their refs and idempotency ids on this
@@ -215,6 +236,12 @@ class Meeting(BaseModel):
     started_at: datetime = Field(default_factory=utcnow)
     ended_at: datetime | None = None
     participants: list[str] = Field(default_factory=list)
+    """The people you met (you excepted): what the notes, the follow-up e-mail and your tools use."""
+    people: dict[str, PersonInfo] = Field(default_factory=dict)
+    """Participant name -> where it came from. The transcript keeps its raw speaker labels ("Others");
+    the windows and notes put a name on them from here."""
+    people_removed: list[str] = Field(default_factory=list)
+    """Names you took out of :attr:`participants`: never added back to this meeting, by hearing them or by Claude."""
     segments: list[TranscriptSegment] = Field(default_factory=list)
     screen_notes: list[ScreenNote] = Field(default_factory=list)
     items: dict[str, Item] = Field(default_factory=dict)
