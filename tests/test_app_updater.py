@@ -373,6 +373,10 @@ def test_the_update_state_machine() -> None:
     m2 = upd.UpdateMachine(current=V("0.3.0"))
     m2.found(_r("0.4.0"))
     assert m2.found(None) and m2.phase == "idle" and m2.release is None
+    m2.found(_r("0.4.0"))
+    m2.start_download()
+    m2.downloaded()
+    assert m2.found(_r("0.3.0")) and m2.phase == "idle" and m2.release is None  # downloaded, then pulled
 
 
 def test_an_install_during_a_meeting_waits_for_it_to_end() -> None:
@@ -627,6 +631,103 @@ def test_install_prepares_the_swap_then_quits(tmp_path: Path, feed: Feed, monkey
     assert {"-readonly", "-nobrowse", "-noautoopen"} <= set(attach)
     assert any(c[:2] == ["/usr/bin/ditto", "--noqtn"] for c in tools.calls)
     assert any(c[:2] == ["/usr/bin/hdiutil", "detach"] for c in tools.calls)  # unmounted once staged
+
+
+def _held_install(tmp_path: Path, feed: Feed, monkeypatch: pytest.MonkeyPatch) -> tuple[upd.Updater, Path, dict[str, Any]]:
+    """An updater whose install stops while it stages the new app (``held["preparing"]``) until
+    ``held["go_on"]`` is set; ``held["started"]``: the helpers started, ``held["quits"]``: the quits."""
+    feed.publish("/latest", feed.release())
+    u, _ = _updater(tmp_path, feed)
+    held: dict[str, Any] = {"preparing": threading.Event(), "go_on": threading.Event(), "started": [], "quits": []}
+    u.quit_app = lambda: held["quits"].append(1)
+    u.can_install = True
+    app = _bundle(tmp_path / "Applications", "0.3.0")
+    volume = tmp_path / "volume"
+    _bundle(volume, "0.4.0")
+    tools = FakeTools(volume)
+    monkeypatch.setattr(upd, "_run", tools)
+    monkeypatch.setattr(upd, "start_helper", lambda script, **kw: held["started"].append(kw))
+    real = upd.Updater._prepare
+
+    def slow(self: upd.Updater, dmg: Path, app: Path, version: upd.Version, run: Any = tools) -> Path:
+        held["preparing"].set()
+        held["go_on"].wait(10)
+        return real(self, dmg, app, version, run)
+
+    monkeypatch.setattr(upd.Updater, "_prepare", slow)
+    return u, app, held
+
+
+async def _until_preparing(held: dict[str, Any]) -> None:
+    for _ in range(500):
+        if held["preparing"].is_set():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the install never got to staging the new app")
+
+
+def test_a_check_during_the_install_leaves_its_release_alone(tmp_path: Path, feed: Feed,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """A newer release published while the update is being staged: the install goes on with the one it
+    staged (the next check offers the newer one), rather than failing with its helper already waiting."""
+    u, app, held = _held_install(tmp_path, feed, monkeypatch)
+
+    async def run() -> None:
+        await u.check()
+        assert u.install(app) == "started"
+        await _until_preparing(held)
+        feed.publish("/latest", feed.release("v0.5.0"), etag='"v2"')
+        assert await u.check() == "available"
+        assert u.machine.phase == "ready" and str(u.machine.release.version) == "0.4.0"
+        feed.publish("/latest", feed.release("v0.3.0"), etag='"v3"')  # or pulled: likewise
+        assert await u.check() == "up_to_date"
+        assert u.machine.phase == "ready" and str(u.machine.release.version) == "0.4.0"
+        held["go_on"].set()
+        await u._task
+
+    asyncio.run(run())
+    assert u.machine.phase == "installing" and held["quits"] == [1], u.machine.error
+    (call,) = held["started"]
+    assert call["new"] == upd.staged_path(app, "0.4.0")
+
+
+def test_no_helper_is_started_for_a_release_no_longer_on_offer(tmp_path: Path, feed: Feed,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    u, app, held = _held_install(tmp_path, feed, monkeypatch)
+
+    async def run() -> None:
+        await u.check()
+        assert u.install(app) == "started"
+        await _until_preparing(held)
+        u.machine.found(_r("0.5.0"))  # however the release on offer changed meanwhile
+        held["go_on"].set()
+        await u._task
+
+    asyncio.run(run())
+    assert held["started"] == [] and held["quits"] == []  # no helper waiting to swap in what nobody installs
+    assert u.machine.phase == "available" and str(u.machine.release.version) == "0.5.0"
+    assert not upd.staged_path(app, "0.4.0").exists() and u.staged is None
+
+
+def test_a_downloaded_release_that_was_pulled_is_no_longer_offered(tmp_path: Path, feed: Feed) -> None:
+    feed.publish("/latest", feed.release())
+    u, _ = _updater(tmp_path, feed, [True])  # in a meeting: downloaded, not installed
+
+    async def run() -> None:
+        await u.check()
+        assert u.install(None) == "deferred"
+        await u._task
+        assert u.machine.phase == "ready" and u.dmg is not None and u.dmg.is_file()
+        dmg = u.dmg
+        u.staged = tmp_path / "Applications" / ".Voicestream-0.4.0.update.app"
+        (u.staged / "Contents").mkdir(parents=True)
+        staged = u.staged
+        feed.publish("/latest", feed.release("v0.3.0"), etag='"v2"')  # the maintainer took 0.4.0 back
+        assert await u.check() == "up_to_date"
+        assert u.machine.phase == "idle" and u.machine.release is None and not u.machine.deferred
+        assert not dmg.exists() and not staged.exists() and u.dmg is None and u.staged is None
+
+    asyncio.run(run())
 
 
 def test_app_management_opens_the_update_in_finder_instead(tmp_path: Path, feed: Feed,
