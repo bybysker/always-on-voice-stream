@@ -162,7 +162,10 @@ class ItemTracker:
             self.meeting.title = result.meeting_title.strip()[:120]
             self._publish("meeting.updated", title=self.meeting.title)
         # Claude's word on a name you addressed confirms it; a name you removed stays out (brain.people)
-        if any([add_person(self.meeting, p, self.user_name, model=True) for p in result.participants]):
+        changed = False
+        for p in result.participants:
+            changed |= add_person(self.meeting, p, self.user_name, model=True)
+        if changed:
             self.publish_people()
 
         for upd in result.updates:
