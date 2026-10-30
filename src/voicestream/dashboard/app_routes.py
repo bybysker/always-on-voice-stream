@@ -82,6 +82,13 @@ class PushRequest(_Body):
     """Also push a meeting another voicestream still has open (e.g. left over from a crash)."""
 
 
+class ReviewRequest(_Body):
+    approve: list[str] = Field(default_factory=list, max_length=1000)
+    """The to-dos to send to the tools that wait for your go-ahead."""
+    reject: list[str] = Field(default_factory=list, max_length=1000)
+    """The ones never to send there."""
+
+
 class RevealRequest(_Body):
     what: Literal["data_dir", "config", "log", "meeting"]
     folder: str | None = None
@@ -199,6 +206,7 @@ class AppApi:
             Route("/api/meetings", self.meetings, methods=["GET"]),
             Route(m, self.meeting, methods=["GET"]),
             Route(f"{m}/push", self.push_meeting, methods=["POST"]),
+            Route(f"{m}/review", self.review_meeting, methods=["POST"]),
             Route(f"{m}/summarize", self.summarize_meeting, methods=["POST"]),
             Route(f"{m}/items", self.add_item, methods=["POST"]),
             Route(f"{m}/people", self.edit_people, methods=["POST"]),
@@ -390,6 +398,10 @@ class AppApi:
         result = await self.host.meetings.push(request.path_params["folder"], body.sinks, notes=body.notes, force=body.force)
         result.pop("up_to_date", None)
         return JSONResponse(result)
+
+    async def review_meeting(self, request: Request) -> JSONResponse:
+        body = await _parse(request, ReviewRequest)
+        return JSONResponse(await self.host.meetings.review(request.path_params["folder"], body.approve, body.reject))
 
     async def summarize_meeting(self, request: Request) -> JSONResponse:
         self.host.meetings.start_summarize(request.path_params["folder"])

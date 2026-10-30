@@ -207,6 +207,14 @@ class FollowUpEmail(BaseModel):
     """Recipient e-mail addresses when known (otherwise left for you to fill in)."""
 
 
+class ReviewDecision(BaseModel):
+    """What you decided, at the end of the meeting, about the to-dos waiting for a tool that asks first
+    (``review = true``): the approved ones are sent, the rejected ones never are."""
+
+    approved: list[str] = Field(default_factory=list)
+    rejected: list[str] = Field(default_factory=list)
+
+
 class PersonInfo(BaseModel):
     """How a name came to be among a meeting's :attr:`Meeting.participants` (see :mod:`.brain.people`).
 
@@ -254,6 +262,8 @@ class Meeting(BaseModel):
     """Ready-to-send recap for the other participants (sinks may create it as a draft)."""
     summary_markdown: str | None = None
     notes_ref: dict[str, str] = Field(default_factory=dict)
+    review: dict[str, ReviewDecision] = Field(default_factory=dict)
+    """Sink name -> your decisions on its to-do list (sinks with ``review = true`` only)."""
     short_clip: bool = False
     """Too little speech to be a meeting (see ``always_on.short_clip_speech_s``): kept, not summarized or sent."""
     interrupted: bool = False

@@ -23,7 +23,7 @@ from voicestream.config import Config
 from voicestream.costs import CostMeter
 from voicestream.events import EventBus
 from voicestream.models import Item, ItemKind, ItemStatus, Meeting
-from voicestream.sinks.base import Sink, SinkConfig
+from voicestream.sinks.base import REGISTRY, Sink, SinkConfig
 from voicestream import storage
 from voicestream.storage import RECORDING_LOCK, SessionStore, atomic_write, is_recording, load_meeting
 
@@ -357,3 +357,27 @@ def test_the_recording_lock_follows_the_session(cfg: Config) -> None:
     stale = time.time() - storage.UNLOCKED_STALE_S - 60
     os.utime(old / "transcript.jsonl", (stale, stale))
     assert not is_recording(old)
+
+
+async def test_the_todo_list_is_validated_at_the_end(cfg: Config, saved: dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    rec = Rec(cfg)
+    rec.cfg.review = True  # like Promethee: nothing goes until you say so
+    monkeypatch.setattr("voicestream.sinks.base.build_sinks", lambda app, only=None: [rec])
+    cfg.sinks["rec"] = {"enabled": True, "review": True}
+    monkeypatch.setitem(REGISTRY, "rec", f"{__name__}:Rec")
+    host = StubHost(cfg)
+    m = Meetings(host)
+    folder = "2026-10-14_110000-planning"
+    assert m.detail(folder)["review"] == {"sinks": ["rec"], "pending": ["A1"], "unsent": []}  # A2 is already there
+    assert (await m.push(folder, notes=False))["count"] == 0  # held: "Send to my tools" doesn't skip the review
+
+    result = await m.review(folder, approve=["A1"], reject=[])
+    assert result == {"sent": {"A1": {"rec": "rec:A1"}}, "errors": [], "pending": []}
+    meeting, _ = load_meeting(saved["old"])
+    assert meeting.items["A1"].pushed == {"rec": "rec:A1"} and meeting.review["rec"].approved == ["A1"]
+    assert m.detail(folder)["review"]["pending"] == []
+    meeting.items["A1"].pushed.clear()  # approved, but the push failed
+    atomic_write(saved["old"] / "meeting.json", meeting.model_dump_json())
+    assert m.detail(folder)["review"] == {"sinks": ["rec"], "pending": [], "unsent": ["A1"]}
+    with pytest.raises(MeetingBusy):
+        await m.review("2026-10-16_100000", approve=["A1"], reject=[])

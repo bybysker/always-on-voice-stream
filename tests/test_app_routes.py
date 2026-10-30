@@ -60,8 +60,8 @@ ROUTES = [
     ("GET", "/api/app"), ("POST", "/api/listen/start"), ("POST", "/api/listen/stop"), ("GET", "/api/settings"),
     ("PATCH", "/api/settings"), ("PUT", "/api/secrets/ANTHROPIC_API_KEY"), ("POST", "/api/secrets/ANTHROPIC_API_KEY/test"),
     ("GET", "/api/doctor"), ("GET", "/api/devices"), ("GET", "/api/meetings"), ("GET", f"/api/meetings/{PLANNING}"),
-    ("POST", f"/api/meetings/{PLANNING}/push"), ("POST", f"/api/meetings/{PLANNING}/summarize"),
-    ("POST", f"/api/meetings/{PLANNING}/items"), ("POST", f"/api/meetings/{PLANNING}/people"),
+    ("POST", f"/api/meetings/{PLANNING}/push"), ("POST", f"/api/meetings/{PLANNING}/review"),
+    ("POST", f"/api/meetings/{PLANNING}/summarize"), ("POST", f"/api/meetings/{PLANNING}/items"), ("POST", f"/api/meetings/{PLANNING}/people"),
     ("PATCH", f"/api/meetings/{PLANNING}/items/A1"),
     ("POST", f"/api/meetings/{PLANNING}/items/A1/dismiss"), ("GET", "/api/cost"), ("GET", "/api/models"),
     ("POST", "/api/models/base/download"), ("DELETE", "/api/models/base"), ("POST", "/api/setup/complete"),
@@ -304,6 +304,10 @@ def test_meeting_routes(client: TestClient, host: AppHost, monkeypatch: pytest.M
     assert pushed["items"] == {"A1": {"rec": "rec:A1"}, "A3": {"rec": "rec:A3"}} and pushed["errors"] == []  # A2 was there
     assert client.post(f"/api/meetings/{LIVE_ELSEWHERE}/push", json={}).status_code == 409
     assert client.post(f"/api/meetings/{PLANNING}/push", json={"sinks": "rec"}).status_code == 400
+    # nothing waits for review here (no tool asks first): a review sends nothing, and says so
+    assert client.post(f"/api/meetings/{PLANNING}/review", json={"approve": ["A1"]}).json() == {"sent": {}, "errors": [], "pending": []}
+    assert client.post(f"/api/meetings/{PLANNING}/review", json={"approve": "A1"}).status_code == 400
+    assert client.post(f"/api/meetings/{LIVE_ELSEWHERE}/review", json={}).status_code == 409
     r = client.post(f"/api/meetings/{PLANNING}/summarize")
     assert r.status_code == 202
     deadline = time.monotonic() + 5

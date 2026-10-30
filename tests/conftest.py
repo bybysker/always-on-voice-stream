@@ -45,7 +45,7 @@ def cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
     for var in (
         "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPGRAM_API_KEY", "NOTION_TOKEN", "MONDAY_TOKEN", "LINEAR_API_KEY",
         "GITHUB_TOKEN", "TODOIST_TOKEN", "SLACK_WEBHOOK_URL", "VOICESTREAM_WEBHOOK_URL", "VOICESTREAM_WEBHOOK_SECRET",
-        "VOICESTREAM_GOOGLE_URL", "VOICESTREAM_GOOGLE_SECRET", "HUBSPOT_TOKEN",
+        "VOICESTREAM_GOOGLE_URL", "VOICESTREAM_GOOGLE_SECRET", "HUBSPOT_TOKEN", "PROMETHEE_TOKEN",
     ):  # fmt: skip
         monkeypatch.delenv(var, raising=False)
     c = Config(user_name="Alex", data_dir=str(tmp_path / "data"))

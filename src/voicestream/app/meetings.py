@@ -37,7 +37,7 @@ from ..brain.people import other_side, people_event, speaker_label
 from ..brain.summarizer import rerender, summarize
 from ..brain.tracker import ItemTracker
 from ..config import Config
-from ..dispatch import Dispatcher
+from ..dispatch import Dispatcher, pending_review
 from ..events import EventBus
 from ..models import Event, ItemKind, Meeting
 from ..storage import (
@@ -191,6 +191,38 @@ async def push_meeting(
         "count": n,
         "up_to_date": n == 0 and any(i.pushed for i in meeting.items.values()),
     }
+
+
+async def review_meeting(
+    meeting: Meeting,
+    dispatcher: Dispatcher,
+    approve: Collection[str],
+    reject: Collection[str] = (),
+    *,
+    save: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Apply your end-of-meeting decisions (:meth:`Dispatcher.review`) and say what happened:
+    ``{sent: {item id: {sink: ref}}, errors: [...], pending: [item ids still waiting]}``."""
+    sent: dict[str, dict[str, str]] = {}
+    errors: list[str] = []
+
+    def on_event(ev: Event) -> None:
+        if ev.data.get("meeting_id") != meeting.id or not ev.data.get("item_id"):
+            return
+        if ev.type == "item.pushed":
+            sent.setdefault(str(ev.data["item_id"]), {})[str(ev.data["sink"])] = str(ev.data.get("ref") or "")
+        elif ev.type == "sink.error":
+            errors.append(f"{ev.data['item_id']} → {ev.data.get('sink')}: {ev.data.get('error')}")
+
+    unlisten = dispatcher.bus.listen(on_event) if dispatcher.bus is not None else None
+    try:
+        await dispatcher.review(approve, reject)
+    finally:
+        if unlisten:
+            unlisten()
+        if save is not None:
+            save()
+    return {"sent": sent, "errors": errors, "pending": dispatcher.pending_review()}
 
 
 async def summarize_meeting(
@@ -388,7 +420,20 @@ class Meetings:
             "notes_markdown": notes_markdown(d, meeting),
             "folder": folder,
             "in_memory": s is not None,
+            "review": self._review_state(meeting, s),
         }
+
+    def _review_state(self, meeting: Meeting, s: MeetingSession | None) -> dict[str, Any]:
+        """The tools that wait for your go-ahead (``review = true``), the to-dos waiting for it, and the
+        approved ones that haven't reached them."""
+        sinks = [sink for sink in (s.dispatcher.sinks if s is not None else self._review_sinks()) if sink.cfg.review]
+        tools = [sink.name for sink in sinks]
+        pending = pending_review(meeting, sinks, self.cfg.dispatch.min_confidence) if meeting.ended_at else []
+        # approved, but not there yet (the push failed): the page offers to try again
+        unsent = [i for i in meeting.items.values() if not i.dismissed and any(
+            sink.name not in i.pushed and i.id in (meeting.review[sink.name].approved if sink.name in meeting.review else ())
+            for sink in sinks)]
+        return {"sinks": tools, "pending": pending, "unsent": [i.id for i in unsent]}
 
     def _editable(self, folder: str) -> tuple[Meeting, Path]:
         meeting, d = self._load(folder)
@@ -485,6 +530,24 @@ class Meetings:
 
     # -------------------------------------------------------------------- push
 
+    def _review_sinks(self) -> list[Sink]:
+        """The sinks that wait for your go-ahead: the running assistant's, else just those built afresh
+        (nothing to close: their HTTP clients are only made when they send something)."""
+        a = self.host.assistant
+        if a is not None:
+            return [s for s in a.sinks if s.cfg.review]
+        from ..sinks.base import build_sinks, sink_class
+
+        names = []
+        for name, raw in self.cfg.sinks.items():
+            try:
+                default = sink_class(name).Config.model_fields["review"].default
+            except (KeyError, ImportError):
+                continue
+            if (raw or {}).get("enabled") and (raw or {}).get("review", default):
+                names.append(name)
+        return build_sinks(self.cfg, only=names) if names else []
+
     def _sinks(self) -> tuple[list[Sink], bool]:
         """The running assistant's sinks (shared: never closed here), else fresh ones to close after."""
         a = self.host.assistant
@@ -518,6 +581,30 @@ class Meetings:
                         self.cfg, meeting, sinks, bus=self.host.bus, notes=notes, sink_names=sink_names,
                         save=lambda: save_meeting(d, meeting),
                     )
+                finally:
+                    if temporary:
+                        await _close(sinks)
+        finally:
+            self._release(folder, held)
+        self.host.bus.publish("meeting.saved", meeting_id=meeting.id, folder=d.name)
+        return result
+
+    async def review(self, folder: str, approve: list[str], reject: list[str]) -> dict[str, Any]:
+        """Validate the end-of-meeting to-do list: send ``approve`` to the tools that wait for it, never
+        ``reject``. Returns ``{sent, errors, pending}``."""
+        s = self.live_session(folder)
+        if s is not None:
+            if not s.finished:
+                raise MeetingBusy("the meeting is still in progress: its to-do list is reviewed when it ends")
+            return await review_meeting(s.meeting, s.dispatcher, approve, reject, save=s.save_soon)
+        meeting, d = self._editable(folder)
+        held = self._hold(folder, meeting, d)
+        try:
+            async with held.lock:
+                sinks, temporary = self._sinks()
+                try:
+                    dispatcher = Dispatcher(self.cfg, meeting, sinks, self.host.bus, on_change=lambda: save_meeting(d, meeting))
+                    result = await review_meeting(meeting, dispatcher, approve, reject, save=lambda: save_meeting(d, meeting))
                 finally:
                     if temporary:
                         await _close(sinks)

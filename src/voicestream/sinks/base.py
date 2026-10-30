@@ -41,6 +41,9 @@ class SinkConfig(BaseModel):
     """Also push tasks that were delegated to an agent."""
     notes: bool = True
     """Push the meeting notes too (for sinks that support it)."""
+    review: bool = False
+    """Hold new items until you validate the to-do list at the end of the meeting (the app's
+    review card, or ``voicestream push --approve``). Items already sent stay in sync."""
 
 
 class Sink(ABC):
@@ -99,6 +102,7 @@ REGISTRY: dict[str, str] = {
     "shortcuts": "voicestream.sinks.command:ShortcutsSink",
     "command": "voicestream.sinks.command:CommandSink",
     "hubspot": "voicestream.sinks.hubspot:HubSpotSink",
+    "promethee": "voicestream.sinks.promethee:PrometheeSink",
 }
 
 

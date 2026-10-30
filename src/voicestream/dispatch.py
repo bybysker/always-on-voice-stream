@@ -10,7 +10,7 @@ from collections.abc import Callable, Collection
 
 from .config import Config
 from .events import EventBus
-from .models import Item, ItemStatus, Meeting
+from .models import Item, ItemStatus, Meeting, ReviewDecision
 from .sinks.base import Sink, SinkError
 
 log = logging.getLogger(__name__)
@@ -71,6 +71,8 @@ class Dispatcher:
             return None
         if not sink.accepts(item, self.dc.min_confidence):
             return None
+        if sink.cfg.review and not _decided(self.meeting, sink.name, item.id, approved=True):
+            return None  # waits for the end-of-meeting review
         return "create"
 
     # ----------------------------------------------------------------- pushing
@@ -157,6 +159,8 @@ class Dispatcher:
                 if action == "create" and (item.dismissed or item.status == ItemStatus.CANCELLED):
                     results[sink.name] = "skipped (dismissed or cancelled)"
                     continue
+                if action == "create" and sink.cfg.review:
+                    _decide(self.meeting, sink.name, [item.id], approved=True)  # pushing it by hand is approving it
                 if action == "update" and not sink.supports_update:
                     results[sink.name] = item.pushed[sink.name]
                     continue
@@ -165,6 +169,36 @@ class Dispatcher:
         if self.on_change:
             self.on_change()
         return results
+
+    # ------------------------------------------------------------------ review
+
+    def pending_review(self) -> list[str]:
+        return pending_review(self.meeting, self.sinks, self.dc.min_confidence)
+
+    async def review(
+        self, approve: Collection[str], reject: Collection[str] = (), sink_names: Collection[str] | None = None, *, send: bool = True
+    ) -> int:
+        """Your decisions on the to-do list held for the sinks with ``review = true``: the approved items
+        are sent now (``send=False``: by the caller's next :meth:`sync`), the rejected ones never will be
+        (a later decision replaces an earlier one). Ids the meeting doesn't have are ignored. Returns the
+        number of items sent."""
+        sinks = [s for s in self.sinks if s.cfg.review and (sink_names is None or s.name in sink_names)]
+        approve = [i for i in approve if i in self.meeting.items]
+        reject = [i for i in reject if i in self.meeting.items and i not in approve]
+        async with self._lock:  # not while a round is deciding what to create
+            for sink in sinks:
+                _decide(self.meeting, sink.name, approve, approved=True)
+                _decide(self.meeting, sink.name, reject, approved=False)
+                for item_id in approve:
+                    self._attempts.pop((item_id, sink.name), None)  # a fresh start, as a manual push gets
+        if self.on_change:
+            self.on_change()
+        if self.bus:
+            self.bus.publish("review.done", meeting_id=self.meeting.id, approved=len(approve), rejected=len(reject),
+                             pending=len(self.pending_review()))
+        if not approve or not sinks or not send:
+            return 0
+        return await self.sync(require_stable=False, only=set(approve), sink_names={s.name for s in sinks})
 
     async def run(self) -> None:
         """Background loop for ``dispatch.mode = "immediate"``; also keeps pushed items in sync."""
@@ -262,3 +296,34 @@ class Dispatcher:
                 await sink.aclose()
             except Exception:  # pragma: no cover
                 pass
+
+
+def pending_review(meeting: Meeting, sinks: Collection[Sink], min_confidence: float) -> list[str]:
+    """The items waiting for your go-ahead (a sink with ``review = true`` would take them and you haven't
+    decided yet), in the meeting's order."""
+    ids = []
+    for item in meeting.items.values():
+        for sink in sinks:
+            if not sink.cfg.review or sink.name in item.pushed:
+                continue
+            if _decided(meeting, sink.name, item.id, approved=True) or _decided(meeting, sink.name, item.id, approved=False):
+                continue
+            if sink.accepts(item, min_confidence):
+                ids.append(item.id)
+                break
+    return ids
+
+
+def _decided(meeting: Meeting, sink: str, item_id: str, *, approved: bool) -> bool:
+    d = meeting.review.get(sink)
+    return d is not None and item_id in (d.approved if approved else d.rejected)
+
+
+def _decide(meeting: Meeting, sink: str, item_ids: Collection[str], *, approved: bool) -> None:
+    d = meeting.review.setdefault(sink, ReviewDecision())
+    add, drop = (d.approved, d.rejected) if approved else (d.rejected, d.approved)
+    for item_id in item_ids:
+        if item_id in drop:
+            drop.remove(item_id)
+        if item_id not in add:
+            add.append(item_id)
