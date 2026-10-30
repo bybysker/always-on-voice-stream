@@ -10,21 +10,19 @@ For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. You need a C
 
 ### New in this version
 
-- **Meetings start when you say so.** Nothing is recorded until you start a meeting; Stop writes
-  its notes and lets go of the microphone. After 15 minutes without speech Voicestream asks
-  *Still in a meeting?*, and after 60 it ends the meeting and tells you. (The old always-on
-  listening is still there: Settings → General → Starting meetings.)
-- **Start a meeting from anywhere:** the big **Start meeting** button in the window (Return
-  starts it), a **floating button** above every app and every Space (drag it where you like,
-  hide it from its menu), **⌥⌘R** from any app (change it with *Choose a shortcut*),
-  **⌘Space → "voicestream" → Return**, or the menu bar.
-- **Call detected — start notes?** When Zoom, Teams, FaceTime or Meet starts using the
-  microphone, the floating button offers to take notes. It never starts by itself.
-- A setup step and a Settings section, *Starting meetings*, to choose all this; an easier
-  window from the keyboard, and the French wording made the same everywhere.
-
-**Upgrading from 0.2:** meetings now start by hand. To keep listening all the time, choose
-*Automatically* in Settings → General → Starting meetings.
+- **Promethee.** Your meeting's to-do list can go to Promethee, through its MCP server. Turn it
+  on in *Settings → Your tools → Promethee* and click **Connect to Promethee**: you sign in to
+  Promethee in your browser, with no key to copy. Then **Test** says which Promethee action your
+  to-dos go through.
+- **You validate the to-do list at the end of each meeting.** Nothing goes to Promethee until you
+  say so. When a meeting ends, a banner says how many to-dos wait for your OK. The meeting's page
+  lists them: untick what shouldn't go, then **Send**, or **Don't send any**. A to-do you left
+  out never goes by itself. Any other tool can ask first too (`review = true` in its settings).
+- From the terminal: `voicestream push last --approve` validates the list and sends it.
+- **This is a beta (pre-release).** Only apps with *Settings → General → Updates → pre-releases*
+  turned on are offered it, and it installs from inside the app like any update after 0.3.0. The
+  Promethee connection follows the MCP standard but hasn't been tried against Promethee's own
+  server yet: if **Connect** or **Test** shows an error, it says why. Please send it to us.
 
 ### Install
 

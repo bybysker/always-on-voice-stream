@@ -84,7 +84,7 @@ def test_a_release_is_read_from_the_api() -> None:
     r = upd.parse_release(_release())
     assert r is not None and r.version == V("0.4.0") and r.tag == "v0.4.0" and not r.prerelease
     assert r.asset == upd.Asset("Voicestream-0.4.0-arm64.dmg", r.asset.url, 1234, "ab" * 32)
-    assert r.notes.startswith("• Meetings start when you say so.") and "### Install" not in r.notes
+    assert r.notes.startswith("• Promethee.") and "### Install" not in r.notes
     assert upd.Release.from_dict(r.as_dict()) == r  # cached behind its ETag
     # no digest: the release is offered, but its file can't be checked (download refuses it)
     assert upd.parse_release(_release(digest=None)).asset.sha256 is None
@@ -794,7 +794,7 @@ def test_the_update_routes(client: TestClient, host: AppHost, feed: Feed) -> Non
     assert state["capabilities"]["self_update"] is False and state["update"]["can_install"] is False
     body = client.post("/api/update/check").json()
     assert body["result"] == "available" and body["update"]["release"]["version"] == "0.4.0"
-    assert body["update"]["release"]["notes"].startswith("• Meetings start when you say so.")
+    assert body["update"]["release"]["notes"].startswith("• Promethee.")
     assert client.get("/api/update").json()["phase"] == "available"
     assert client.post("/api/update/later").json()["update"]["later"] == "0.4.0"
     assert client.post("/api/update/cancel").json()["result"] is False  # nothing downloading

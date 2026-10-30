@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "voicestream"
-version = "0.3.0"
+version = "0.4.0-beta.1"
 description = "Always-on meeting voice stream: captures mic + system audio, transcribes live, extracts action items with Claude, pushes them to your tools, and dispatches agents to do the work while you're still in the meeting."
 readme = "README.md"
 requires-python = ">=3.11"
