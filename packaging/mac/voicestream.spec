@@ -22,6 +22,7 @@ VERSION = info.package_version()
 
 # catap loads its Core Audio helper with ctypes (catap/native/libcatap_coreaudio.dylib): invisible to analysis
 binaries = collect_dynamic_libs("catap")
+binaries += collect_dynamic_libs("onnxruntime")  # its native library, loaded by its own Python module
 whisper = info.whisper_server()
 if whisper is not None:
     # -> Contents/Frameworks/bin/whisper-server, where transcribe/whisper_cpp.find_binary looks (sys._MEIPASS/bin)
@@ -47,6 +48,7 @@ hiddenimports = [
     "CoreAudio",
     "PyObjCTools.AppHelper",
     "keyring.backends.macOS",
+    "onnxruntime",  # voices.py imports it when it tells the people on the meeting audio apart
 ]
 
 excludes = [

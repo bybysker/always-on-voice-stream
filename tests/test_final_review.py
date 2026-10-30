@@ -1018,7 +1018,7 @@ async def test_s3_summary_participants_replace_the_live_list(cfg: Config) -> Non
     tracker.apply(ExtractionResult(participants=["Léa Dupont", "Sam"]))  # a live round listed a mention
     cfg.brain.provider = "anthropic"
     llm = ScriptedLLM([WireSummary(title="Internal sync", tldr="", notes_markdown="", updates=[], missing_items=[],
-                                   participants=["Sam", "Alex"], language="en", followup_subject="", followup_body="")])
+                                   participants=["Sam", "Alex"], speakers=[], language="en", followup_subject="", followup_body="")])
     await summarize(cfg, m, tracker, llm)
     assert m.participants == ["Sam"]
 

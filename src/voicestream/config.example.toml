@@ -19,6 +19,7 @@ method = "auto"   # auto | tap (macOS 14.2+) | device (BlackHole) | soundcard (W
 # device = "BlackHole 2ch"                       # macOS, after installing BlackHole
 # ffmpeg_input = "-f pulse -i alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"   # Linux example
 label = "Others"
+voices = true     # tell the people on the call apart by voice, on this computer ("Speaker 1", "Speaker 2"…)
 
 [vad]
 margin_db = 12.0       # how far above background noise counts as speech; lower = more sensitive

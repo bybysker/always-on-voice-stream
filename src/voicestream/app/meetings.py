@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from zoneinfo import ZoneInfo
 
 from .. import known_people
-from ..brain.people import other_side, people_event, speaker_label
+from ..brain.people import name_voice, other_side, people_event, speaker_label, voice_labels
 from ..brain.summarizer import rerender, summarize
 from ..brain.tracker import ItemTracker
 from ..config import Config
@@ -493,10 +493,36 @@ class Meetings:
         meeting, d = self._editable(folder)
         known_people.edit_meeting(self.cfg.data_path, meeting, add, remove, self.cfg.user_name)
         self._write(d, meeting)
-        label, other = self.cfg.capture.system.label, other_side(meeting)
-        write_transcript_md(d, meeting, lambda seg: speaker_label(seg, other, label))
+        self._write_transcript(d, meeting)
         self.host.bus.publish("meeting.people", **people_event(meeting), folder=d.name)
         return {**people_event(meeting), "folder": d.name}
+
+    def name_voice(self, folder: str, voice: int, name: str) -> dict[str, Any]:
+        """A voice heard on the meeting audio, named by you ("Speaker 2" is Julie; ``""``: no name again). The name
+        joins the meeting's people; its notes and transcript.md are written again with it."""
+        s = self.live_session(folder)
+        if s is not None:
+            s.name_voice(voice, name)
+            meeting, where = s.meeting, s.store.dir.name
+        else:
+            meeting, d = self._editable(folder)
+            if not any(seg.voice == voice for seg in meeting.segments):
+                raise KeyError(voice)
+            name_voice(meeting, voice, name, by_you=True)
+            if name.strip():
+                known_people.edit_meeting(self.cfg.data_path, meeting, [name.strip()], [], self.cfg.user_name)
+            self._write(d, meeting)
+            self._write_transcript(d, meeting)
+            where = d.name
+            self.host.bus.publish("meeting.people", **people_event(meeting), folder=where)
+        labels = {str(k): v for k, v in (voice_labels(meeting) or {}).items()}
+        self.host.bus.publish("meeting.voices", meeting_id=meeting.id, voices=dict(meeting.voices), labels=labels,
+                              folder=where)
+        return {**people_event(meeting), "voices": dict(meeting.voices), "labels": labels, "folder": where}
+
+    def _write_transcript(self, d: Path, meeting: Meeting) -> None:
+        label, other, voices = self.cfg.capture.system.label, other_side(meeting), voice_labels(meeting)
+        write_transcript_md(d, meeting, lambda seg: speaker_label(seg, other, label, voices))
 
     def _write(self, d: Path, meeting: Meeting) -> None:
         """Save an edited past meeting; its notes list the items, so they are rebuilt too."""

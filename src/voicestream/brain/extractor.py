@@ -25,6 +25,7 @@ from ..events import EventBus
 from ..models import Item, Meeting, ScreenNote, TranscriptSegment
 from .heuristic import extract_heuristic
 from .llm import LLM, LLMError, LLMUnavailable, text_block
+from .people import speaker_label, voice_labels
 from .phrases import find_phrase
 from .prompts import EXTRACTION_SYSTEM, meeting_context, render_items, render_screen, render_segment
 from .schema import WireExtraction, wire_to_result
@@ -229,7 +230,10 @@ class Extractor:
         return blocks
 
     def _build_block(self, pending: list[tuple[int, TranscriptSegment]], screens: list[ScreenNote]) -> str:
-        events: list[tuple[float, str]] = [(s.t_start, render_segment(i, s)) for i, s in pending]
+        # the voices told apart on the meeting audio, by number or name as they stand now (earlier blocks keep theirs)
+        voices, others = voice_labels(self.meeting), self.cfg.capture.system.label
+        events: list[tuple[float, str]] = [(s.t_start, render_segment(i, s, speaker_label(s, None, others, voices)))
+                                           for i, s in pending]
         events += [(n.t, render_screen(n)) for n in screens]
         events.sort(key=lambda e: e[0])
         return "\n".join(text for _, text in events)

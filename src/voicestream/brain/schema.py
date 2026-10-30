@@ -56,6 +56,11 @@ class WireExtraction(BaseModel):
     )
 
 
+class WireSpeaker(BaseModel):
+    speaker: str = Field(description="A voice label exactly as in the transcript, e.g. 'Speaker 2'.")
+    name: str = Field(description="That person's name as said in the meeting.")
+
+
 class WireSummary(BaseModel):
     title: str = Field(description="Short descriptive meeting title.")
     tldr: str = Field(description="2-3 sentence summary.")
@@ -68,6 +73,10 @@ class WireSummary(BaseModel):
     participants: list[str] = Field(
         description="Everyone who took part (spoke, or was addressed as present), the user excepted; never people "
         "who were only talked about."
+    )
+    speakers: list[WireSpeaker] = Field(
+        description="Who each 'Speaker N' of the transcript is, only when the transcript makes it clear (they introduce "
+        "themselves, or answer right after being addressed by name); [] if none or no 'Speaker N' lines."
     )
     language: str = Field(description="ISO-639-1 code of the language most of the meeting was spoken in, e.g. 'fr' or 'en'.")
     followup_subject: str = Field(description="Subject of a short follow-up email to the other participants; '' if pointless (e.g. solo).")

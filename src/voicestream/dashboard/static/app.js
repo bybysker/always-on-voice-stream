@@ -345,10 +345,19 @@ function toast(text, kind = 'info', title = '', action = null) {
 }
 
 /** A confirmation in the page's own dialog (a native confirm() is not always available in the app window). */
-function ask({ title, body = '', ok, cancel, danger = false }) {
+function ask({ title, body = '', ok, cancel, danger = false, input = null }) {
   const dlg = $('ask');
   $('ask-title').textContent = title;
   $('ask-body').textContent = body;
+  // ``input``: {value, label, suggestions}: the answer is then the text typed (``false``: cancelled)
+  const field = $('ask-input');
+  $('ask-field').hidden = !input;
+  if (input) {
+    field.value = input.value || '';
+    field.setAttribute('aria-label', input.label || title);
+    fill($('ask-names'), ...(input.suggestions || []).map((v) => h('option', { value: v })));
+    field.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); $('ask-ok').click(); } };
+  }
   $('ask-ok').textContent = ok || t('common.ok');
   $('ask-ok').className = 'btn ' + (danger ? 'danger solid' : 'primary');
   $('ask-cancel').textContent = cancel || t('common.cancel');
@@ -358,11 +367,11 @@ function ask({ title, body = '', ok, cancel, danger = false }) {
       if (dlg.open) dlg.close();
       resolve(answer);
     };
-    $('ask-ok').onclick = () => done(true);
+    $('ask-ok').onclick = () => done(input ? field.value.trim() : true);
     $('ask-cancel').onclick = () => done(false);
     dlg.oncancel = (e) => { e.preventDefault(); done(false); };
     dlg.showModal();
-    (danger ? $('ask-cancel') : $('ask-ok')).focus();
+    if (input) { field.focus(); field.select(); } else (danger ? $('ask-cancel') : $('ask-ok')).focus();
   });
 }
 
@@ -453,7 +462,7 @@ const S = {
 const EVENT_TYPES = [
   'state', 'app.state', 'app.warning', 'assistant.started', 'assistant.stopped', 'assistant.paused', 'assistant.resumed',
   'meeting.started', 'meeting.updated', 'meeting.ending', 'meeting.ended', 'meeting.notes_updated', 'meeting.saved',
-  'meeting.people',
+  'meeting.people', 'meeting.voices',
   'segment', 'transcript.partial', 'level', 'extraction', 'item.added', 'item.updated', 'agent.updated', 'item.pushed',
   'sink.error', 'notes.pushed', 'oauth.changed', 'cost', 'screen', 'source.error', 'source.stopped', 'agent.budget', 'agent.held',
   'model.download', 'settings.changed', 'app.focus',
@@ -529,6 +538,9 @@ function handle(type, ev) {
       return onMeetingSaved(d);
     case 'meeting.people':
       onDetailPeople(d);
+      break;
+    case 'meeting.voices':
+      onDetailVoices(d);
       break;
     case 'cost':
       return setCost(d);
@@ -2087,7 +2099,8 @@ function setLivePeople(m) {
   if (other === L.other) return;
   L.other = other;
   for (const spk of LV.lines.querySelectorAll('.spk.lane-others')) spk.textContent = other || t('live.others');
-  LV.voices.setOther(other);
+  relabelVoices();  // lines whose voice was told apart keep it
+  LV.voices.setOther(voicesTold(L.vc) ? null : other);  // several voices: the meeting audio isn't one person
   renderPartials();
 }
 
@@ -2102,6 +2115,19 @@ function onDetailPeople(d) {
   const D = S.detail;
   if (!D || !D.data || D.data.meeting.id !== d.meeting_id) return;
   setDetailPeople(D, d);
+}
+
+function onDetailVoices(d) {
+  const D = S.detail;
+  if (!D || !D.data || D.data.meeting.id !== d.meeting_id) return;
+  setDetailVoices(D, d.voices);
+}
+
+function setDetailVoices(D, names) {
+  const m = D.data.meeting;
+  if (JSON.stringify(m.voices || {}) === JSON.stringify(names || {})) return;
+  m.voices = { ...(names || {}) };
+  if (S.route.name === 'meetings' && S.detail === D) keepFocus($('screen-meetings'), drawDetail);
 }
 
 function setDetailPeople(D, people) {
@@ -2202,6 +2228,8 @@ function applyLiveState(st) {
     else if (L.phase !== 'ending') L.phase = 'live';
     L.meeting.title = m.title || L.meeting.title;
     setLivePeople(m);
+    S.live.vc = S.live.vc || voiceCtx({});
+    S.live.vc.names = { ...(m.voices || {}) };
     const timeline = [
       ...(m.segments || []).map((s) => [s.t_start, () => addSegment(s)]),
       ...(m.screen_notes || []).map((n) => [n.t, () => addScreen(n)]),
@@ -2241,6 +2269,8 @@ function startMeeting(m) {
   L.phase = 'live';
   L.lastEnded = null;
   L.segs = [];
+  L.segById = new Map();
+  L.vc = voiceCtx({});
   L.people = null;
   for (const set of [L.seen, L.partials, L.editing, L.expanded]) set.clear();
   liveBoard().clear();
@@ -2268,6 +2298,8 @@ function liveEvent(type, d, ev) {
       break;
     case 'meeting.people':
       return setLivePeople(d);
+    case 'meeting.voices':
+      return setLiveVoices(d.voices);
     case 'meeting.ending':
       L.phase = 'ending';
       break;
@@ -2361,19 +2393,78 @@ function othersLane(seg) {
   return seg.source !== 'mic' && (!seg.speaker || seg.speaker === 'Others');
 }
 
-/** ``other``: the one other person in the meeting (otherSide), who the meeting audio's lines are then. */
-function speakerOf(seg, other = null) {
+/** The voices told apart on a meeting's audio: the names given to them (``meeting.voices``) and those heard. */
+function voiceCtx(names, segs = []) {
+  const seen = new Set();
+  for (const s of segs) if (s.voice && s.source !== 'mic') seen.add(s.voice);
+  return { names: { ...(names || {}) }, seen };
+}
+
+/** Several voices heard, or one named: the meeting audio's lines carry their voice (as voice_labels on the server). */
+function voicesTold(vc) {
+  return Boolean(vc) && (vc.seen.size >= 2 || [...vc.seen].some((v) => vc.names[v]));
+}
+
+/** ``other``: the one other person in the meeting (otherSide), who the meeting audio's lines are then;
+ *  ``vc``: its voices (voiceCtx), when they were told apart — "Speaker 2", or the name given to it. */
+function speakerOf(seg, other = null, vc = null) {
   const mine = seg.source === 'mic';
-  if (other && othersLane(seg)) return other;
+  if (othersLane(seg) && voicesTold(vc)) {
+    if (seg.voice) return vc.names[seg.voice] || t('live.speaker_n', { n: seg.voice });
+  } else if (other && othersLane(seg)) return other;
   // the default labels (capture.mic.label = "Me"…) follow the app's language; a name you set is kept
   if (!seg.speaker || seg.speaker === (mine ? 'Me' : 'Others')) return mine ? t('live.me') : t('live.others');
   return seg.speaker;
 }
 
 function segLine(seg) {
-  const el = line(seg.source === 'mic' ? 'me' : 'others', fmtTs(seg.t_start), fmtClock(seg.wall_time), speakerOf(seg, S.live.other), seg.text, seg.id);
+  const L = S.live;
+  const el = line(seg.source === 'mic' ? 'me' : 'others', fmtTs(seg.t_start), fmtClock(seg.wall_time), speakerOf(seg, L.other, L.vc), seg.text, seg.id);
   if (othersLane(seg)) el.querySelector('.spk').classList.add('lane-others');  // renamed when the other side is known
+  if (othersLane(seg) && seg.voice) {
+    el.querySelector('.spk').replaceWith(voiceButton(seg, () => speakerOf(seg, L.other, L.vc),
+      () => L.phase !== 'live' && L.phase !== 'ending', () => L.meeting && L.meeting.folder, setLiveVoices));
+  }
   return el;
+}
+
+/** A line's speaker when its voice was told apart: click it to say who that voice is (every line of the voice follows). */
+function voiceButton(seg, label, readOnly, folder, applied) {
+  const b = h('button', { type: 'button', class: 'spk voice lane-others', dataset: { voice: String(seg.voice) } }, label());
+  b.disabled = readOnly();
+  b.title = b.disabled ? '' : t('voice.name_tip');
+  b.onclick = async () => {
+    const current = label();
+    const named = [t('live.speaker_n', { n: seg.voice }), t('live.others')].includes(current) ? '' : current;
+    const known = [...new Set([...(S.live.people && S.live.people.participants) || [],
+      ...((S.detail && S.detail.data && S.detail.data.meeting.participants) || [])])];
+    const name = await ask({ title: t('voice.name_title', { label: current }), body: t('voice.name_body'), ok: t('common.save'),
+      input: { value: named, label: t('voice.name_label'), suggestions: known } });
+    if (name === false || name === named) return;
+    const where = folder();
+    if (!where) return toast(t('people.not_yet'), 'warn');
+    const res = await act(b, () => api('POST', `/api/meetings/${enc(where)}/voices`, { voice: seg.voice, name }));
+    if (res) applied(res.voices);
+  };
+  return b;
+}
+
+/** The names of the voices on Live's meeting changed (yours, or Claude's at the wrap-up): its lines follow. */
+function setLiveVoices(names) {
+  const L = S.live;
+  if (!L.vc) L.vc = voiceCtx({});
+  L.vc.names = { ...(names || {}) };
+  relabelVoices();
+}
+
+function relabelVoices() {
+  const L = S.live;
+  if (!LV.lines) return;
+  for (const el of LV.lines.querySelectorAll('[data-seg]')) {
+    const seg = L.segById && L.segById.get(el.dataset.seg);
+    const spk = el.querySelector('.spk');
+    if (seg && othersLane(seg) && spk) spk.textContent = speakerOf(seg, L.other, L.vc);
+  }
 }
 
 function screenLine(note) {
@@ -2385,8 +2476,16 @@ function addSegment(seg) {
   liveBoard();
   S.live.seen.add(seg.id);
   S.live.segs.push(['seg', seg]);
+  (S.live.segById ||= new Map()).set(seg.id, seg);
   if (S.live.partials.delete(seg.source)) renderPartials();
+  const vc = S.live.vc ||= voiceCtx({});
+  const told = voicesTold(vc);
+  if (seg.voice && seg.source !== 'mic') vc.seen.add(seg.voice);
   appendLine(segLine(seg));
+  if (voicesTold(vc) !== told) {  // a second voice: "Others" above becomes Speaker 1, and the strip's lane "Others"
+    relabelVoices();
+    LV.voices.setOther(null);
+  }
   LV.voices.add(seg);
 }
 
@@ -2413,7 +2512,7 @@ function stick() {
 function renderPartials() {
   if (!LV.partials) return;
   fill(LV.partials, ...[...S.live.partials].map(([src, p]) =>
-    line('partial ' + (src === 'mic' ? 'me' : 'others'), '', '', speakerOf({ source: src, speaker: p.speaker }, S.live.other), p.text + '…')));
+    line('partial ' + (src === 'mic' ? 'me' : 'others'), '', '', speakerOf({ source: src, speaker: p.speaker }, S.live.other, S.live.vc), p.text + '…')));
   stick();
 }
 
@@ -2989,7 +3088,7 @@ function drawDetail() {
   D.people.set({ participants: m.participants, people: m.people, people_removed: m.people_removed }, readOnly);
 
   // the meeting as it went: who spoke when, and where each to-do and decision was said
-  const voices = new VoiceStrip('detail', otherSide(m));
+  const voices = new VoiceStrip('detail', voicesTold(voiceCtx(m.voices, m.segments || [])) ? null : otherSide(m));
   for (const seg of m.segments || []) voices.add(seg, false);
   voices.setItems(Object.values(m.items || {}));  // and its legend, once
   voices.setTotal(duration);
@@ -3162,15 +3261,19 @@ function detailUpsert(item) {
 function transcriptPanel(D) {
   const segs = D.data.meeting.segments || [];
   const other = otherSide(D.data.meeting);
+  const vc = voiceCtx(D.data.meeting.voices, segs);
+  const spk = (s) => speakerOf(s, other, vc);
   if (!segs.length) return h('div', { class: 'empty-state' }, icon('mic', 'xl'), h('strong', {}, t('meetings.no_transcript')));
   const filter = h('input', { type: 'search', placeholder: t('meetings.find_ph'), 'aria-label': t('meetings.find'), value: D.filter });
   const list = h('div', { class: 'tlines', id: 'transcript-lines' });
   const draw = () => {
     const needle = D.filter.toLowerCase();
-    const rows = segs.filter((s) => !needle || s.text.toLowerCase().includes(needle) || speakerOf(s, other).toLowerCase().includes(needle));
+    const rows = segs.filter((s) => !needle || s.text.toLowerCase().includes(needle) || spk(s).toLowerCase().includes(needle));
     fill(list, ...rows.map((s) => h('div', { class: 'tline ' + (s.source === 'mic' ? 'me' : 'others'), dataset: { seg: s.id } },
       h('span', { class: 'ts', title: fmtClock(s.wall_time) }, fmtTs(s.t_start)),
-      h('div', { class: 'body' }, h('span', { class: 'spk' }, speakerOf(s, other)), h('span', {}, s.text)))));
+      h('div', { class: 'body' }, othersLane(s) && s.voice
+        ? voiceButton(s, () => spk(s), () => detailState(D).readOnly, () => D.folder, (names) => setDetailVoices(D, names))
+        : h('span', { class: 'spk' }, spk(s)), h('span', {}, s.text)))));
     for (const item of Object.values(D.data.meeting.items || {})) markSaid(list, item);
     if (!rows.length) list.append(h('p', { class: 'muted' }, t('meetings.find_none')));
   };
@@ -4420,6 +4523,7 @@ function audioSection() {
         setDraft('capture.sources', on ? [...base, 'system'] : base);
       }, { path: 'capture.sources' }),
       sys && h('p', { class: 'help small muted' }, icon('info'), ' ', sys.available ? t('audio.system_ok', { detail: sys.detail }) : t('audio.system_missing', { detail: sys.detail })),
+      sources.includes('system') && settingSwitch('capture.system.voices', t('audio.voices'), t('audio.voices_help')),
       settingSwitch('capture.store_audio', t('audio.store'), t('audio.store_help'))),
     card(t('perm.title'), t('perm.lead'), permissionRow('microphone'), permissionRow('system-audio')));
 }
@@ -5585,7 +5689,10 @@ const STRINGS = {
     'live.week': 'Last 7 days', 'live.week.meetings': 'Meetings', 'live.week.actions': 'To-dos', 'live.week.mine': 'For you',
     'live.week.decisions': 'Decisions', 'live.earlier': 'Before that', 'live.none_earlier': 'No other meeting yet.',
     'live.last_items_none': 'No to-dos or decisions came out of this meeting.', 'live.more_items': 'and {n} more in the notes',
-    'live.me': 'Me', 'live.others': 'Others', 'live.screen': 'Screen',
+    'live.me': 'Me', 'live.others': 'Others', 'live.screen': 'Screen', 'live.speaker_n': 'Speaker {n}',
+    'voice.name_title': 'Who is {label}?', 'voice.name_label': 'Name',
+    'voice.name_body': 'Every line of this voice gets the name, in the transcript and the notes. Leave it empty to go back to a number.',
+    'voice.name_tip': 'Say who this voice is',
     'people.with': 'With', 'people.none': 'nobody named yet', 'people.probably': 'probably',
     'people.probable_help': 'You called them by name: a guess until Claude or you confirm it',
     'people.remove': 'Remove {name}', 'people.add': 'Add a name', 'people.add_ph': 'Name',
@@ -5788,6 +5895,8 @@ const STRINGS = {
     'audio.no_devices': 'No microphone found ({detail}).',
     'audio.system': 'Also listen to the meeting audio', 'audio.system_help': 'What the others say in Zoom, Teams, Meet… Without it, only your voice is noted.',
     'audio.system_ok': 'Meeting audio: {detail}', 'audio.system_missing': 'Meeting audio is not available: {detail}',
+    'audio.voices': 'Tell the people on the call apart',
+    'audio.voices_help': 'Each voice on the meeting audio becomes Speaker 1, Speaker 2… until you, or Claude at the end, give it a name. Done on this Mac (a 26 MB model, downloaded once); voices are forgotten when the meeting ends.',
     'audio.store': 'Keep a recording of the audio', 'audio.store_help': 'Saved with each meeting. Off by default: the transcript is usually enough.',
 
     'tools.lead': 'Where your to-dos and notes go. Turn on the ones you use, then click Test.',
@@ -6139,7 +6248,10 @@ const STRINGS = {
     'live.week': '7 derniers jours', 'live.week.meetings': 'Réunions', 'live.week.actions': 'Tâches', 'live.week.mine': 'Pour vous',
     'live.week.decisions': 'Décisions', 'live.earlier': 'Avant', 'live.none_earlier': 'Pas d’autre réunion pour l’instant.',
     'live.last_items_none': 'Aucune tâche ni décision n’est sortie de cette réunion.', 'live.more_items': 'et {n} autres dans les notes',
-    'live.me': 'Moi', 'live.others': 'Les autres', 'live.screen': 'Écran',
+    'live.me': 'Moi', 'live.others': 'Les autres', 'live.screen': 'Écran', 'live.speaker_n': 'Intervenant {n}',
+    'voice.name_title': 'Qui est {label} ?', 'voice.name_label': 'Nom',
+    'voice.name_body': 'Toutes les phrases de cette voix prennent ce nom, dans la transcription et les notes. Laissez vide pour revenir au numéro.',
+    'voice.name_tip': 'Dire qui est cette voix',
     'people.with': 'Avec', 'people.none': 'personne de nommé pour l’instant', 'people.probably': 'probablement',
     'people.probable_help': 'Vous l’avez appelé par son nom : une supposition, tant que Claude ou vous ne l’avez pas confirmée',
     'people.remove': 'Retirer {name}', 'people.add': 'Ajouter un nom', 'people.add_ph': 'Nom',
@@ -6342,6 +6454,8 @@ const STRINGS = {
     'audio.no_devices': 'Aucun micro trouvé ({detail}).',
     'audio.system': 'Écouter aussi le son de la réunion', 'audio.system_help': 'Ce que disent les autres dans Zoom, Teams, Meet… Sans cela, seule votre voix est notée.',
     'audio.system_ok': 'Son de la réunion : {detail}', 'audio.system_missing': 'Le son de la réunion n’est pas disponible : {detail}',
+    'audio.voices': 'Distinguer les personnes de l’appel',
+    'audio.voices_help': 'Chaque voix de l’audio de la réunion devient Intervenant 1, Intervenant 2… jusqu’à ce que vous, ou Claude à la fin, lui donniez un nom. Fait sur ce Mac (un modèle de 26 Mo, téléchargé une fois) ; les voix sont oubliées à la fin de la réunion.',
     'audio.store': 'Garder un enregistrement de l’audio', 'audio.store_help': 'Enregistré avec chaque réunion. Désactivé par défaut : la transcription suffit en général.',
 
     'tools.lead': 'Où vont vos tâches et vos notes. Activez ceux que vous utilisez, puis cliquez sur Tester.',

@@ -4,6 +4,7 @@ that fixes/merges the live items and writes the notes."""
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime
 
 from .. import known_people
@@ -11,7 +12,7 @@ from ..config import Config
 from ..models import FollowUpEmail, Item, ItemKind, ItemStatus, Meeting, fmt_ts
 from ..transcribe.echo import words
 from .llm import LLM, LLMError, text_block
-from .people import finalize, other_side, speaker_label
+from .people import finalize, name_voice, other_side, speaker_label, voice_labels
 from .prompts import SUMMARY_SYSTEM, meeting_context, render_items, render_screen, render_segment
 from .schema import WireSummary, wire_new_to_item, wire_update_to_update
 from .tracker import ExtractionResult, ItemTracker
@@ -24,8 +25,9 @@ MAX_SUMMARY_CHARS = 600_000  # ~150k tokens
 def full_transcript(meeting: Meeting, others_label: str = "Others") -> str:
     """The whole meeting as the summary reads it. With one other person in the meeting, the meeting
     audio's lines carry their name instead of ``others_label`` (the stored transcript keeps the label)."""
-    other = other_side(meeting, sure=True)
-    events = [(s.t_start, render_segment(i, s, speaker_label(s, other, others_label))) for i, s in enumerate(meeting.segments)]
+    other, voices = other_side(meeting, sure=True), voice_labels(meeting)
+    events = [(s.t_start, render_segment(i, s, speaker_label(s, other, others_label, voices)))
+              for i, s in enumerate(meeting.segments)]
     events += [(n.t, render_screen(n)) for n in meeting.screen_notes]
     events.sort(key=lambda e: e[0])
     text = "\n".join(t for _, t in events)
@@ -51,7 +53,7 @@ async def summarize(
             others = cfg.capture.system.label
             other = other_side(meeting, sure=True)
             named = (f"\nThe other side of the meeting ('{others}' lines) is {other}: their lines carry that name."
-                     if other else "")
+                     if other and voice_labels(meeting) is None else "")
             content = [
                 text_block(f"<transcript>\n{full_transcript(meeting, others)}\n</transcript>", cache=True),
                 text_block(
@@ -83,6 +85,11 @@ async def summarize(
                 known = [*cfg.brain.attendees, *known_people.known_before(cfg.data_path, meeting.id)]
                 finalize(meeting, wire.participants, cfg.user_name, known)
                 tracker.publish_people()
+            for sp in wire.speakers:
+                # "Speaker 2" → voice 2: a voice you named keeps your name (name_voice), one already named keeps it
+                number = re.fullmatch(r"\s*speaker\s+(\d+)\s*", sp.speaker, flags=re.IGNORECASE)
+                if number and sp.name.strip() and number.group(1) not in meeting.voices:
+                    name_voice(meeting, int(number.group(1)), sp.name, by_you=False)
             if wire.title.strip():
                 meeting.title = wire.title.strip()[:120]
             meeting.tldr = wire.tldr.strip() or None

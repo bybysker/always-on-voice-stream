@@ -26,6 +26,8 @@ def _private_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.
     monkeypatch.setenv("USERPROFILE", home)  # what Path.home() reads on Windows
     # nor a real Keychain (macOS CI has one): keys saved by the app go to the private home's .env
     monkeypatch.setenv("VOICESTREAM_SECRET_STORE", "file")
+    # nor the internet: the voice model a session fetches when it first hears meeting audio fails at once
+    monkeypatch.setattr("voicestream.voices.MODEL_URL", "http://127.0.0.1:9/voice-model.onnx")
     for name in KEYS:  # keys exported in the developer's shell
         monkeypatch.delenv(name, raising=False)
     yield

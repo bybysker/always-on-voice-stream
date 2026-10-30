@@ -33,13 +33,13 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
-from . import known_people
+from . import known_people, voices
 from .agents.runner import AgentRunner, Engine
 from .audio import AudioSource, CaptureSetupError, Clock, build_source
 from .audio.base import aclose_quietly
 from .brain.extractor import Extractor
 from .brain.llm import LLM, ClaudeLLM, LLMUnavailable
-from .brain.people import add_person, addressed, other_side, speaker_label
+from .brain.people import add_person, addressed, name_voice, other_side, speaker_label, voice_labels
 from .brain.summarizer import is_short_clip, known_language, rerender, summarize
 from .brain.tracker import ItemTracker
 from .config import Config
@@ -128,6 +128,8 @@ class MeetingSession:
             commands_trusted=lambda: not app.echo_unprotected,
         )
         self.known_names = [*cfg.brain.attendees, *known_people.names(cfg.data_path)]
+        self.voice_clusters = voices.VoiceClusters()
+        """This meeting's voices on the meeting audio: in memory only, gone with the meeting."""
         """Names known before this meeting: addressed in any vocative way, they count (:mod:`.brain.people`)."""
         self.not_names = [cfg.user_name, cfg.capture.mic.label, cfg.capture.system.label,
                           *(w for phrase in cfg.brain.wake_phrases for w in phrase.split())]
@@ -221,7 +223,29 @@ class MeetingSession:
         return changed
 
     def speaker(self, seg: TranscriptSegment) -> str:
-        return speaker_label(seg, other_side(self.meeting), self.app.cfg.capture.system.label)
+        return speaker_label(seg, other_side(self.meeting), self.app.cfg.capture.system.label, voice_labels(self.meeting))
+
+    def name_voice(self, voice: int, name: str) -> bool:
+        """You name a voice heard on the meeting audio ("Speaker 2" is Julie); an empty name takes it back.
+        The name joins the meeting's people, as one you added. An ended meeting's notes and transcript are
+        written again with it."""
+        if not any(s.voice == voice for s in self.meeting.segments):
+            raise KeyError(voice)
+        changed = name_voice(self.meeting, voice, name, by_you=True)
+        if name.strip():
+            cfg = self.app.cfg
+            changed |= known_people.edit_meeting(cfg.data_path, self.meeting, [name.strip()], [], cfg.user_name)
+            self.tracker.publish_people()
+        self.publish_voices()
+        if self.finished:
+            self.write_names()
+        else:
+            self.save_soon()
+        return changed
+
+    def publish_voices(self) -> None:
+        self.app.bus.publish("meeting.voices", meeting_id=self.meeting.id, voices=dict(self.meeting.voices),
+                             labels={str(k): v for k, v in (voice_labels(self.meeting) or {}).items()})
 
     def write_names(self) -> None:
         """An ended meeting's notes (their "with …") and transcript.md (the other side's name) as its
@@ -333,8 +357,10 @@ class MeetingSession:
             notes = rerender(self.meeting, cfg.user_name)  # the agents' files moved with the folder
         self._save_notes(notes)
         known_people.remember_meeting(cfg.data_path, self.meeting, cfg.user_name)
-        if other_side(self.meeting):
+        if other_side(self.meeting) or voice_labels(self.meeting):
             write_transcript_md(self.store.dir, self.meeting, self.speaker)
+        if self.meeting.voices:
+            self.publish_voices()  # names Claude found at the wrap-up
         try:
             # a short clip's to-dos go out like any others, its notes stay on this computer
             await self.app.unless_forced(self.dispatcher.finalize(None if short else notes))
@@ -512,6 +538,10 @@ class Assistant:
         self._paused = False
         self._paused_at = 0.0  # on self.wall
         self._mic_muted = False
+        self._voice_rings: dict[str, voices.AudioRing] = {}
+        """The last minute of each meeting-audio source, to tell its lines' voices apart (:mod:`.voices`)."""
+        self._embedder: Any = None
+        self._embedder_failed = False
         self._force = asyncio.Event()
         self.keep_open = False
         """After a replay/import, keep running (the dashboard) until :meth:`stop`."""
@@ -605,6 +635,10 @@ class Assistant:
             names = [s.name for s in self.sources]
             self.echo.system_active = "system" in names and "mic" in names
             self._system_live = any(s.name == "system" and s.live for s in self.sources)
+            if self.cfg.capture.system.voices and voices.available():
+                self._voice_rings = {s.name: voices.AudioRing() for s in self.sources if s.name != "mic"}
+                if self._voice_rings and not voices.is_installed(self.cfg):
+                    self.track(asyncio.ensure_future(self._fetch_voice_model()))
             for src in self.sources:
                 t = self._make_transcriber(src.name)
                 if src.live and hasattr(t, "on_backlog"):  # a file replayed at full speed queues up by design
@@ -636,6 +670,35 @@ class Assistant:
         finally:
             self._running = False
             self._done.set()
+
+    async def _fetch_voice_model(self) -> None:
+        try:
+            await voices.download(self.cfg)
+        except Exception as exc:  # noqa: BLE001 - offline: the meeting audio stays one voice, tried again next time
+            # info, not a warning: the app shows warnings as banners, and nothing is broken — only not told apart yet
+            log.info("voices: %s; the people on the meeting audio aren't told apart until it is downloaded", exc)
+
+    async def _voice_of(self, seg: TranscriptSegment, session: MeetingSession) -> TranscriptSegment:
+        """``seg`` with the voice that said it, when it came from the meeting audio and voices are told apart."""
+        ring = self._voice_rings.get(seg.source)
+        if ring is None or self._embedder_failed:
+            return seg
+        if self._embedder is None:
+            if not voices.is_installed(self.cfg):
+                return seg  # still downloading
+            self._embedder = await asyncio.to_thread(voices.make_embedder, self.cfg)
+            if self._embedder is None:
+                self._embedder_failed = True
+                return seg
+        clip = ring.clip(seg.t_start, seg.t_end)
+        emb = None
+        if clip.size and int(np.abs(clip).max()) > 64:  # muted, paused or lost audio is no voice
+            try:
+                emb = await asyncio.to_thread(self._embedder.embed, clip)
+            except Exception:
+                log.exception("voices: could not place a line")
+        number = session.voice_clusters.assign(emb, seg.t_start, seg.t_end)
+        return seg if number is None else seg.model_copy(update={"voice": number})
 
     async def _capture(self) -> None:
         """Listen until :meth:`stop` (or until every capture ends), then wind down: the last words, the
@@ -894,6 +957,8 @@ class Assistant:
                                "(Privacy & Security → Microphone) for Voicestream or the terminal running it")
                         log.warning(msg)
                         self.bus.publish("source.error", source=src.name, error=msg)
+                if (ring := self._voice_rings.get(src.name)) is not None:
+                    ring.add(frame.t_start, frame.samples)
                 if self.current is not None and self.cfg.capture.store_audio:
                     self.current.store.write_audio(frame)
                 if src.name == "system" and not self._system_sound and frame.samples.any():
@@ -989,7 +1054,11 @@ class Assistant:
             return
         session = await self._ensure_meeting(seg.t_start)
         session.heard()
+        seg = await self._voice_of(seg, session)
+        named = voice_labels(session.meeting)
         session.add_segment(seg)
+        if voice_labels(session.meeting) != named:
+            session.publish_voices()  # a new voice: the window's labels for the earlier lines change too
 
     async def _ensure_meeting(self, t_first: float, started_at: datetime | None = None) -> MeetingSession:
         async with self._meeting_lock:

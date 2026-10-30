@@ -1057,6 +1057,13 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
 .ask { width: min(440px, calc(100vw - 32px)); padding: 24px; }
 .ask h2 { margin-bottom: 8px; }
 .ask p { color: var(--muted); white-space: pre-line; }
+.ask-field { margin-top: 14px; }
+.ask-field input { width: 100%; }
+/* a voice told apart on the meeting audio: click its name to say who it is */
+.spk.voice { border: 0; background: none; padding: 0 2px; margin-left: -2px; font: inherit; color: inherit; cursor: pointer;
+  border-radius: 4px; text-decoration: underline dotted; text-underline-offset: 3px; }
+.spk.voice:hover:not(:disabled) { background: var(--raised); }
+.spk.voice:disabled { cursor: default; text-decoration: none; }
 .ask-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
 .viewer { width: min(900px, calc(100vw - 32px)); max-height: calc(100vh - 48px); }
 .viewer-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--border); }

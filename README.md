@@ -228,8 +228,8 @@ The next time someone speaks, a new meeting starts. Pass `--once` for a single m
 
 ## What happens during a meeting
 
-1. **Capture.** Your mic is captured as `Me` and the computer's audio as `Others`. Speaker
-   attribution comes from the audio channel, so no diarization is needed.
+1. **Capture.** Your mic is captured as `Me` and the computer's audio as `Others`, so you are
+   always told apart from the rest by the audio channel.
 2. **Voice activity detection.** An adaptive noise-floor VAD cuts the stream into utterances.
    **Only speech is uploaded**; silence never leaves your machine and is never billed.
 3. **Speech-to-text.** Each utterance is transcribed by OpenAI `gpt-transcribe` (default), the
@@ -237,14 +237,26 @@ The next time someone speaks, a new meeting starts. Pass `--once` for a single m
 4. **Echo filter.** Without headphones, your mic also hears your speakers. Mic lines that just
    repeat what system audio said at the same moment are dropped, so other people's words aren't
    attributed to you.
-5. **Live extraction.** About every 90 seconds of conversation, Claude Haiku 5.5 reads the new
+5. **Who said what on the call.** Everyone else arrives mixed on the computer's audio. A small
+   speaker-recognition model (WeSpeaker ResNet34, 26 MB, downloaded once, run on your computer with
+   ONNX Runtime) turns each of their lines into a voice fingerprint, and lines with matching voices
+   become `Speaker 1`, `Speaker 2`… Click a speaker in the transcript to say who it is: every line of
+   that voice takes the name, in the transcript, the notes and what Claude reads. At the end, Claude
+   names the voices the conversation makes clear (someone answering right after you said "Julie, tu
+   peux…?"), never one you named. With a single voice on the call nothing changes: its lines carry
+   the other person's name, as before. Tested on real recordings of seven people cut into short
+   lines: every line on the right voice at normal call quality, 97 % at telephone quality. One person
+   now and then splits into two voices (give both the same name);
+   people talking over each other go to whoever is loudest. Turn it off with
+   `capture.system.voices = false` (Settings → Audio).
+6. **Live extraction.** About every 90 seconds of conversation, Claude Haiku 5.5 reads the new
    lines and returns only what changed: new or updated **action items** (owner, due date resolved
    to a real date, priority, verbatim evidence), **decisions**, **open questions** and **notes**.
    - Trigger phrases ("can you…", "by Friday", "action item") make it check sooner.
    - Saying "**Hey Claude, …**" into your own mic makes it react within seconds.
    - The transcript is sent as append-only blocks with prompt caching, so each call re-reads the
      earlier meeting at about a tenth of the price.
-6. **Wrap-up.** When the meeting ends, Claude Sonnet 5.5 reads the whole transcript once. It
+7. **Wrap-up.** When the meeting ends, Claude Sonnet 5.5 reads the whole transcript once. It
    merges duplicates, fixes owners and deadlines, catches anything missed, and writes the notes.
    Items and notes are then pushed to your sinks.
 
@@ -677,6 +689,11 @@ per day in `~/.voicestream/spend/`.
 - Transcripts, notes and items live in `~/.voicestream/` on your machine. voicestream keeps that
   folder readable by your account only, and `voicestream doctor` warns if it isn't.
 - Use `transcription.backend = "local"` to keep audio fully offline.
+- Telling voices apart runs on your computer. The voice fingerprints exist only in memory while the
+  meeting lasts and are never written to disk, so nobody's voice is recognised from one meeting to
+  the next: a meeting keeps only which line was which voice and the names given to them. (A stored
+  voiceprint that identifies someone is biometric data under the GDPR and would need their explicit
+  consent.)
 
 ## Configuration reference
 
