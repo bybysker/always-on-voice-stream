@@ -144,15 +144,18 @@ class UIApp:
     def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch, *, setup_done: bool, listen_on_launch: bool = False,
                  user: str = "Camille", meetings: bool = False, provider: str = "heuristic", backend: str = "fake",
                  config_extra: str = "", fresh: bool = False, models: tuple[str, ...] = (), broken_mic: int = 0,
-                 keys: dict[str, str] | None = None, meeting_start: str = "automatic") -> None:
+                 keys: dict[str, str] | None = None, meeting_start: str = "automatic",
+                 sinks: tuple[str, ...] = ()) -> None:
         """``fresh``: no settings file at all (a new install); ``models``: speech models already
         downloaded; ``broken_mic``: that many assistants get a microphone that gives up at once
         (meeting audio keeps going); ``keys``: keys already saved; ``meeting_start``: how meetings
-        start (most of these screens were drawn for always-on listening, so ``automatic``)."""
+        start (most of these screens were drawn for always-on listening, so ``automatic``); ``sinks``:
+        tools the meetings send to besides the files on this Mac, as set in ``config_extra``."""
         from test_session import FakeEngine, IdleSource
 
         from voicestream.models import TranscriptSegment
         from voicestream.session import Assistant
+        from voicestream.sinks.base import build_sink
         from voicestream.sinks.markdown import MarkdownConfig, MarkdownSink
         from voicestream.transcribe.base import FakeTranscriber
 
@@ -208,7 +211,8 @@ class UIApp:
                 sources=sources(),
                 transcriber_factory=lambda s: FakeTranscriber([], vad=host.cfg.vad, on_usage=host.costs.add_stt),
                 llm=None,
-                sinks=[MarkdownSink(MarkdownConfig(), host.cfg)],
+                sinks=[MarkdownSink(MarkdownConfig(), host.cfg),
+                       *(sink for n in sinks if (sink := build_sink(n, host.cfg.sinks.get(n), host.cfg)) is not None)],
                 agent_engine=FakeEngine(),
                 bus=host.bus,
                 costs=host.costs,
@@ -3179,3 +3183,107 @@ def test_the_updates_section_in_settings(make_app: Callable[..., UIApp], open_pa
         expect(pg.locator("#p-check_updates")).not_to_be_checked()
     finally:
         feed.close()
+
+
+def test_the_todo_list_is_validated_when_the_meeting_ends(make_app: Callable[..., UIApp], open_page: Callable[..., Page],
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tool that asks first (Promethee, by default): when the meeting ends nothing has gone there; a
+    banner on every screen says the to-dos wait for your OK and opens the meeting's list, where you untick
+    what shouldn't go and send the rest. Then the banner goes, and the list with it."""
+    from playwright.sync_api import expect
+
+    from voicestream.sinks.promethee import PrometheeSink
+
+    sent: list[str] = []
+
+    async def push_item(self: PrometheeSink, item: Any, meeting: Any) -> str:
+        sent.append(item.title)
+        return f"https://app.promethee.io/tasks/{len(sent)}"
+
+    monkeypatch.setattr(PrometheeSink, "push_item", push_item)
+    app = make_app(setup_done=True, meeting_start="manual", config_extra="\n[sinks.promethee]\nenabled = true\n",
+                   sinks=("promethee",))
+    p = open_page(app)
+    pg = p.page
+    pg.click("#live-start")
+    _wait_state(app, "listening")
+    app.say("Je vais envoyer le budget à Sam d'ici vendredi.")
+    app.say("Sam, tu prépares la démo pour Maison Berthe d'ici mardi.")
+    expect(pg.locator("#lines .seg")).to_have_count(2)
+    pg.click("#live-stop")
+
+    banner = pg.locator("#notices .notice", has_text="1 to-do waits for your OK.")
+    expect(banner).to_be_visible(timeout=15000)
+    expect(banner).to_contain_text("“Untitled meeting” is over: choose what goes to Promethee.")
+    expect(pg.locator(".toast", has_text="The notes are ready")).to_contain_text("Review the to-do list")
+    assert sent == []  # nothing goes before you say so
+    pg.click("nav a[href='#/costs']")
+    expect(banner).to_be_visible()  # on every screen
+    p.shot("review-banner")
+
+    pg.click("#review-open")
+    card = pg.locator(".card.review")
+    expect(card.locator("h2")).to_have_text("Send the to-do list to Promethee?")
+    rows = card.locator(".review-row")
+    expect(rows).to_have_count(1)
+    expect(rows.first).to_contain_text("Envoyer le budget à Sam")
+    send = pg.locator("#review-send")
+    expect(send).to_have_text("Send 1 to-do to Promethee")
+    rows.first.locator("input").uncheck()
+    expect(send).to_have_text("Nothing ticked")
+    expect(send).to_be_disabled()
+    rows.first.locator("input").check()
+    p.shot("review-card")
+    send.click()
+    expect(pg.locator(".toast", has_text="1 to-do sent to Promethee.")).to_be_visible()
+    expect(card).to_be_hidden()
+    expect(banner).to_be_hidden()
+    assert sent == ["Envoyer le budget à Sam"]
+
+
+def test_connecting_to_promethee_in_the_browser(make_app: Callable[..., UIApp], open_page: Callable[..., Page],
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """No key to copy: Connect opens Promethee's sign-in in the browser, the card waits with the link
+    again, and when the browser comes back the card says it is connected; Disconnect undoes it."""
+    import urllib.request
+
+    from playwright.sync_api import expect
+
+    from voicestream.app import desktop
+    from voicestream.sinks.oauth import SignIn
+
+    opened: list[str] = []
+    monkeypatch.setattr(desktop, "open_in_browser", opened.append)
+
+    async def start(self: SignIn, redirect_uri: str) -> str:
+        self.back = redirect_uri  # type: ignore[attr-defined]
+        return "https://auth.promethee.io/authorize?state=s1"
+
+    async def finish(self: SignIn, state: str, code: str | None, error: str | None = None) -> None:
+        self.store.save({"access_token": "at", "meta": {"issuer": "https://auth.promethee.io"}})
+
+    monkeypatch.setattr(SignIn, "start", start)
+    monkeypatch.setattr(SignIn, "finish", finish)
+    app = make_app(setup_done=True, config_extra="\n[sinks.promethee]\nenabled = true\n")
+    p = open_page(app)
+    pg = p.page
+    pg.goto(app.url.split("#")[0] + "#/settings/tools")
+    status = pg.locator("#connect-status-promethee")
+    expect(status).to_have_text("Not connected to Promethee yet.")
+    expect(pg.locator("#connect-promethee")).to_have_text("Connect to Promethee")
+    pg.click("#connect-promethee")
+    expect(status).to_have_text("Finish signing in to Promethee in your browser…")
+    expect(pg.locator("#connect-link-promethee")).to_have_attribute("href", "https://auth.promethee.io/authorize?state=s1")
+    assert opened == ["https://auth.promethee.io/authorize?state=s1"]
+    p.shot("promethee-connecting")
+
+    # the browser comes back (no token: the way back is public)
+    origin = app.url.split("/app")[0]
+    with urllib.request.urlopen(f"{origin}/oauth/promethee/callback?state=s1&code=c") as r:
+        assert "Voicestream is connected to Promethee" in r.read().decode()
+    expect(status).to_have_text("Connected to Promethee (https://auth.promethee.io).")
+    expect(pg.locator(".toast", has_text="Voicestream is connected to Promethee.")).to_be_visible()
+    expect(pg.locator("#connect-promethee")).to_have_text("Sign in again")
+    p.shot("promethee-connected")
+    pg.click("#disconnect-promethee")
+    expect(status).to_have_text("Not connected to Promethee yet.")

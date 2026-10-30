@@ -455,7 +455,7 @@ const EVENT_TYPES = [
   'meeting.started', 'meeting.updated', 'meeting.ending', 'meeting.ended', 'meeting.notes_updated', 'meeting.saved',
   'meeting.people',
   'segment', 'transcript.partial', 'level', 'extraction', 'item.added', 'item.updated', 'agent.updated', 'item.pushed',
-  'sink.error', 'notes.pushed', 'cost', 'screen', 'source.error', 'source.stopped', 'agent.budget', 'agent.held',
+  'sink.error', 'notes.pushed', 'oauth.changed', 'cost', 'screen', 'source.error', 'source.stopped', 'agent.budget', 'agent.held',
   'model.download', 'settings.changed', 'app.focus',
 ];
 
@@ -536,6 +536,8 @@ function handle(type, ev) {
       return onAssistantStarted(d);
     case 'assistant.stopped':
       return onAssistantStopped(d);
+    case 'oauth.changed':
+      return onOauthChanged(d);
     case 'sink.error':
       if (S.pushingFolder) return;  // the push's own result lists these
       return toast(humanize(d.error || ''), 'error', t('toast.push_failed', { tool: sinkLabel(d.sink) }));
@@ -874,6 +876,7 @@ function renderNotices() {
   }
   const upd = a && a.setup_done && !S.setup && a.update ? updateBanner(a.update) : null;
   if (upd) out.push(upd);
+  if (S.review && a && a.setup_done && !S.setup) out.push(['review|' + S.review.folder + '|' + S.review.n, () => reviewBanner(S.review)]);
   if (a && a.restart_pending) {
     out.push(['restart', () => notice('info', 'info', t('notice.restart_pending'),
       btn(t('notice.apply_now'), { cls: 'small', id: 'apply-now', onclick: (e) => applyNow(e.currentTarget) }))]);
@@ -957,6 +960,16 @@ function appNoticeBanner(n) {
     onclick: () => { answer('notice/dismiss', null); } }, t('live.open_notes'));
   return notice('info', 'checkCircle', h('span', {}, h('strong', {}, t('notice.silence_title')), ' ', text),
     h('div', { class: 'notice-actions' }, open, ok));
+}
+
+/** A meeting ended with to-dos for a tool that waits for your go-ahead (Promethee): its list is on the
+ *  meeting's page. Stays until you decide there, or put it off with Later (the page still has the list). */
+function reviewBanner(r) {
+  return notice('info', 'checkCircle', h('span', {}, h('strong', {}, tp('review.notice_title', r.n)), ' ',
+    t('review.notice_text', { title: r.title || t('meetings.untitled'), tools: r.tools })),
+  h('div', { class: 'notice-actions' },
+    btn(t('review.later'), { cls: 'small ghost', id: 'review-later', onclick: () => { S.review = null; renderNotices(); } }),
+    h('a', { class: 'btn small', id: 'review-open', href: '#/meetings/' + enc(r.folder) + '/actions' }, t('review.open'))));
 }
 
 // ------------------------------------------------------------------------ updates
@@ -2251,8 +2264,13 @@ function liveEvent(type, d, ev) {
       }
       const folder = basename(d.dir) || L.meeting.folder;
       L.lastEnded = { id: d.meeting_id, title: d.title || L.meeting.title, folder, items: d.items || 0 };
+      if (d.review && folder) {  // its to-do list waits for your go-ahead: a banner on every screen until you decide
+        S.review = { folder, title: d.title || L.meeting.title, n: d.review, tools: reviewTools() };
+        renderNotices();
+      }
       toast(tp('toast.meeting_ended', d.items || 0), 'ok', d.title || L.meeting.title || t('meetings.untitled'),
-        folder ? { label: t('live.open_notes'), run: () => go('#/meetings/' + enc(folder)) } : null);
+        !folder ? null : d.review ? { label: t('review.open'), run: () => go('#/meetings/' + enc(folder) + '/actions') }
+          : { label: t('live.open_notes'), run: () => go('#/meetings/' + enc(folder)) });
       S.lastMeetingLoaded = false;
       refreshLast();
       refreshMeetingsSoon();
@@ -2967,9 +2985,74 @@ function drawDetail() {
         : el))),
       D.people.el,
       m.tldr && h('p', { class: 'tldr' }, m.tldr), actions),
+    reviewCard(D, readOnly),
     ...notes.map((n) => h('div', { class: 'readonly-note' }, n)),
     (m.segments || []).length ? voices.el : null,
     h('div', { class: 'detail-grid' }, h('div', { class: 'tabwrap' }, tabs, panel), detailFacts(m, duration)));
+}
+
+/** The tools that wait for your go-ahead (``review = true``), by name: "Promethee". */
+function reviewTools(names) {
+  const sinks = names || Object.entries((S.settings && S.settings.sinks) || {})
+    .filter(([, sk]) => sk.enabled && sk.values && sk.values.review).map(([n]) => n);
+  return (sinks.length ? sinks : ['promethee']).map(sinkLabel).join(', ');
+}
+
+/** The end-of-meeting check of the to-do list, for the tools that wait for it: every to-do is ticked,
+ *  untick the ones that shouldn't go, then Send — or Don't send any. A decision is kept: a to-do you
+ *  left out never goes there by itself (its own Send button still sends it). */
+function reviewCard(D, readOnly) {
+  const r = D.data.review;
+  const items = r && !readOnly ? (r.pending || []).map((id) => D.data.meeting.items[id]).filter(Boolean) : [];
+  const unsent = r && !readOnly ? (r.unsent || []).filter((id) => D.data.meeting.items[id]) : [];
+  if (!items.length && unsent.length) {  // you said yes, but they didn't get there (no key, offline…)
+    return notice('warn', 'alert', tp('review.unsent', unsent.length, { tools: reviewTools(r.sinks) }),
+      btn(t('action.try_again'), { cls: 'small', id: 'review-retry', onclick: (e) => retryReview(D, e.currentTarget, r.sinks) }, 'refresh'));
+  }
+  if (!items.length) return null;
+  const key = items.map((i) => i.id).join(',');
+  if (!D.reviewPick || D.reviewPick.key !== key) D.reviewPick = { key, ids: new Set(items.map((i) => i.id)) };
+  const pick = D.reviewPick.ids;
+  const tools = reviewTools(r.sinks);
+  const send = btn('', { cls: 'small', id: 'review-send', onclick: (e) => submitReview(D, e.currentTarget, items, [...pick]) }, 'send');
+  const label = () => {
+    send.lastChild.textContent = pick.size ? tp('review.send', pick.size, { tools }) : t('review.send_none');
+    send.disabled = !pick.size;
+  };
+  send.append(h('span', {}));
+  const rows = items.map((i) => {
+    const box = h('input', { type: 'checkbox', id: 'review-' + i.id, checked: pick.has(i.id) });
+    box.addEventListener('change', () => { if (box.checked) pick.add(i.id); else pick.delete(i.id); label(); });
+    return h('li', { class: 'review-row' }, h('label', { for: 'review-' + i.id },
+      box, h('span', { class: 'title' }, i.title),
+      h('span', { class: 'kept-meta' }, i.owner && person(i.owner, isMine(i.owner)), fmtDue(i) && h('span', { class: 'due' }, fmtDue(i)))));
+  });
+  label();
+  return h('section', { class: 'card review', 'aria-labelledby': 'review-h' },
+    h('h2', { id: 'review-h' }, t('review.title', { tools })),
+    h('p', { class: 'muted small' }, t('review.lead', { tools })),
+    h('ul', { class: 'review-list' }, rows),
+    h('div', { class: 'row' },
+      btn(t('review.none'), { cls: 'small ghost', id: 'review-none', onclick: (e) => submitReview(D, e.currentTarget, items, []) }),
+      send));
+}
+
+async function submitReview(D, button, items, approve) {
+  const reject = items.map((i) => i.id).filter((id) => !approve.includes(id));
+  const res = await act(button, () => api('POST', `/api/meetings/${enc(D.folder)}/review`, { approve, reject }));
+  if (!res) return;
+  if (S.review && S.review.folder === D.folder) { S.review = null; renderNotices(); }
+  const tools = reviewTools(D.data.review && D.data.review.sinks);
+  // a failure has its own toast already (sink.error), and the page then offers to try again
+  if (!approve.length) toast(t('review.kept', { tools }), 'ok');
+  else if (!(res.errors && res.errors.length)) toast(tp('review.sent', Object.keys(res.sent || {}).length, { tools }), 'ok', t('toast.pushed'));
+  loadDetail();
+}
+
+async function retryReview(D, button, sinks) {
+  const res = await act(button, () => api('POST', `/api/meetings/${enc(D.folder)}/push`, { sinks, notes: false }));
+  if (res && !(res.errors && res.errors.length)) toast(t('toast.pushed_meeting', { tools: reviewTools(sinks) }), 'ok', t('toast.pushed'));
+  loadDetail();
 }
 
 /** A meeting's language by name: "French", or its code when Voicestream has no name for it. */
@@ -3389,7 +3472,7 @@ const SECTION_PREFIXES = {
   agents: ['agents', 'budget.agents_daily_usd'],
   advanced: ['data_dir', 'dashboard', 'pricing', 'vad', 'echo', 'screen', 'dispatch', 'budget'],
 };
-const MAIN_TOOLS = ['reminders', 'markdown', 'google', 'hubspot', 'shortcuts', 'command'];
+const MAIN_TOOLS = ['reminders', 'markdown', 'google', 'hubspot', 'promethee', 'shortcuts', 'command'];
 
 function sectionFor(path) {
   let best = 'advanced', len = -1;
@@ -4402,6 +4485,12 @@ function toolFields(name, cat) {
         field(p('owner_email'), t('tools.hubspot.owner'), textInput(p('owner_email'), { type: 'email', placeholder: 'you@company.com' }), { help: t('tools.hubspot.owner_help') }),
         settingSwitch(p('log_meeting'), t('tools.hubspot.log'), t('tools.hubspot.log_help')),
       ];
+    case 'promethee':
+      return [
+        connectField('promethee'),
+        settingSwitch(p('review'), t('tools.promethee.review'), t('tools.promethee.review_help')),
+        settingSwitch(p('owners'), t('tools.only_mine'), t('tools.only_mine_help'), { on: 'mine', off: 'all' }),
+      ];
     case 'shortcuts':
       return [
         h('p', { class: 'help small muted' }, t('tools.shortcuts.lead')),
@@ -4422,6 +4511,51 @@ function toolFields(name, cat) {
           btn(t('adv.open_config'), { cls: 'link', onclick: () => reveal('config') })),
       ];
   }
+}
+
+/** Connect to a service by signing in to it in your browser (its MCP server's own sign-in): no key to
+ *  copy. While it is open in the browser the card says so, with the link again in case the browser
+ *  didn't come up. A token the service gave you instead still goes in the field under it. */
+function connectField(service) {
+  const st = (S.oauth = S.oauth || {})[service];
+  if (!st) {
+    api('GET', '/api/oauth/' + service).then((r) => { S.oauth[service] = r; if (currentSection() === 'tools') redrawSection(); })
+      .catch((err) => { S.oauth[service] = { connected: false, error: err.message }; if (currentSection() === 'tools') redrawSection(); });
+  }
+  const name = sinkLabel(service);
+  const connect = btn(st && st.connected ? t('connect.again') : t('connect.button', { name }), {
+    cls: st && st.connected ? 'small' : 'small primary', id: 'connect-' + service,
+    onclick: (e) => act(e.currentTarget, async () => {
+      const res = await api('POST', `/api/oauth/${service}/start`);
+      S.oauth[service] = { ...(S.oauth[service] || {}), waiting: res.url, opened: res.opened, error: null };
+      redrawSection();
+    }),
+  }, 'external');
+  const off = st && st.connected && btn(t('connect.disconnect'), { cls: 'small ghost', id: 'disconnect-' + service,
+    onclick: (e) => act(e.currentTarget, async () => {
+      S.oauth[service] = await api('DELETE', '/api/oauth/' + service);
+      redrawSection();
+    }) });
+  const status = !st ? t('common.loading')
+    : st.connected ? t('connect.connected', { name, server: st.server || name })
+    : st.waiting ? t('connect.waiting', { name })
+    : t('connect.not_connected', { name });
+  const again = st && st.waiting && !st.connected
+    && h('a', { href: safeUrl(st.waiting), target: '_blank', rel: 'noopener noreferrer', id: 'connect-link-' + service },
+      st.opened ? t('connect.open_again') : t('connect.open'));
+  return h('div', { class: 'connect', dataset: { path: 'oauth:' + service } },
+    h('p', { class: 'row' }, icon(st && st.connected ? 'checkCircle' : 'key'), h('span', { class: 'grow', id: 'connect-status-' + service }, status)),
+    h('p', { class: 'help small muted' }, t('connect.help', { name })),
+    st && st.error && h('p', { class: 'error-text' }, humanize(st.error)),
+    h('div', { class: 'row' }, connect, off, again),
+    h('details', { class: 'small' }, h('summary', {}, t('connect.token_instead')),
+      keyField('PROMETHEE_TOKEN', { label: t('tools.promethee.token'), help: t('tools.promethee.token_help') })));
+}
+
+function onOauthChanged(d) {
+  (S.oauth = S.oauth || {})[d.service] = undefined;  // loaded again
+  if (d.connected) toast(t('connect.done', { name: sinkLabel(d.service) }), 'ok');
+  if (S.route.name === 'settings' && currentSection() === 'tools') redrawSection();
 }
 
 function googleSteps() {
@@ -5665,6 +5799,20 @@ const STRINGS = {
     'tools.google.docs': 'Notes in Google Docs', 'tools.google.docs_help': 'One document per meeting.',
     'tools.google.recap': 'Email me a recap', 'tools.google.recap_help': 'Sent to you only.',
     'tools.google.draft': 'Follow-up email as a Gmail draft', 'tools.google.draft_help': 'Never sent by itself.',
+    'tools.promethee.token': 'Promethee token', 'tools.promethee.token_help': 'Only if Promethee gave you one for its MCP server: it is used instead of the sign-in.',
+    'connect.button': 'Connect to {name}', 'connect.again': 'Sign in again', 'connect.disconnect': 'Disconnect',
+    'connect.connected': 'Connected to {name} ({server}).', 'connect.not_connected': 'Not connected to {name} yet.',
+    'connect.waiting': 'Finish signing in to {name} in your browser…', 'connect.open': 'Open the sign-in page', 'connect.open_again': 'The browser didn’t open? Open the sign-in page',
+    'connect.help': 'You sign in to {name} in your browser: no key to copy. Voicestream keeps the sign-in on this computer and renews it by itself.',
+    'connect.token_instead': 'I have a token instead', 'connect.done': 'Voicestream is connected to {name}.',
+    'tools.promethee.review': 'Let me validate the to-do list at the end of each meeting', 'tools.promethee.review_help': 'Nothing goes to Promethee until you choose which to-dos to send. Off: they go when the meeting ends, like your other tools.',
+    'review.title': 'Send the to-do list to {tools}?', 'review.lead': 'Untick what shouldn’t go to {tools}. The others are created there now.',
+    'review.send.one': 'Send {n} to-do to {tools}', 'review.send.other': 'Send {n} to-dos to {tools}', 'review.send_none': 'Nothing ticked',
+    'review.none': 'Don’t send any', 'review.sent.one': '{n} to-do sent to {tools}.', 'review.sent.other': '{n} to-dos sent to {tools}.',
+    'review.unsent.one': '{n} to-do you approved hasn’t reached {tools} yet.', 'review.unsent.other': '{n} to-dos you approved haven’t reached {tools} yet.',
+    'review.kept': 'Nothing was sent to {tools}.', 'review.open': 'Review the to-do list', 'review.later': 'Later',
+    'review.notice_title.one': '{n} to-do waits for your OK.', 'review.notice_title.other': '{n} to-dos wait for your OK.',
+    'review.notice_text': '“{title}” is over: choose what goes to {tools}.',
     'tools.hubspot.token': 'HubSpot access token', 'tools.hubspot.token_help': 'From a HubSpot private app (Settings → Integrations → Private apps).',
     'tools.hubspot.owner': 'Your HubSpot email', 'tools.hubspot.owner_help': 'Your to-dos become HubSpot tasks assigned to you.',
     'tools.hubspot.log': 'Log meetings on contacts', 'tools.hubspot.log_help': 'The notes go on the matching contacts.',
@@ -5679,6 +5827,7 @@ const STRINGS = {
     'tool.reminders.name': 'Apple Reminders', 'tool.reminders.desc': 'Your to-dos in the Reminders app, on all your devices.',
     'tool.google.name': 'Google', 'tool.google.desc': 'Calendar reminders, notes in Docs, a Gmail draft of the follow-up.',
     'tool.hubspot.name': 'HubSpot', 'tool.hubspot.desc': 'Tasks and meeting notes in your CRM.',
+    'tool.promethee.name': 'Promethee', 'tool.promethee.desc': 'Your to-do list in Promethee, through its MCP server, once you validate it.',
     'tool.shortcuts.name': 'Shortcuts (Promethee…)', 'tool.shortcuts.desc': 'Send each to-do to a shortcut.',
     'tool.command.name': 'Command or app link', 'tool.command.desc': 'For apps with a command line or a link.',
     'tool.webhook.name': 'Webhook', 'tool.webhook.desc': 'Zapier, Make, n8n…', 'tool.notion.name': 'Notion', 'tool.notion.desc': '',
@@ -6201,6 +6350,20 @@ const STRINGS = {
     'tools.google.docs': 'Notes dans Google Docs', 'tools.google.docs_help': 'Un document par réunion.',
     'tools.google.recap': 'M’envoyer un récapitulatif', 'tools.google.recap_help': 'Envoyé à vous seul.',
     'tools.google.draft': 'E-mail de suivi en brouillon Gmail', 'tools.google.draft_help': 'Jamais envoyé tout seul.',
+    'tools.promethee.token': 'Jeton Promethee', 'tools.promethee.token_help': 'Seulement si Promethee vous en a donné un pour son serveur MCP : il remplace la connexion.',
+    'connect.button': 'Se connecter à {name}', 'connect.again': 'Se reconnecter', 'connect.disconnect': 'Déconnecter',
+    'connect.connected': 'Connecté à {name} ({server}).', 'connect.not_connected': 'Pas encore connecté à {name}.',
+    'connect.waiting': 'Terminez la connexion à {name} dans votre navigateur…', 'connect.open': 'Ouvrir la page de connexion', 'connect.open_again': 'Le navigateur ne s’est pas ouvert ? Ouvrir la page de connexion',
+    'connect.help': 'Vous vous connectez à {name} dans votre navigateur : aucune clé à copier. Voicestream garde la connexion sur cet ordinateur et la renouvelle tout seul.',
+    'connect.token_instead': 'J’ai plutôt un jeton', 'connect.done': 'Voicestream est connecté à {name}.',
+    'tools.promethee.review': 'Me laisser valider la liste de tâches à la fin de chaque réunion', 'tools.promethee.review_help': 'Rien ne part vers Promethee tant que vous n’avez pas choisi les tâches à envoyer. Désactivé : elles partent à la fin de la réunion, comme vers vos autres outils.',
+    'review.title': 'Envoyer la liste de tâches vers {tools} ?', 'review.lead': 'Décochez ce qui ne doit pas aller dans {tools}. Le reste y est créé maintenant.',
+    'review.send.one': 'Envoyer {n} tâche vers {tools}', 'review.send.other': 'Envoyer {n} tâches vers {tools}', 'review.send_none': 'Rien de coché',
+    'review.none': 'N’en envoyer aucune', 'review.sent.one': '{n} tâche envoyée vers {tools}.', 'review.sent.other': '{n} tâches envoyées vers {tools}.',
+    'review.unsent.one': '{n} tâche validée n’est pas encore arrivée dans {tools}.', 'review.unsent.other': '{n} tâches validées ne sont pas encore arrivées dans {tools}.',
+    'review.kept': 'Rien n’a été envoyé vers {tools}.', 'review.open': 'Valider la liste de tâches', 'review.later': 'Plus tard',
+    'review.notice_title.one': '{n} tâche attend votre accord.', 'review.notice_title.other': '{n} tâches attendent votre accord.',
+    'review.notice_text': '« {title} » est terminée : choisissez ce qui part vers {tools}.',
     'tools.hubspot.token': 'Jeton d’accès HubSpot', 'tools.hubspot.token_help': 'Depuis une application privée HubSpot (Paramètres → Intégrations → Applications privées).',
     'tools.hubspot.owner': 'Votre e-mail HubSpot', 'tools.hubspot.owner_help': 'Vos tâches deviennent des tâches HubSpot qui vous sont attribuées.',
     'tools.hubspot.log': 'Consigner les réunions sur les contacts', 'tools.hubspot.log_help': 'Les notes vont sur les contacts concernés.',
@@ -6215,6 +6378,7 @@ const STRINGS = {
     'tool.reminders.name': 'Rappels Apple', 'tool.reminders.desc': 'Vos tâches dans l’app Rappels, sur tous vos appareils.',
     'tool.google.name': 'Google', 'tool.google.desc': 'Rappels dans Agenda, notes dans Docs, brouillon Gmail de l’e-mail de suivi.',
     'tool.hubspot.name': 'HubSpot', 'tool.hubspot.desc': 'Tâches et notes de réunion dans votre CRM.',
+    'tool.promethee.name': 'Promethee', 'tool.promethee.desc': 'Votre liste de tâches dans Promethee, via son serveur MCP, une fois validée.',
     'tool.shortcuts.name': 'Raccourcis (Promethee…)', 'tool.shortcuts.desc': 'Envoyer chaque tâche à un raccourci.',
     'tool.command.name': 'Commande ou lien d’app', 'tool.command.desc': 'Pour les apps qui ont une ligne de commande ou un lien.',
     'tool.webhook.name': 'Webhook', 'tool.webhook.desc': 'Zapier, Make, n8n…',

@@ -9,6 +9,7 @@ take a name from a fixed list (:mod:`voicestream.app.desktop`).
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import secrets
@@ -30,8 +31,10 @@ from ..app.checks import run_checks
 from ..app.host import START_WAIT_S, HostError
 from ..app.meetings import MeetingBusy, MeetingNotFound, resolve_folder
 from ..app.prefs import FloatingPosition, Hotkey, MeetingStart, Minutes, layout_context
-from ..app.settings import SettingsError, save_checked, settings_view
+from ..app.settings import SINK_LABELS, SettingsError, save_checked, settings_view
 from ..costs import estimate_daily
+from ..sinks.base import SinkError
+from ..sinks.oauth import SignIn, TokenStore
 from .server import AgentApproval, ItemEdit, NewItem, _Body, _error, _parse  # noqa: F401 - shared bodies
 
 if TYPE_CHECKING:
@@ -80,6 +83,20 @@ class PushRequest(_Body):
     notes: bool = True
     force: bool = False
     """Also push a meeting another voicestream still has open (e.g. left over from a crash)."""
+
+
+OAUTH_SERVICES = {"promethee": "https://mcp.promethee.io/mcp"}
+"""The services the app signs in to in the browser, and their MCP server unless the settings name another."""
+_SIGNIN_PAGE = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>{title}</title><body style="font:16px -apple-system,system-ui,sans-serif;max-width:32rem;margin:15vh auto;padding:0 16px">
+<h1 style="font-size:1.4rem">{title}</h1><p>{text}</p></body>"""
+
+
+class ReviewRequest(_Body):
+    approve: list[str] = Field(default_factory=list, max_length=1000)
+    """The to-dos to send to the tools that wait for your go-ahead."""
+    reject: list[str] = Field(default_factory=list, max_length=1000)
+    """The ones never to send there."""
 
 
 class RevealRequest(_Body):
@@ -165,12 +182,14 @@ def _int(request: Request, name: str, default: int, lo: int, hi: int) -> int:
 
 
 class AppApi:
-    PUBLIC = frozenset({"/app", *ASSETS})
-    """The page and its static files: no data in them, and a page can't send headers for <script src>."""
+    PUBLIC = frozenset({"/app", *ASSETS, *(f"/oauth/{name}/callback" for name in OAUTH_SERVICES)})
+    """The page and its static files: no data in them, and a page can't send headers for <script src>. And
+    where a sign-in in the browser comes back: the browser has no token; the sign-in's ``state`` is checked."""
 
     def __init__(self, host: AppHost, api: _Api) -> None:
         self.host = host
         self.api = api
+        self.signins: dict[str, SignIn] = {}
 
     def exception_handlers(self) -> dict[Any, Any]:
         return {
@@ -199,6 +218,7 @@ class AppApi:
             Route("/api/meetings", self.meetings, methods=["GET"]),
             Route(m, self.meeting, methods=["GET"]),
             Route(f"{m}/push", self.push_meeting, methods=["POST"]),
+            Route(f"{m}/review", self.review_meeting, methods=["POST"]),
             Route(f"{m}/summarize", self.summarize_meeting, methods=["POST"]),
             Route(f"{m}/items", self.add_item, methods=["POST"]),
             Route(f"{m}/people", self.edit_people, methods=["POST"]),
@@ -219,6 +239,10 @@ class AppApi:
             Route("/api/open-settings", self.open_settings, methods=["POST"]),
             Route("/api/permissions/{kind}", self.permission, methods=["POST"]),
             Route("/api/google-bridge", self.google_bridge, methods=["GET"]),
+            Route("/api/oauth/{service}", self.oauth_state, methods=["GET"]),
+            Route("/api/oauth/{service}", self.oauth_disconnect, methods=["DELETE"]),
+            Route("/api/oauth/{service}/start", self.oauth_start, methods=["POST"]),
+            Route("/oauth/{service}/callback", self.oauth_callback, methods=["GET"]),
         ]
 
     # ------------------------------------------------------------------ the page
@@ -391,6 +415,10 @@ class AppApi:
         result.pop("up_to_date", None)
         return JSONResponse(result)
 
+    async def review_meeting(self, request: Request) -> JSONResponse:
+        body = await _parse(request, ReviewRequest)
+        return JSONResponse(await self.host.meetings.review(request.path_params["folder"], body.approve, body.reject))
+
     async def summarize_meeting(self, request: Request) -> JSONResponse:
         self.host.meetings.start_summarize(request.path_params["folder"])
         return JSONResponse({"ok": True}, status_code=202)
@@ -525,6 +553,60 @@ class AppApi:
         body = await _parse(request, OpenSettingsRequest)
         await asyncio.to_thread(desktop.open_settings, body.pane)
         return JSONResponse({"ok": True})
+
+    # ------------------------------------------------------------- signing in
+
+    def _signin(self, request: Request) -> SignIn:
+        """The sign-in of a service the app connects to in the browser (Promethee), at the MCP server
+        its settings name. A changed address starts a new one."""
+        service = request.path_params["service"]
+        if service not in OAUTH_SERVICES:
+            raise HTTPException(404, f"nothing signs in to {service!r}")
+        resource = str((self.host.cfg.sinks.get(service) or {}).get("url") or OAUTH_SERVICES[service])
+        s = self.signins.get(service)
+        if s is None or s.resource != resource or s.store.path.parent.parent != self.host.cfg.data_path:
+            s = self.signins[service] = SignIn(TokenStore(self.host.cfg.data_path, service), resource)
+        return s
+
+    async def oauth_state(self, request: Request) -> JSONResponse:
+        s = self._signin(request)
+        data = s.store.load() or {}
+        return JSONResponse({"connected": s.store.connected(), "server": (data.get("meta") or {}).get("issuer"),
+                             "connected_at": data.get("connected_at")})
+
+    async def oauth_disconnect(self, request: Request) -> JSONResponse:
+        s = self._signin(request)
+        await asyncio.to_thread(s.store.clear)
+        self.host.bus.publish("oauth.changed", service=request.path_params["service"], connected=False)
+        return JSONResponse({"connected": False})
+
+    async def oauth_start(self, request: Request) -> JSONResponse:
+        """Opens the service's sign-in page in your browser; it comes back to :meth:`oauth_callback`."""
+        s = self._signin(request)
+        back = f"{request.url.scheme}://{request.url.netloc}/oauth/{request.path_params['service']}/callback"
+        try:
+            url = await s.start(back)
+        except SinkError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=502)
+        opened = True
+        try:
+            await asyncio.to_thread(desktop.open_in_browser, url)
+        except desktop.DesktopError:
+            opened = False  # the page offers the link instead
+        return JSONResponse({"url": url, "opened": opened})
+
+    async def oauth_callback(self, request: Request) -> HTMLResponse:
+        s = self._signin(request)
+        q = request.query_params
+        name = html.escape(SINK_LABELS.get(request.path_params["service"], request.path_params["service"]))
+        try:
+            await s.finish(q.get("state", ""), q.get("code"), q.get("error_description") or q.get("error"))
+        except SinkError as exc:
+            log.warning("sign-in to %s failed: %s", name, exc)
+            return HTMLResponse(_SIGNIN_PAGE.format(title=f"Not connected to {name}", text=html.escape(str(exc))), status_code=400)
+        self.host.bus.publish("oauth.changed", service=request.path_params["service"], connected=True)
+        return HTMLResponse(_SIGNIN_PAGE.format(title=f"Voicestream is connected to {name}",
+                                                text="You can close this tab and go back to Voicestream."))
 
     async def google_bridge(self, request: Request) -> JSONResponse:
         """The Apps Script for Settings → Your tools → Google ("Copy the bridge script"): what

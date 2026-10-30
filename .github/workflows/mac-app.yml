@@ -217,6 +217,9 @@ jobs:
             # a pushed tag must be there already; a manual run tags the commit it built
             verify=(); [[ "$GITHUB_REF" == refs/tags/* ]] && verify=(--verify-tag)
             # how to install it on top, then GitHub's list of what changed
-            gh release create "$TAG" "$DMG" "${verify[@]}" --target "$GITHUB_SHA" --title "Voicestream $TAG" \
+            # a tag with a suffix (v0.4.0-beta.1) is a pre-release: only apps that asked for those see it,
+            # and the README's "latest release" link keeps pointing at the last stable one
+            pre=(); [[ "$TAG" == *-* ]] && pre=(--prerelease)
+            gh release create "$TAG" "$DMG" "${verify[@]}" "${pre[@]}" --target "$GITHUB_SHA" --title "Voicestream $TAG" \
               --notes-file packaging/mac/release-notes.md --generate-notes
           fi

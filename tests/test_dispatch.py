@@ -397,3 +397,54 @@ async def test_the_slack_digest_gets_the_notes_last_so_it_can_link_the_others(cf
     await d.push_notes("# Notes")
     assert list(seen) == ["notion", "memory", "slack"]  # otherwise in config order
     assert seen["slack"] == {"notion", "memory"}
+
+
+# ------------------------------------------------------------------------ review
+
+
+async def test_a_review_sink_waits_for_your_go_ahead(cfg: Config, meeting: Meeting) -> None:
+    meeting.items["A1"] = _action("A1")
+    meeting.items["A2"] = _action("A2")
+    meeting.items["A3"] = _action("A3", confidence=0.1)  # never a candidate: too unsure
+    plain, held = MemorySink(cfg), _named("promethee", cfg, review=True)
+    d, bus, _ = _dispatcher(cfg, meeting, plain, held)
+    await d.finalize("# Notes")
+    assert plain.created_ids == ["A1", "A2"] and held.created_ids == []
+    assert d.pending_review() == ["A1", "A2"]
+
+    assert await d.review(approve=["A2"], reject=["A1", "nope"]) == 1
+    assert held.created_ids == ["A2"] and meeting.items["A2"].pushed["promethee"] == "promethee://A2"
+    assert meeting.review["promethee"].model_dump() == {"approved": ["A2"], "rejected": ["A1"]}
+    assert d.pending_review() == []
+    assert _events(bus, "review.done")[-1] == {"meeting_id": meeting.id, "approved": 1, "rejected": 1, "pending": 0}
+    await d.finalize(None)  # a rejected to-do never goes by itself
+    assert held.created_ids == ["A2"] and plain.created_ids == ["A1", "A2"]
+
+
+async def test_a_held_item_pushed_by_hand_is_approved(cfg: Config, meeting: Meeting) -> None:
+    meeting.items["A1"] = _action("A1")
+    held = _named("promethee", cfg, review=True)
+    d, _, _ = _dispatcher(cfg, meeting, held)
+    await d.review(approve=[], reject=["A1"])
+    assert (await d.push_now("A1"))["promethee"] == "promethee://A1"
+    assert meeting.review["promethee"].model_dump() == {"approved": ["A1"], "rejected": []}
+
+
+async def test_items_sent_before_review_stay_in_sync(cfg: Config, meeting: Meeting) -> None:
+    meeting.items["A1"] = _action("A1")
+    held = _named("promethee", cfg, review=True)
+    d, _, _ = _dispatcher(cfg, meeting, held)
+    await d.review(approve=["A1"])
+    _edit(meeting.items["A1"], title="Send the deck v2")
+    await d.finalize(None)
+    assert [i.title for i, _ in held.updated] == ["Send the deck v2"]
+
+
+async def test_review_can_record_without_sending(cfg: Config, meeting: Meeting) -> None:
+    meeting.items["A1"] = _action("A1")
+    held = _named("promethee", cfg, review=True)
+    d, _, _ = _dispatcher(cfg, meeting, held)
+    assert await d.review(d.pending_review(), send=False) == 0
+    assert held.created_ids == []
+    await d.sync(require_stable=False)
+    assert held.created_ids == ["A1"]

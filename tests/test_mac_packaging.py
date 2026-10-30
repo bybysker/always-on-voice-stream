@@ -408,7 +408,8 @@ def test_release_job_publishes_tagged_builds_only() -> None:
     assert "if: startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.release, 'v')" in release
     assert "permissions:\n      contents: write" in release
     assert "actions/download-artifact@v8" in release and "name: ${{ needs.app.outputs.dmg }}" in release
-    assert 'gh release create "$TAG" "$DMG" "${verify[@]}" --target "$GITHUB_SHA"' in release
+    assert 'gh release create "$TAG" "$DMG" "${verify[@]}" "${pre[@]}" --target "$GITHUB_SHA"' in release
+    assert 'pre=(); [[ "$TAG" == *-* ]] && pre=(--prerelease)' in release  # v0.4.0-beta.1: a pre-release on GitHub too
     # a manual run's tag reaches the script through the environment, checked, never as ${{ }} in it
     run = release[release.index("run: |"):]
     assert "${{" not in run and "TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.release }}" in release

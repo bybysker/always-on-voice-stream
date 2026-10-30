@@ -510,6 +510,16 @@ form.person-add .person-in { width: 14em; max-width: 100%; }
 .kept-row .title { overflow-wrap: anywhere; }
 .kept-row.done .title { text-decoration: line-through; color: var(--muted); }
 .kept-meta { display: flex; gap: 12px; align-items: center; color: var(--muted); font-size: var(--fs-small); white-space: nowrap; }
+
+/* the end-of-meeting check of the to-do list (a tool with review = true, e.g. Promethee) */
+.card.review { padding: 16px 20px; margin-bottom: 16px; border-color: var(--hue-text); }
+.card.review h2 { margin: 0 0 4px; }
+.review-list { list-style: none; margin: 12px 0; padding: 0; }
+.review-row label { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; min-height: 44px; padding: 6px 0; border-top: 1px solid var(--rule); cursor: pointer; }
+.review-row .title { overflow-wrap: anywhere; }
+.review-row input:not(:checked) ~ .title { color: var(--muted); text-decoration: line-through; }
+.card.review .row { justify-content: flex-end; gap: 8px; }
+@media (max-width: 560px) { .review-row label { grid-template-columns: auto 1fr; } .review-row .kept-meta { grid-column: 2; } }
 .panel-foot { margin-top: auto; padding-top: 14px; color: var(--muted); font-size: var(--fs-small); }
 .sent-to { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: var(--fs-small); line-height: 18px; }
 .sent-to .icon { width: 14px; height: 14px; color: var(--positive); }
@@ -1205,3 +1215,10 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before { animation: none !important; transition: none !important; }
 }
+
+/* a tool you connect to by signing in in the browser (Promethee) */
+.connect { display: grid; gap: 8px; padding-bottom: 12px; }
+.connect > p { margin: 0; }
+.connect > .row { flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.connect details summary { cursor: pointer; color: var(--muted); }
+.connect details[open] summary { margin-bottom: 8px; }

@@ -248,6 +248,8 @@ class DemoApp(UIApp):
             for item in meeting.items.values():  # sent where the meeting's tools took them
                 if item.kind.value == "action":
                     item.pushed = dict(spec["pushed"])
+                    if spec is not PAST[0]:  # validated after those meetings; today's waits for your review
+                        item.pushed["promethee"] = ""
             if "email" in spec:
                 e = spec["email"]
                 meeting.followup_email = FollowUpEmail(subject=e["subject"], to=e["to"], body_markdown=e["body"])
@@ -281,6 +283,9 @@ due_time = "09:00"
 [sinks.hubspot]
 enabled = true
 owner_email = "camille@maisonberthe.fr"
+
+[sinks.promethee]
+enabled = true
 
 [budget]
 daily_usd = 2.0

@@ -308,7 +308,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
 
 def cmd_push(args: argparse.Namespace) -> int:
     from .app.meetings import push_meeting, save_meeting
-    from .dispatch import Dispatcher
+    from .dispatch import Dispatcher, pending_review
     from .events import EventBus
     from .sinks.base import build_sinks
     from .storage import load_meeting
@@ -337,6 +337,8 @@ def cmd_push(args: argparse.Namespace) -> int:
         # saved after every push: an interrupted run (Ctrl+C on a slow sink) keeps the refs of what it created
         d = Dispatcher(cfg, meeting, sinks, bus, on_change=save)
         try:
+            if args.approve:  # validates the to-do list held for review: they go out with the rest below
+                await d.review(d.pending_review(), send=False)
             return await push_meeting(cfg, meeting, sinks, bus=bus, notes=not args.no_notes, dispatcher=d, save=save)
         finally:
             await d.aclose()
@@ -346,6 +348,10 @@ def cmd_push(args: argparse.Namespace) -> int:
     finally:
         save()
     print(f"pushed/updated {result['count']} item(s)" + (" (the rest were already up to date)" if result["up_to_date"] else ""))
+    waiting = pending_review(meeting, sinks, cfg.dispatch.min_confidence)
+    if waiting:
+        print(f"{len(waiting)} to-do(s) wait for your review ({', '.join(waiting)}): "
+              "validate them in the app, or run again with --approve to send them all")
     for name, ref in result["notes"].items():
         print(f"notes → {name}: {ref}")
     if result["errors"]:
@@ -490,6 +496,8 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--sink", action="append", help="only this sink (repeatable)")
     ps.add_argument("--no-notes", action="store_true")
     ps.add_argument("--force", action="store_true", help="also push a meeting that is still in progress")
+    ps.add_argument("--approve", action="store_true",
+                    help="validate every to-do waiting for review (tools with review = true, e.g. promethee) and send it")
     ps.set_defaults(func=cmd_push)
 
     mo = sub.add_parser("models", help="speech models for free on-device transcription (whisper.cpp)")

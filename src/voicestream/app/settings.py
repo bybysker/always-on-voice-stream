@@ -50,6 +50,7 @@ SINK_LABELS = {
     "reminders": "Apple Reminders",
     "google": "Google (Calendar, Docs, Gmail)",
     "hubspot": "HubSpot",
+    "promethee": "Promethee",
     "shortcuts": "Shortcuts (e.g. Promethee)",
     "command": "A command or app link",
     "webhook": "Webhook (Zapier, Make, n8n…)",

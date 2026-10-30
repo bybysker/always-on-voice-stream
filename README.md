@@ -337,6 +337,7 @@ minute.
 | `google` | Your tasks become Google Calendar reminders at 09:00 on their due date. Each meeting gets a Google Doc in a "Meeting notes" folder. Gmail sends a recap to you and saves a follow-up **draft** for the attendees; drafts are never sent. | [Google bridge](#google-calendar-docs-and-gmail) |
 | `reminders` | Your tasks go into an Apple Reminders list ("Meetings"), with due date and alert. | `enabled = true`, then allow Automation once. |
 | `hubspot` | The meeting is logged on the contacts and companies that took part in it. Your follow-ups become HubSpot tasks. | [HubSpot key](#hubspot) |
+| `promethee` | Your to-do list goes to Promethee through its MCP server, **once you validate it** at the end of the meeting. | [Promethee](#promethee-mcp-server) |
 | `shortcuts` | Runs a macOS Shortcut per task or meeting, with the data as JSON. Use it for any app with Shortcuts actions, such as Promethee. | [Apps on your Mac](#promethee-and-other-apps-on-your-mac) |
 | `command` | Runs a command or opens a URL scheme per task, e.g. `open "promethee://add?title={title_url}"`. | [Apps on your Mac](#promethee-and-other-apps-on-your-mac) |
 | `markdown` | Keeps `~/.voicestream/TODO.md` and `notes/` locally. Works with Obsidian or any editor. | On by default |
@@ -408,6 +409,52 @@ To update the bridge later, paste the new code (`voicestream google-bridge | pbc
 Participants are matched to HubSpot contacts and companies by name, accents ignored. Only people
 who took part count, not people who were merely talked about. A record is associated only when the
 match is unique, and contacts are never created.
+
+### Promethee (MCP server)
+
+Promethee is reached through its MCP server, `https://mcp.promethee.io/mcp`, the way any MCP client
+reaches it. Unlike the other tools, it **waits for you**: when a meeting ends, nothing has gone to
+Promethee yet.
+
+```
+ meeting ends ─► "2 to-dos wait for your OK" banner (every screen) ─► the meeting's review card
+                                                                       ☑ Send the deck to Sam
+                                                                       ☐ Book the venue
+                                                                       [Don't send any] [Send 1 to-do to Promethee]
+```
+
+- Tick what should go, untick what shouldn't, then **Send**, or **Don't send any**. Your choice is
+  kept: a to-do you left out never goes to Promethee by itself. Its own **Send** button still sends
+  it later if you change your mind.
+- To-dos that were sent stay in sync like everywhere else: done, renamed or rescheduled in
+  Voicestream, updated in Promethee, if its server has a tool to update a task.
+- If a send fails (no key, offline), the meeting's page says so and offers **Try again**.
+- From the terminal: `voicestream push last --approve` validates the whole list and sends it.
+
+Set it up in **Settings → Your tools → Promethee**: turn it on and click **Connect to Promethee**.
+Your browser opens Promethee's sign-in page. Sign in and allow Voicestream, and the browser comes
+back with "Voicestream is connected to Promethee". There is no key to copy: Voicestream signs in as
+any MCP client does (OAuth with PKCE; it finds where to sign in from the server itself and registers
+itself there). The sign-in is kept in `~/.voicestream/oauth/promethee.json`, readable by you only,
+and renewed by itself; **Disconnect** removes it. If Promethee ever gives you a token instead, put it
+under **I have a token instead** (`PROMETHEE_TOKEN`). It is then used in place of the sign-in.
+
+Then click **Test**. It connects, lists the server's tools and says which one your to-dos go
+through and with which arguments. Nothing is created.
+
+Voicestream reads the server's own description of its tools, so there is nothing to map by hand.
+It picks the tool that adds a task (`create_task`, `add_todo`…) and fills each of its arguments
+from the to-do: title, description, due date, priority and owner. When the server needs something
+it can't guess, such as a project, Test says so. Set it in the settings file:
+
+```toml
+[sinks.promethee]
+enabled = true
+review = true                      # false: send at the end of the meeting, like the other tools
+arguments = { project = "Clients" } # fixed arguments for every new task (win over the guessed ones)
+# create_tool = "create_task"      # only if the guess is wrong
+# update_tool = "update_task"
+```
 
 ### Promethee and other apps on your Mac
 

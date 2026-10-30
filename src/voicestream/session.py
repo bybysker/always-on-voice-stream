@@ -354,6 +354,7 @@ class MeetingSession:
             dir=str(self.store.dir),
             items=len([i for i in self.meeting.items.values() if not i.dismissed]),
             short_clip=short,
+            review=len(self.dispatcher.pending_review()),
         )
         if self.agents.busy:
             # agents keep working; refresh the notes when they're done

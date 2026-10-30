@@ -60,13 +60,14 @@ ROUTES = [
     ("GET", "/api/app"), ("POST", "/api/listen/start"), ("POST", "/api/listen/stop"), ("GET", "/api/settings"),
     ("PATCH", "/api/settings"), ("PUT", "/api/secrets/ANTHROPIC_API_KEY"), ("POST", "/api/secrets/ANTHROPIC_API_KEY/test"),
     ("GET", "/api/doctor"), ("GET", "/api/devices"), ("GET", "/api/meetings"), ("GET", f"/api/meetings/{PLANNING}"),
-    ("POST", f"/api/meetings/{PLANNING}/push"), ("POST", f"/api/meetings/{PLANNING}/summarize"),
-    ("POST", f"/api/meetings/{PLANNING}/items"), ("POST", f"/api/meetings/{PLANNING}/people"),
+    ("POST", f"/api/meetings/{PLANNING}/push"), ("POST", f"/api/meetings/{PLANNING}/review"),
+    ("POST", f"/api/meetings/{PLANNING}/summarize"), ("POST", f"/api/meetings/{PLANNING}/items"), ("POST", f"/api/meetings/{PLANNING}/people"),
     ("PATCH", f"/api/meetings/{PLANNING}/items/A1"),
     ("POST", f"/api/meetings/{PLANNING}/items/A1/dismiss"), ("GET", "/api/cost"), ("GET", "/api/models"),
     ("POST", "/api/models/base/download"), ("DELETE", "/api/models/base"), ("POST", "/api/setup/complete"),
     ("PATCH", "/api/prefs"), ("POST", "/api/reveal"), ("POST", "/api/open-settings"), ("POST", "/api/permissions/microphone"),
-    ("POST", "/api/hotkey/recording"),
+    ("POST", "/api/hotkey/recording"), ("GET", "/api/oauth/promethee"), ("DELETE", "/api/oauth/promethee"),
+    ("POST", "/api/oauth/promethee/start"),
 ]  # fmt: skip
 
 
@@ -304,6 +305,10 @@ def test_meeting_routes(client: TestClient, host: AppHost, monkeypatch: pytest.M
     assert pushed["items"] == {"A1": {"rec": "rec:A1"}, "A3": {"rec": "rec:A3"}} and pushed["errors"] == []  # A2 was there
     assert client.post(f"/api/meetings/{LIVE_ELSEWHERE}/push", json={}).status_code == 409
     assert client.post(f"/api/meetings/{PLANNING}/push", json={"sinks": "rec"}).status_code == 400
+    # nothing waits for review here (no tool asks first): a review sends nothing, and says so
+    assert client.post(f"/api/meetings/{PLANNING}/review", json={"approve": ["A1"]}).json() == {"sent": {}, "errors": [], "pending": []}
+    assert client.post(f"/api/meetings/{PLANNING}/review", json={"approve": "A1"}).status_code == 400
+    assert client.post(f"/api/meetings/{LIVE_ELSEWHERE}/review", json={}).status_code == 409
     r = client.post(f"/api/meetings/{PLANNING}/summarize")
     assert r.status_code == 202
     deadline = time.monotonic() + 5
@@ -561,3 +566,44 @@ def test_live_item_routes_reach_the_assistant_holding_the_meeting() -> None:
     new, old = assistant("m3"), assistant("m1", "m2")  # after a restart, the old one finishes m2's agents
     api = _Api(SimpleNamespace(assistant=new, assistants=[new, old], is_app_host=True), "")
     assert api.holder("m2") is old and api.holder("m3") is new and api.holder(None) is new and api.holder("m9") is new
+
+
+def test_signing_in_to_promethee(host: AppHost, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Connect opens the sign-in page in the browser; the browser comes back without the app's token,
+    so the way back is public, and only a sign-in the app started gets through it."""
+    from voicestream.app import desktop
+    from voicestream.sinks.oauth import SignIn, TokenStore
+
+    opened: list[str] = []
+    monkeypatch.setattr(desktop, "open_in_browser", opened.append)
+
+    async def start(self: SignIn, redirect_uri: str) -> str:
+        assert redirect_uri == f"{BASE}/oauth/promethee/callback"
+        self._flows["s1"] = None  # type: ignore[assignment]
+        return "https://auth.promethee.io/authorize?state=s1"
+
+    async def finish(self: SignIn, state: str, code: str | None, error: str | None = None) -> None:
+        if state != "s1":
+            from voicestream.sinks.oauth import OAuthError
+            raise OAuthError("this sign-in is unknown or too old: click Connect again")
+        self.store.save({"access_token": "at", "meta": {"issuer": "https://auth.promethee.io"}})
+
+    monkeypatch.setattr(SignIn, "start", start)
+    monkeypatch.setattr(SignIn, "finish", finish)
+    assert client.get("/api/oauth/promethee").json()["connected"] is False
+    assert client.post("/api/oauth/promethee/start").json() == {"url": "https://auth.promethee.io/authorize?state=s1", "opened": True}
+    assert opened == ["https://auth.promethee.io/authorize?state=s1"]
+    assert client.post("/api/oauth/nope/start").status_code == 404
+
+    with TestClient(create_app(host, TOKEN), base_url=BASE) as browser:  # no token
+        bad = browser.get("/oauth/promethee/callback?state=forged&code=c")
+        assert bad.status_code == 400 and "Not connected to Promethee" in bad.text and "too old" in bad.text
+        assert not TokenStore(host.cfg.data_path, "promethee").connected()
+        ok = browser.get("/oauth/promethee/callback?state=s1&code=c")
+        assert ok.status_code == 200 and "Voicestream is connected to Promethee" in ok.text
+        assert browser.get("/oauth/nope/callback").status_code == 401  # only the known ways back are public
+    assert [e.data for e in host.bus.history if e.type == "oauth.changed"] == [{"service": "promethee", "connected": True}]
+    state = client.get("/api/oauth/promethee").json()
+    assert state["connected"] is True and state["server"] == "https://auth.promethee.io"
+    assert client.delete("/api/oauth/promethee").json() == {"connected": False}
+    assert not TokenStore(host.cfg.data_path, "promethee").connected()

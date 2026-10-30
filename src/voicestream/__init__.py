@@ -5,4 +5,4 @@ extracts action items / decisions with Claude, pushes them to the tools you use
 and can dispatch agents that do the work while you're still in the meeting.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0-beta.1"

@@ -122,6 +122,11 @@ enabled = true
 # enabled = true
 # owner_email = "you@example.com"
 
+# [sinks.promethee]        # your to-do list in Promethee via its MCP server (PROMETHEE_TOKEN),
+# enabled = true           # sent once you validate it at the end of the meeting
+# review = true            # false: send it like the other tools
+# arguments = { project = "Clients" }
+
 # [sinks.shortcuts]        # any app with Shortcuts actions, e.g. Promethee
 # enabled = true
 # item_shortcut = "Promethee – nouvelle tâche"
