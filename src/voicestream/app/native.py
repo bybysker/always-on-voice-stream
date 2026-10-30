@@ -161,6 +161,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "pause": "Pause",
         "resume": "Resume Listening",
         "resume_meeting": "Resume Meeting",
+        "mute": "Mute Microphone",
         "start": "Start Listening",
         "stop": "Stop Listening",
         "start_meeting": "Start Meeting",
@@ -200,6 +201,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "pause": "Mettre en pause",
         "resume": "Reprendre l'écoute",
         "resume_meeting": "Reprendre la réunion",
+        "mute": "Couper le micro",
         "start": "Démarrer l'écoute",
         "stop": "Arrêter l'écoute",
         "start_meeting": "Démarrer une réunion",
@@ -406,6 +408,8 @@ def menu_model(state: dict[str, Any], lang: str, login: str, *, now: datetime | 
         MenuEntry("sep2"),
         MenuEntry("pause", resume if current == "paused" else s["pause"], enabled=not busy,
                   visible=current in ("listening", "paused"), **on_pause),
+        MenuEntry("mic", s["mute"], enabled=not busy, visible=current in ("listening", "paused"),
+                  checked=bool(state.get("mic_muted"))),
         listen,
         MenuEntry("end_meeting", s["end_meeting"], enabled=not busy, visible=bool(state.get("in_meeting")) and not manual),
         MenuEntry("sep3", visible=login != "unsupported" or floating_item.visible),
@@ -442,6 +446,7 @@ def meeting_menu_model(state: dict[str, Any], lang: str, *, quitting: bool = Fal
                   **shortcut(press == "stop")),
         MenuEntry("m_pause", (s["resume_meeting"] if manual else s["resume"]) if current == "paused" else s["pause"],
                   enabled=not quitting and recording, **shortcut(press == "resume")),
+        MenuEntry("m_mic", s["mute"], enabled=not quitting and recording, checked=bool(state.get("mic_muted"))),
         MenuEntry("m_end", s["end_meeting"], enabled=not quitting and recording and bool(state.get("in_meeting")),
                   visible=not manual),
         MenuEntry("sep_m"),
@@ -1227,6 +1232,8 @@ class MacShell:
             self.reopened()
         elif key in ("pause", "m_pause"):
             self._post(self.host.listen_resume() if current == "paused" else self.host.listen_pause())
+        elif key in ("mic", "m_mic"):
+            self._post(self.host.mic_toggle())
         elif key == "listen":
             # Cancel Next Meeting is a stop, also the moment the state says stopped before the start begins
             start = current in ("stopped", "error") and not floating.start_queued(self.state)
@@ -1302,6 +1309,8 @@ class MacShell:
             self._post(self.host.listen_pause())
         elif key == "resume":
             self._post(self.host.listen_resume())
+        elif key in ("mute", "unmute"):
+            self._post(self.host.mic_mute(key == "mute"))
         elif key in ("stop", "cancel"):  # cancel: the start waiting for the last meeting's wrap-up is taken back
             self._post(self.host.meeting_stop())
         elif key == "accept":

@@ -69,7 +69,10 @@ For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. No terminal 
    meeting: **Start meeting** in the window, **Start Meeting** in the menu-bar menu, the small
    floating button that stays above your apps (drag it anywhere; Control-click it to hide it), or
    Spotlight: press ⌘Space, type "voicestream" and choose **Voicestream – New Meeting**. **Stop**
-   wraps the meeting up, writes its notes and lets go of the microphone. After 15 minutes without
+   wraps the meeting up, writes its notes and lets go of the microphone. The microphone button
+   next to **Pause** (also on the floating button, and **Mute Microphone** in the menu-bar menu)
+   mutes only you: what the others say is still recorded, until you click it again. **Pause**
+   stops recording both. After 15 minutes without
    speech the floating button asks **Still in a meeting?** (**Keep** or **End**); after 60 the
    meeting ends by itself. When another app starts a call (Zoom, Teams, FaceTime, Meet…), the
    floating button offers **Call detected — start notes?**: nothing starts unless you click
@@ -138,7 +141,10 @@ Pour un Mac Apple Silicon (M1 ou plus récent) sous macOS 14.2 ou plus. Aucun te
    menus, le petit bouton flottant qui reste au-dessus de vos apps (déplacez-le où vous voulez ;
    Contrôle-clic pour le masquer), ou Spotlight : ⌘Espace, tapez « voicestream » et choisissez
    **Voicestream – Nouvelle réunion**. **Arrêter** clôture la réunion, rédige ses notes et libère le
-   micro. Après 15 minutes sans parole, le bouton flottant demande **Toujours en réunion ?**
+   micro. Le bouton micro à côté de **Pause** (aussi sur le bouton flottant, et **Couper le micro**
+   dans le menu de la barre des menus) ne coupe que vous : ce que disent les autres est toujours
+   enregistré, jusqu'à ce que vous cliquiez à nouveau. **Pause** arrête d'enregistrer les deux.
+   Après 15 minutes sans parole, le bouton flottant demande **Toujours en réunion ?**
    (**Continuer** ou **Terminer**) ; après 60, la réunion se termine d'elle-même. Quand une autre
    app démarre un appel (Zoom, Teams, FaceTime, Meet…), le bouton flottant propose **Appel détecté —
    prendre des notes ?** : rien ne démarre sans que vous cliquiez sur **Démarrer**. **Réglages →

@@ -56,15 +56,26 @@ def test_recording_paused_and_listening() -> None:
     rec = floating.panel_model(_st("listening", **_meeting(12.5)), "en", NOW)
     assert rec.kind == "recording" and rec.timer == "12:30" and rec.timer_label == "Meeting time 12:30"
     assert (rec.symbol, rec.tint, rec.animate, rec.symbol_label) == ("circle.fill", "red", True, "Recording")
-    assert _keys(rec) == ["pause", "stop"] and all(b.icon_only and b.label for b in rec.buttons)
-    assert rec.buttons[1].label == "Stop meeting" and "notes are written" in rec.buttons[1].tooltip
+    assert _keys(rec) == ["pause", "mute", "stop"] and all(b.icon_only and b.label for b in rec.buttons)
+    assert rec.buttons[2].label == "Stop meeting" and "notes are written" in rec.buttons[2].tooltip
     paused = floating.panel_model(_st("paused", **_meeting(3)), "en", NOW)
     assert paused.kind == "paused" and paused.text == "Paused" and _keys(paused) == ["resume", "stop"]
     assert paused.timer == "3:00" and not paused.animate  # nothing is recorded: the dot doesn't breathe
     auto = floating.panel_model(_st("listening", mode="automatic"), "en", NOW)
-    assert auto.kind == "listening" and auto.text == "Listening" and auto.buttons[1].label == "Stop listening"
+    assert auto.kind == "listening" and auto.text == "Listening" and _keys(auto) == ["pause", "mute", "stop"]
+    assert auto.buttons[2].label == "Stop listening"
     hour = floating.panel_model(_st("listening", **_meeting(61)), "en", NOW)
     assert hour.timer == "1:01:00"
+
+
+def test_mute_microphone() -> None:
+    """Mute / Unmute your microphone alone, next to Pause, while something is recorded; never while paused."""
+    muted = floating.panel_model(_st("listening", **_meeting(2), mic_muted=True), "en", NOW)
+    assert _keys(muted) == ["pause", "unmute", "stop"]
+    assert (muted.buttons[1].symbol, muted.buttons[1].tint) == ("mic.slash.fill", "red")
+    fr = floating.panel_model(_st("listening", **_meeting(2)), "fr", NOW)
+    assert fr.buttons[1].label == "Couper le micro"
+    assert _keys(floating.panel_model(_st("paused", **_meeting(2), mic_muted=True), "en", NOW)) == ["resume", "stop"]
 
 
 def test_starting_stopping_and_problems() -> None:
@@ -233,7 +244,7 @@ def test_the_shortcut_is_named_only_next_to_what_a_press_does() -> None:
     a Stop tooltip naming it while paused would send you to resume a meeting you meant to end."""
     sc = "⌥⌘R"
     rec = floating.panel_model(_st("listening", **_meeting(2)), "en", NOW, shortcut=sc)
-    assert rec.buttons[1].key == "stop" and rec.buttons[1].tooltip.endswith("(⌥⌘R)")
+    assert rec.buttons[2].key == "stop" and rec.buttons[2].tooltip.endswith("(⌥⌘R)")
     tips = {b.key: b.tooltip for b in floating.panel_model(_st("paused", **_meeting(2)), "en", NOW, shortcut=sc).buttons}
     assert tips["resume"] == "Resume (⌥⌘R)" and sc not in tips["stop"] and tips["stop"].startswith("Stop: the notes")
     starting = floating.panel_model(_st("starting"), "en", NOW, shortcut=sc)
@@ -612,7 +623,7 @@ def test_the_panel_follows_the_state(appkit: Any) -> None:
     idle_frame = floating._rect(p.panel.frame())
     p.update(floating.panel_model(_st("listening", **_meeting(2)), "en", NOW), lang="en")
     rec = _visible_buttons(p)
-    assert [b.values["accessibilityLabel"] for b in rec] == ["Pause", "Stop meeting"]
+    assert [b.values["accessibilityLabel"] for b in rec] == ["Pause", "Mute microphone", "Stop meeting"]
     assert all(b.values["title"] == "" and b.values["imagePosition"] == floating.IMAGE_ONLY for b in rec)
     assert all(b.values["toolTip"] for b in rec)  # icon-only: what they do on hover
     assert p._views["timer"].values["stringValue"] == "2:00" and not p._views["timer"].values["hidden"]
@@ -624,7 +635,7 @@ def test_the_panel_follows_the_state(appkit: Any) -> None:
     assert p._views["timer"].values["stringValue"] == "2:05"
     p.tick(floating.panel_model(_st(), "en", NOW))  # another look: the next state update draws it, not the tick
     assert p.model is not None and p.model.kind == "recording"
-    p.clicked(1)
+    p.clicked(2)
     assert actions == ["stop"]
     p.update(floating.panel_model(_st(suggestion={"app": "Zoom"}), "en", NOW), lang="en")
     assert appkit.announced == [("AXAnnouncementRequested", {"AXAnnouncementKey": "Call detected — start notes?",
@@ -676,10 +687,10 @@ def test_new_buttons_ignore_clicks_for_a_moment(appkit: Any) -> None:
     assert click(1) == ["dismiss"]
     p._target.contextAction_(types.SimpleNamespace(representedObject=lambda: "hide"))
     assert actions[-1] == "hide"
-    show(_st("listening", **_meeting(1)))  # recording: Pause / Stop act at once
-    assert click(1) == ["stop"]
+    show(_st("listening", **_meeting(1)))  # recording: Pause / Mute / Stop act at once
+    assert click(2) == ["stop"]
     show(_st("listening", **_meeting(20), still_there={"meeting_id": "m1", "silent_minutes": 15}))
-    assert click() == [] and click(1) == []  # Keep / End where Pause / Stop just were
+    assert click() == [] and click(1) == []  # Keep / End where Pause / Mute just were
     now[0] += floating.CLICK_GUARD_S
     assert click() == ["keep"]
     show(_st("stopping"))

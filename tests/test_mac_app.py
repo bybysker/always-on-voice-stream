@@ -608,7 +608,7 @@ def test_meeting_menu_in_the_menu_bar() -> None:
         return {e.key: e for e in native.meeting_menu_model(st, "en", **kw)}
 
     keys = [e.key for e in native.meeting_menu_model(_state("stopped"), "en")]
-    assert keys == ["m_start", "m_stop", "m_pause", "m_end", "sep_m", "m_floating"]
+    assert keys == ["m_start", "m_stop", "m_pause", "m_mic", "m_end", "sep_m", "m_floating"]
     stopped = menu(_state("stopped", mode="manual", **shortcut))
     assert stopped["m_start"].title == "Start Meeting" and stopped["m_start"].enabled and stopped["m_start"].shortcut == "r"
     assert not stopped["m_stop"].enabled and not stopped["m_pause"].enabled and not stopped["m_end"].visible

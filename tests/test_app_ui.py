@@ -1680,6 +1680,19 @@ def test_a_meeting_started_by_hand_from_live(make_app: Callable[..., UIApp], ope
     expect(pg.locator("#live-pause")).to_have_text("Pause")
     assert not app.host.assistant.paused
 
+    # Mute your microphone alone: still recording (the others), said under the title, until Unmute
+    pg.click("#live-mic")
+    expect(pg.locator("#live-mic")).to_have_attribute("aria-label", "Unmute mic")
+    expect(pg.locator("#live-mic")).to_have_attribute("aria-pressed", "true")
+    expect(pg.locator("#mic-muted-pill")).to_be_visible()
+    expect(pg.locator("#state-pill")).to_contain_text("Recording")
+    assert app.host.assistant.mic_muted and not app.host.assistant.paused
+    p.shot("live-manual-mic-muted")
+    pg.click("#live-mic")
+    expect(pg.locator("#live-mic")).to_have_attribute("aria-label", "Mute mic")
+    expect(pg.locator("#mic-muted-pill")).to_be_hidden()
+    assert not app.host.assistant.mic_muted
+
     # Stop: no question; the meeting is wrapped up and Live waits for the next one
     pg.click("#live-stop")
     expect(pg.locator("#ask")).to_be_hidden()

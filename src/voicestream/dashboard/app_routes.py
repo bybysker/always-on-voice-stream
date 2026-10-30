@@ -281,6 +281,8 @@ class AppApi:
             await host.listen_pause()
         elif action == "resume":
             await host.listen_resume()
+        elif action in ("mute", "unmute"):
+            await host.mic_mute(action == "mute")
         elif action in ("stop", "restart"):
             # a graceful stop wraps the meeting up (summary, pushes): it can take a while, so answer
             # with "stopping" and let app.state events tell the rest

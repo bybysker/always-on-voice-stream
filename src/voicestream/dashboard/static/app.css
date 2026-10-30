@@ -211,6 +211,7 @@ kbd {
 .btn.small { min-height: 28px; padding: 0 10px; font-size: var(--fs-small); gap: 5px; }
 .btn.small .icon { width: 14px; height: 14px; }
 .btn.icon-only { padding: 0; width: 28px; }
+.btn.mic-toggle { padding: 0; width: var(--control-height); }
 .btn.big { min-height: var(--control-height); padding: 0 16px; }
 /* the screen's one job when it has one: Start meeting, large enough to find without looking for it */
 .btn.huge { min-height: 48px; padding: 0 22px; gap: 10px; font-size: var(--fs-section); }
@@ -572,6 +573,7 @@ body.live-meeting main { min-height: 0; display: flex; flex-direction: column; }
 .rec-clock.stopping .rec-dot, .rec-clock.starting .rec-dot { background: var(--faint); animation: none; }
 .live-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .live-actions .btn { min-width: 96px; }
+.live-actions .btn.mic-toggle { min-width: 0; }
 .pane-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
 .pane-tools .btn.small { margin: 0 -2px; }
 .panes { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: var(--gap); }
@@ -1196,7 +1198,7 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
 /* a finger, or a phone's width: every control at least 44 px high (a pointer's 28 px is too small to hit) */
 @media (max-width: 640px), (pointer: coarse) {
   .btn, .btn.small, .btn.big, .recorder-actions .btn { min-height: 44px; }
-  .btn.icon-only { width: 44px; }
+  .btn.icon-only, .btn.mic-toggle { width: 44px; }
   .chip-x { width: 44px; height: 44px; margin: -9px -2px -9px -8px; }
   .toast .x { width: 44px; height: 44px; margin: -10px -8px -8px 0; }
   .menu-btn { width: 44px; height: 44px; }

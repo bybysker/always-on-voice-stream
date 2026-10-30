@@ -511,6 +511,7 @@ class Assistant:
         self._silent_warned = False
         self._paused = False
         self._paused_at = 0.0  # on self.wall
+        self._mic_muted = False
         self._force = asyncio.Event()
         self.keep_open = False
         """After a replay/import, keep running (the dashboard) until :meth:`stop`."""
@@ -762,6 +763,20 @@ class Assistant:
         self.bus.publish("assistant.resumed")
         return True
 
+    @property
+    def mic_muted(self) -> bool:
+        return self._mic_muted
+
+    def mute_mic(self, muted: bool = True) -> bool:
+        """Mute (or unmute) your microphone alone: its frames become digital silence, as on Pause, while
+        meeting audio (the others) is still heard and the meeting goes on. Returns whether it changed anything."""
+        if self._mic_muted == muted:
+            return False
+        self._mic_muted = muted
+        log.info("microphone muted: only meeting audio is recorded" if muted else "microphone unmuted")
+        self.bus.publish("assistant.mic_muted" if muted else "assistant.mic_unmuted")
+        return True
+
     async def _linger(self) -> None:
         if self.keep_open and not self._stop.is_set():
             self.bus.publish("assistant.waiting")
@@ -866,7 +881,7 @@ class Assistant:
         frames = src.frames()
         try:
             async for frame in frames:
-                if self._paused:
+                if self._paused or (self._mic_muted and src.name == "mic"):
                     # the device stays open (resuming is instant), but nothing it hears goes any further
                     frame = AudioFrame(frame.source, np.zeros_like(frame.samples), frame.t_start)
                     zero_s = 0.0  # nor does the silence count as a missing microphone permission
@@ -1156,6 +1171,7 @@ class Assistant:
             "previous": last.meeting.model_dump(mode="json") if last and cur is None else None,
             "cost": self.costs.snapshot(),
             "listening": "paused" if self._paused else "listening",
+            "mic_muted": self._mic_muted,
             "stopping": self._stop.is_set(),
         }
 

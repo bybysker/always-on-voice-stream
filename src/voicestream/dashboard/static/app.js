@@ -753,7 +753,7 @@ function renderTopbar() {
   if (!spend.isConnected) fill($('spend-slot'), spend);
   // the recorder is drawn again only when what it says changes: a screen reader hears its state once,
   // and a press in progress is not lost to a new button under the pointer
-  const sig = [LANG, st, Boolean(a.in_meeting), a.error || '', isManual(), liveOwnsControls()].join('|');
+  const sig = [LANG, st, Boolean(a.in_meeting), a.error || '', isManual(), liveOwnsControls(), micMuted()].join('|');
   if (sig === bar.dataset.sig && bar.childElementCount) return;
   bar.dataset.sig = sig;
   const elapsed = meetingElapsed();
@@ -778,7 +778,8 @@ function renderTopbar() {
     : btn(st === 'error' ? t('action.dismiss') : t('action.stop'), { id: 'stop', onclick: (e) => stopListening(e.currentTarget) }, st === 'error' ? null : 'stop');
   stop.hidden = !canStop || (st === 'error' && !a.error);
 
-  const actions = h('div', { class: 'recorder-actions', hidden: liveOwnsControls() }, primary, stop);
+  const mic = ['listening', 'paused'].includes(st) ? micButton('mic', 'big') : null;
+  const actions = h('div', { class: 'recorder-actions', hidden: liveOwnsControls() }, primary, mic, stop);
   keepFocus(bar, () => fill(bar, pill, actions));
 }
 
@@ -804,6 +805,18 @@ async function listen(action, button) {
   const res = await act(button, () => api('POST', '/api/listen/' + action));
   if (res) setApp(res);
 }
+
+/** Mute / Unmute your microphone: what you say is no longer heard, meeting audio (the others) still is.
+ *  An icon, so it fits beside Pause and Stop in the smallest window; its name is said and shown on hover. */
+function micButton(id, extra = '') {
+  const muted = micMuted();
+  return h('button', { type: 'button', class: 'btn mic-toggle' + (muted ? ' primary' : '') + (extra ? ' ' + extra : ''), id,
+    'aria-pressed': String(muted), 'aria-label': muted ? t('action.unmute') : t('action.mute'),
+    title: muted ? t('action.unmute_help') : t('action.mute_help'),
+    onclick: (e) => listen(muted ? 'unmute' : 'mute', e.currentTarget) }, icon(muted ? 'micOff' : 'mic'));
+}
+
+function micMuted() { return Boolean(S.app && S.app.mic_muted); }
 
 /** Start, Stop and Keep go through the host's meeting actions, the ones the menu bar, the shortcut, the
  *  floating button and Spotlight use too (POST /api/meeting/…): a start after a problem is a restart,
@@ -1561,6 +1574,7 @@ function buildLive() {
   LV.elapsedSep = h('span', { 'aria-hidden': 'true' }, '·');
   LV.subText = h('span');
   LV.pausedPill = h('span', { class: 'pill warn' }, icon('pause'), t('state.paused_short'));
+  LV.mutedPill = h('span', { class: 'pill warn', id: 'mic-muted-pill' }, icon('micOff'), t('state.mic_muted_short'));
   LV.meterSlot = h('div');
   LV.meters = h('div', { class: 'meters', role: 'group', 'aria-label': t('live.levels') });
   const sources = [...S.live.meters.keys()];
@@ -1577,7 +1591,7 @@ function buildLive() {
   LV.people = new PeopleLine('live', livePeopleSend, (people) => setLivePeople(people));
   const head = LV.head = h('div', { class: 'live-head' },
     h('div', { class: 'title' }, LV.title,
-      h('div', { class: 'sub' }, LV.elapsed, LV.elapsedSep, LV.subText, LV.pausedPill), LV.meterSlot),
+      h('div', { class: 'sub' }, LV.elapsed, LV.elapsedSep, LV.subText, LV.pausedPill, LV.mutedPill), LV.meterSlot),
     h('div', { class: 'live-side' }, LV.clock, LV.controls, LV.end),
     // after the meeting's controls, which the keyboard reaches first from its title
     LV.people.el);
@@ -1769,6 +1783,7 @@ function renderLiveHead() {
   LV.clock.hidden = LV.controls.hidden = !manual;
   LV.end.hidden = manual;  // ending the meeting by hand is Stop
   LV.pausedPill.hidden = st !== 'paused';
+  LV.mutedPill.hidden = st !== 'listening' || !micMuted();  // paused, nothing at all is heard: Paused says it
   const live = S.live.phase === 'live' && ['listening', 'paused'].includes(st);
   LV.extract.disabled = LV.end.disabled = !live;
   LV.addForm.setDisabled(!live);
@@ -1812,9 +1827,10 @@ function renderMeetingControls(st, elapsed) {
     parts.push(paused
       ? btn(t('action.resume'), { cls: 'primary', id: 'live-pause', onclick: (e) => listen('resume', e.currentTarget) }, 'play')
       : btn(t('action.pause'), { id: 'live-pause', disabled: st !== 'listening', onclick: (e) => listen('pause', e.currentTarget) }, 'pause'),
+    micButton('live-mic'),
     btn(t('action.stop'), { cls: paused ? '' : 'primary', id: 'live-stop', onclick: (e) => meetingAction('stop', e.currentTarget) }, 'stop'));
   }
-  const sig = [LANG, st, wrapping].join('|');  // as Start's: not under a press in progress
+  const sig = [LANG, st, wrapping, micMuted()].join('|');  // as Start's: not under a press in progress
   if (sig !== LV.controlsSig || !LV.controls.childElementCount) {
     LV.controlsSig = sig;
     keepFocus(LV.controls, () => fill(LV.controls, ...parts));
@@ -1862,13 +1878,14 @@ function renderStartPanel(st) {
     const paused = st === 'paused';
     parts.push(btn(paused ? t('action.resume') : t('action.pause'), { cls: paused ? 'primary' : '', id: 'live-pause',
       onclick: (e) => listen(paused ? 'resume' : 'pause', e.currentTarget) }, paused ? 'play' : 'pause'),
+    micButton('live-mic'),
     btn(t('action.stop'), { cls: paused ? '' : 'primary', id: 'live-stop', onclick: (e) => meetingAction('stop', e.currentTarget) }, 'stop'));
   }
   const between = st === 'stopped' || st === 'error';
   if (between) LV.shortcut.draw();
   // drawn again only when what it shows changes: a state event between the press of a button and its
   // release would otherwise put a new button under the pointer, and the click would be lost
-  const sig = [LANG, st, Boolean(S.app.error), between && LV.shortcut.childElementCount > 0].join('|');
+  const sig = [LANG, st, Boolean(S.app.error), between && LV.shortcut.childElementCount > 0, micMuted()].join('|');
   if (sig !== LV.heroSig || !LV.heroRow.childElementCount) {
     LV.heroSig = sig;
     keepFocus(LV.heroRow, () => fill(LV.heroRow, ...parts, between && LV.shortcut.childElementCount ? LV.shortcut : null));
@@ -5427,7 +5444,10 @@ const STRINGS = {
     'state.m.stopped': 'Not recording', 'state.m.listening': 'Recording', 'state.m.stopping': 'Wrapping up…',
 
     'action.start': 'Start listening', 'action.pause': 'Pause', 'action.resume': 'Resume', 'action.stop': 'Stop',
-    'action.stop_now': 'Stop now', 'action.dismiss': 'Dismiss', 'action.try_again': 'Try again',
+    'action.stop_now': 'Stop now', 'action.dismiss': 'Dismiss',
+    'action.mute': 'Mute mic', 'action.unmute': 'Unmute mic', 'state.mic_muted_short': 'Mic muted',
+    'action.mute_help': 'Mute your microphone: what you say is no longer recorded, the others still are',
+    'action.unmute_help': 'Unmute your microphone: what you say is recorded again', 'action.try_again': 'Try again',
     'action.start_meeting': 'Start meeting',
 
     'where.window': 'this window', 'where.menu_bar': 'the menu bar', 'where.floating': 'the floating button', 'where.spotlight': 'Spotlight',
@@ -5978,7 +5998,10 @@ const STRINGS = {
     'state.m.stopped': 'Pas d’enregistrement', 'state.m.listening': 'Enregistrement', 'state.m.stopping': 'Finalisation…',
 
     'action.start': 'Commencer l’écoute', 'action.pause': 'Pause', 'action.resume': 'Reprendre', 'action.stop': 'Arrêter',
-    'action.stop_now': 'Arrêter tout de suite', 'action.dismiss': 'Ignorer', 'action.try_again': 'Réessayer',
+    'action.stop_now': 'Arrêter tout de suite', 'action.dismiss': 'Ignorer',
+    'action.mute': 'Couper le micro', 'action.unmute': 'Réactiver le micro', 'state.mic_muted_short': 'Micro coupé',
+    'action.mute_help': 'Couper votre micro : ce que vous dites n’est plus enregistré, les autres le sont toujours',
+    'action.unmute_help': 'Réactiver votre micro : ce que vous dites est de nouveau enregistré', 'action.try_again': 'Réessayer',
     'action.start_meeting': 'Démarrer une réunion',
 
     'where.window': 'cette fenêtre', 'where.menu_bar': 'la barre des menus', 'where.floating': 'le bouton flottant', 'where.spotlight': 'Spotlight',
