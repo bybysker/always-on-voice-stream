@@ -61,3 +61,13 @@ def open_settings(pane: str) -> None:
         _launch(["open", url])
     except OSError as exc:
         raise DesktopError(f"could not open System Settings: {exc}") from None
+
+
+def open_in_browser(url: str) -> None:
+    """A web page (a service's sign-in) in your default browser, not in the app's window."""
+    if not url.startswith(("https://", "http://")):
+        raise DesktopError("only web addresses open in the browser")
+    import webbrowser
+
+    if not webbrowser.open(url):
+        raise DesktopError("could not open the browser")

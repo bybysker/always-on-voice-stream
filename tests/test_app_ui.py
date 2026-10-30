@@ -3239,3 +3239,51 @@ def test_the_todo_list_is_validated_when_the_meeting_ends(make_app: Callable[...
     expect(card).to_be_hidden()
     expect(banner).to_be_hidden()
     assert sent == ["Envoyer le budget à Sam"]
+
+
+def test_connecting_to_promethee_in_the_browser(make_app: Callable[..., UIApp], open_page: Callable[..., Page],
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """No key to copy: Connect opens Promethee's sign-in in the browser, the card waits with the link
+    again, and when the browser comes back the card says it is connected; Disconnect undoes it."""
+    import urllib.request
+
+    from playwright.sync_api import expect
+
+    from voicestream.app import desktop
+    from voicestream.sinks.oauth import SignIn
+
+    opened: list[str] = []
+    monkeypatch.setattr(desktop, "open_in_browser", opened.append)
+
+    async def start(self: SignIn, redirect_uri: str) -> str:
+        self.back = redirect_uri  # type: ignore[attr-defined]
+        return "https://auth.promethee.io/authorize?state=s1"
+
+    async def finish(self: SignIn, state: str, code: str | None, error: str | None = None) -> None:
+        self.store.save({"access_token": "at", "meta": {"issuer": "https://auth.promethee.io"}})
+
+    monkeypatch.setattr(SignIn, "start", start)
+    monkeypatch.setattr(SignIn, "finish", finish)
+    app = make_app(setup_done=True, config_extra="\n[sinks.promethee]\nenabled = true\n")
+    p = open_page(app)
+    pg = p.page
+    pg.goto(app.url.split("#")[0] + "#/settings/tools")
+    status = pg.locator("#connect-status-promethee")
+    expect(status).to_have_text("Not connected to Promethee yet.")
+    expect(pg.locator("#connect-promethee")).to_have_text("Connect to Promethee")
+    pg.click("#connect-promethee")
+    expect(status).to_have_text("Finish signing in to Promethee in your browser…")
+    expect(pg.locator("#connect-link-promethee")).to_have_attribute("href", "https://auth.promethee.io/authorize?state=s1")
+    assert opened == ["https://auth.promethee.io/authorize?state=s1"]
+    p.shot("promethee-connecting")
+
+    # the browser comes back (no token: the way back is public)
+    origin = app.url.split("/app")[0]
+    with urllib.request.urlopen(f"{origin}/oauth/promethee/callback?state=s1&code=c") as r:
+        assert "Voicestream is connected to Promethee" in r.read().decode()
+    expect(status).to_have_text("Connected to Promethee (https://auth.promethee.io).")
+    expect(pg.locator(".toast", has_text="Voicestream is connected to Promethee.")).to_be_visible()
+    expect(pg.locator("#connect-promethee")).to_have_text("Sign in again")
+    p.shot("promethee-connected")
+    pg.click("#disconnect-promethee")
+    expect(status).to_have_text("Not connected to Promethee yet.")

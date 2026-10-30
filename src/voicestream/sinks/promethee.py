@@ -18,8 +18,10 @@ server's own description of its tools, so nothing has to be set by hand:
 * ``arguments`` adds fixed ones (a project, a list…) and wins over the guessed ones. A required
   argument that nothing fills is reported by **Test**, before anything is sent.
 
-The key is the bearer token Promethee gives you for its MCP server, saved as ``PROMETHEE_TOKEN``
-(Settings → Your tools → Promethee, or ``~/.voicestream/.env``).
+There is no key to copy: **Connect to Promethee** (Settings → Your tools → Promethee) signs you in
+in your browser, as any MCP client does (:mod:`.oauth`), and the sign-in is kept and refreshed in
+``<data_dir>/oauth/promethee.json``. A token Promethee gave you instead goes in ``PROMETHEE_TOKEN``;
+it wins over the sign-in.
 
 Ref format: the task's URL when the server gives one, else its id.
 """
@@ -28,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any, ClassVar, Literal
 
@@ -37,6 +40,7 @@ from ..models import Item, ItemStatus, Meeting
 from .base import Sink, SinkConfig, SinkError, env_secret, item_markdown
 from .http import HttpSinkMixin
 from .mcp import McpClient, result_text
+from .oauth import TokenStore
 
 log = logging.getLogger(__name__)
 
@@ -62,7 +66,7 @@ class PrometheeConfig(SinkConfig):
     url: str = DEFAULT_URL
     """The Promethee MCP server."""
     token_env: str = "PROMETHEE_TOKEN"
-    """The environment variable (or saved key) holding your Promethee MCP token."""
+    """A token for the MCP server, if Promethee gave you one (else you connect in the browser)."""
     create_tool: str | None = None
     """The tool that adds a task (default: found among the server's tools)."""
     update_tool: str | None = None
@@ -82,9 +86,12 @@ class PrometheeSink(HttpSinkMixin, Sink):
     def __init__(self, cfg: SinkConfig, app: Any) -> None:
         super().__init__(cfg, app)
         self.mcp = McpClient(self.cfg.url, self.request, self._auth, name="promethee")
+        self.signin = TokenStore(self.app.data_path, "promethee")
 
-    def _auth(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {env_secret(self.cfg, 'token_env', 'PROMETHEE_TOKEN')}"}
+    async def _auth(self, renew: bool) -> dict[str, str]:
+        if os.environ.get(self.cfg.token_env):
+            return {"Authorization": f"Bearer {env_secret(self.cfg, 'token_env', 'PROMETHEE_TOKEN')}"}
+        return {"Authorization": f"Bearer {await self.signin.access_token(self.client(), force_refresh=renew)}"}
 
     # ------------------------------------------------------------------ tools
 

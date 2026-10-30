@@ -431,9 +431,16 @@ Promethee yet.
 - If a send fails (no key, offline), the meeting's page says so and offers **Try again**.
 - From the terminal: `voicestream push last --approve` validates the whole list and sends it.
 
-Set it up in **Settings → Your tools → Promethee**: paste the token Promethee gives you for its MCP
-server (`PROMETHEE_TOKEN`), then click **Test**. Test connects, lists the server's tools and says
-which one your to-dos go through and with which arguments. Nothing is created.
+Set it up in **Settings → Your tools → Promethee**: turn it on and click **Connect to Promethee**.
+Your browser opens Promethee's sign-in page. Sign in and allow Voicestream, and the browser comes
+back with "Voicestream is connected to Promethee". There is no key to copy: Voicestream signs in as
+any MCP client does (OAuth with PKCE; it finds where to sign in from the server itself and registers
+itself there). The sign-in is kept in `~/.voicestream/oauth/promethee.json`, readable by you only,
+and renewed by itself; **Disconnect** removes it. If Promethee ever gives you a token instead, put it
+under **I have a token instead** (`PROMETHEE_TOKEN`). It is then used in place of the sign-in.
+
+Then click **Test**. It connects, lists the server's tools and says which one your to-dos go
+through and with which arguments. Nothing is created.
 
 Voicestream reads the server's own description of its tools, so there is nothing to map by hand.
 It picks the tool that adds a task (`create_task`, `add_todo`…) and fills each of its arguments

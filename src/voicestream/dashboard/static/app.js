@@ -455,7 +455,7 @@ const EVENT_TYPES = [
   'meeting.started', 'meeting.updated', 'meeting.ending', 'meeting.ended', 'meeting.notes_updated', 'meeting.saved',
   'meeting.people',
   'segment', 'transcript.partial', 'level', 'extraction', 'item.added', 'item.updated', 'agent.updated', 'item.pushed',
-  'sink.error', 'notes.pushed', 'cost', 'screen', 'source.error', 'source.stopped', 'agent.budget', 'agent.held',
+  'sink.error', 'notes.pushed', 'oauth.changed', 'cost', 'screen', 'source.error', 'source.stopped', 'agent.budget', 'agent.held',
   'model.download', 'settings.changed', 'app.focus',
 ];
 
@@ -536,6 +536,8 @@ function handle(type, ev) {
       return onAssistantStarted(d);
     case 'assistant.stopped':
       return onAssistantStopped(d);
+    case 'oauth.changed':
+      return onOauthChanged(d);
     case 'sink.error':
       if (S.pushingFolder) return;  // the push's own result lists these
       return toast(humanize(d.error || ''), 'error', t('toast.push_failed', { tool: sinkLabel(d.sink) }));
@@ -4485,7 +4487,7 @@ function toolFields(name, cat) {
       ];
     case 'promethee':
       return [
-        keyField('PROMETHEE_TOKEN', { label: t('tools.promethee.token'), help: t('tools.promethee.token_help') }),
+        connectField('promethee'),
         settingSwitch(p('review'), t('tools.promethee.review'), t('tools.promethee.review_help')),
         settingSwitch(p('owners'), t('tools.only_mine'), t('tools.only_mine_help'), { on: 'mine', off: 'all' }),
       ];
@@ -4509,6 +4511,51 @@ function toolFields(name, cat) {
           btn(t('adv.open_config'), { cls: 'link', onclick: () => reveal('config') })),
       ];
   }
+}
+
+/** Connect to a service by signing in to it in your browser (its MCP server's own sign-in): no key to
+ *  copy. While it is open in the browser the card says so, with the link again in case the browser
+ *  didn't come up. A token the service gave you instead still goes in the field under it. */
+function connectField(service) {
+  const st = (S.oauth = S.oauth || {})[service];
+  if (!st) {
+    api('GET', '/api/oauth/' + service).then((r) => { S.oauth[service] = r; if (currentSection() === 'tools') redrawSection(); })
+      .catch((err) => { S.oauth[service] = { connected: false, error: err.message }; if (currentSection() === 'tools') redrawSection(); });
+  }
+  const name = sinkLabel(service);
+  const connect = btn(st && st.connected ? t('connect.again') : t('connect.button', { name }), {
+    cls: st && st.connected ? 'small' : 'small primary', id: 'connect-' + service,
+    onclick: (e) => act(e.currentTarget, async () => {
+      const res = await api('POST', `/api/oauth/${service}/start`);
+      S.oauth[service] = { ...(S.oauth[service] || {}), waiting: res.url, opened: res.opened, error: null };
+      redrawSection();
+    }),
+  }, 'external');
+  const off = st && st.connected && btn(t('connect.disconnect'), { cls: 'small ghost', id: 'disconnect-' + service,
+    onclick: (e) => act(e.currentTarget, async () => {
+      S.oauth[service] = await api('DELETE', '/api/oauth/' + service);
+      redrawSection();
+    }) });
+  const status = !st ? t('common.loading')
+    : st.connected ? t('connect.connected', { name, server: st.server || name })
+    : st.waiting ? t('connect.waiting', { name })
+    : t('connect.not_connected', { name });
+  const again = st && st.waiting && !st.connected
+    && h('a', { href: safeUrl(st.waiting), target: '_blank', rel: 'noopener noreferrer', id: 'connect-link-' + service },
+      st.opened ? t('connect.open_again') : t('connect.open'));
+  return h('div', { class: 'connect', dataset: { path: 'oauth:' + service } },
+    h('p', { class: 'row' }, icon(st && st.connected ? 'checkCircle' : 'key'), h('span', { class: 'grow', id: 'connect-status-' + service }, status)),
+    h('p', { class: 'help small muted' }, t('connect.help', { name })),
+    st && st.error && h('p', { class: 'error-text' }, humanize(st.error)),
+    h('div', { class: 'row' }, connect, off, again),
+    h('details', { class: 'small' }, h('summary', {}, t('connect.token_instead')),
+      keyField('PROMETHEE_TOKEN', { label: t('tools.promethee.token'), help: t('tools.promethee.token_help') })));
+}
+
+function onOauthChanged(d) {
+  (S.oauth = S.oauth || {})[d.service] = undefined;  // loaded again
+  if (d.connected) toast(t('connect.done', { name: sinkLabel(d.service) }), 'ok');
+  if (S.route.name === 'settings' && currentSection() === 'tools') redrawSection();
 }
 
 function googleSteps() {
@@ -5752,7 +5799,12 @@ const STRINGS = {
     'tools.google.docs': 'Notes in Google Docs', 'tools.google.docs_help': 'One document per meeting.',
     'tools.google.recap': 'Email me a recap', 'tools.google.recap_help': 'Sent to you only.',
     'tools.google.draft': 'Follow-up email as a Gmail draft', 'tools.google.draft_help': 'Never sent by itself.',
-    'tools.promethee.token': 'Promethee MCP token', 'tools.promethee.token_help': 'The token Promethee gives you for its MCP server (mcp.promethee.io). Test checks it and shows which tool your to-dos go through.',
+    'tools.promethee.token': 'Promethee token', 'tools.promethee.token_help': 'Only if Promethee gave you one for its MCP server: it is used instead of the sign-in.',
+    'connect.button': 'Connect to {name}', 'connect.again': 'Sign in again', 'connect.disconnect': 'Disconnect',
+    'connect.connected': 'Connected to {name} ({server}).', 'connect.not_connected': 'Not connected to {name} yet.',
+    'connect.waiting': 'Finish signing in to {name} in your browser…', 'connect.open': 'Open the sign-in page', 'connect.open_again': 'The browser didn’t open? Open the sign-in page',
+    'connect.help': 'You sign in to {name} in your browser: no key to copy. Voicestream keeps the sign-in on this computer and renews it by itself.',
+    'connect.token_instead': 'I have a token instead', 'connect.done': 'Voicestream is connected to {name}.',
     'tools.promethee.review': 'Let me validate the to-do list at the end of each meeting', 'tools.promethee.review_help': 'Nothing goes to Promethee until you choose which to-dos to send. Off: they go when the meeting ends, like your other tools.',
     'review.title': 'Send the to-do list to {tools}?', 'review.lead': 'Untick what shouldn’t go to {tools}. The others are created there now.',
     'review.send.one': 'Send {n} to-do to {tools}', 'review.send.other': 'Send {n} to-dos to {tools}', 'review.send_none': 'Nothing ticked',
@@ -6298,7 +6350,12 @@ const STRINGS = {
     'tools.google.docs': 'Notes dans Google Docs', 'tools.google.docs_help': 'Un document par réunion.',
     'tools.google.recap': 'M’envoyer un récapitulatif', 'tools.google.recap_help': 'Envoyé à vous seul.',
     'tools.google.draft': 'E-mail de suivi en brouillon Gmail', 'tools.google.draft_help': 'Jamais envoyé tout seul.',
-    'tools.promethee.token': 'Jeton MCP Promethee', 'tools.promethee.token_help': 'Le jeton que Promethee vous donne pour son serveur MCP (mcp.promethee.io). Tester le vérifie et montre par quel outil passent vos tâches.',
+    'tools.promethee.token': 'Jeton Promethee', 'tools.promethee.token_help': 'Seulement si Promethee vous en a donné un pour son serveur MCP : il remplace la connexion.',
+    'connect.button': 'Se connecter à {name}', 'connect.again': 'Se reconnecter', 'connect.disconnect': 'Déconnecter',
+    'connect.connected': 'Connecté à {name} ({server}).', 'connect.not_connected': 'Pas encore connecté à {name}.',
+    'connect.waiting': 'Terminez la connexion à {name} dans votre navigateur…', 'connect.open': 'Ouvrir la page de connexion', 'connect.open_again': 'Le navigateur ne s’est pas ouvert ? Ouvrir la page de connexion',
+    'connect.help': 'Vous vous connectez à {name} dans votre navigateur : aucune clé à copier. Voicestream garde la connexion sur cet ordinateur et la renouvelle tout seul.',
+    'connect.token_instead': 'J’ai plutôt un jeton', 'connect.done': 'Voicestream est connecté à {name}.',
     'tools.promethee.review': 'Me laisser valider la liste de tâches à la fin de chaque réunion', 'tools.promethee.review_help': 'Rien ne part vers Promethee tant que vous n’avez pas choisi les tâches à envoyer. Désactivé : elles partent à la fin de la réunion, comme vers vos autres outils.',
     'review.title': 'Envoyer la liste de tâches vers {tools} ?', 'review.lead': 'Décochez ce qui ne doit pas aller dans {tools}. Le reste y est créé maintenant.',
     'review.send.one': 'Envoyer {n} tâche vers {tools}', 'review.send.other': 'Envoyer {n} tâches vers {tools}', 'review.send_none': 'Rien de coché',

@@ -177,8 +177,8 @@ async def test_errors(cfg: Config, meeting: Meeting, token: str, monkeypatch: py
     with pytest.raises(SinkError, match="refused the credentials") as exc:
         await refused.check()
     assert not exc.value.retryable
-    monkeypatch.delenv("PROMETHEE_TOKEN")
-    with pytest.raises(SinkError, match="PROMETHEE_TOKEN is not set"):
+    monkeypatch.delenv("PROMETHEE_TOKEN")  # no token and no sign-in: says how to connect
+    with pytest.raises(SinkError, match="not connected to Promethee: click Connect"):
         await sink.check()
 
 

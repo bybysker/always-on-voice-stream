@@ -13,7 +13,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -33,9 +33,12 @@ class McpError(SinkError):
 
 class McpClient:
     """``request`` is the sink's :meth:`HttpSinkMixin.request` (its retries and error mapping);
-    ``headers`` gives the auth headers for each request (read when sent: a key saved meanwhile counts)."""
+    ``headers(renew)`` gives the auth headers for each request (read when sent: a key saved meanwhile
+    counts). When the server refuses them, it is asked once more with ``renew=True`` (a sign-in's
+    token refreshed), then the request is sent again: a refused request was never applied."""
 
-    def __init__(self, url: str, request: Callable[..., Any], headers: Callable[[], dict[str, str]], *, name: str = "mcp") -> None:
+    def __init__(self, url: str, request: Callable[..., Any], headers: Callable[[bool], Awaitable[dict[str, str]]], *,
+                 name: str = "mcp") -> None:
         self.url = url
         self._request = request
         self._headers = headers
@@ -48,16 +51,22 @@ class McpClient:
 
     # ------------------------------------------------------------------ transport
 
-    def _all_headers(self) -> dict[str, str]:
-        headers = {"Accept": _ACCEPT, "Content-Type": "application/json", **self._headers()}
+    async def _all_headers(self, renew: bool = False) -> dict[str, str]:
+        headers = {"Accept": _ACCEPT, "Content-Type": "application/json", **await self._headers(renew)}
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
             headers["MCP-Protocol-Version"] = self.protocol
         return headers
 
     async def _post(self, message: dict[str, Any], *, safe: bool) -> httpx.Response:
+        resp = await self._send(message, safe=safe, renew=False)
+        if resp.status_code == 401:
+            resp = await self._send(message, safe=safe, renew=True)
+        return resp
+
+    async def _send(self, message: dict[str, Any], *, safe: bool, renew: bool) -> httpx.Response:
         return await self._request(
-            "POST", self.url, json=message, headers=self._all_headers(), write_safe=safe, ok=(200, 202, 204, 401, 403, 404)
+            "POST", self.url, json=message, headers=await self._all_headers(renew), write_safe=safe, ok=(200, 202, 204, 401, 403, 404)
         )
 
     async def _rpc(self, method: str, params: dict[str, Any] | None = None, *, safe: bool = True) -> dict[str, Any]:

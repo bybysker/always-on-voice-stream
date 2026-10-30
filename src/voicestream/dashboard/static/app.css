@@ -1215,3 +1215,10 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before { animation: none !important; transition: none !important; }
 }
+
+/* a tool you connect to by signing in in the browser (Promethee) */
+.connect { display: grid; gap: 8px; padding-bottom: 12px; }
+.connect > p { margin: 0; }
+.connect > .row { flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.connect details summary { cursor: pointer; color: var(--muted); }
+.connect details[open] summary { margin-bottom: 8px; }
