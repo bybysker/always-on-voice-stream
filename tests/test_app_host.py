@@ -219,6 +219,50 @@ async def test_a_long_pause_is_not_a_missing_permission(cfg: Config, monkeypatch
         await asyncio.wait_for(run, 30)
 
 
+async def test_muting_the_mic_silences_it_alone(cfg: Config) -> None:
+    """Mute: your microphone's frames become digital silence, meeting audio is still heard, nothing is paused."""
+    mic, system = Spy(), Spy()
+    a = Assistant(cfg, sources=[Loud("mic"), Loud("system")], transcriber_factory=lambda s: mic if s == "mic" else system,
+                  llm=None, sinks=[], always_on=True)
+    run = asyncio.ensure_future(a.run())
+    try:
+        await _until(lambda: len(mic.peaks) > 3 and len(system.peaks) > 3)
+        assert a.mute_mic() and not a.mute_mic() and a.mic_muted and not a.paused
+        assert a.state()["mic_muted"] and a.state()["listening"] == "listening"
+        m, s = len(mic.peaks), len(system.peaks)
+        await _until(lambda: len(mic.peaks) > m + 5 and len(system.peaks) > s + 5)
+        assert set(mic.peaks[m + 1 :]) == {0} and set(system.peaks[s + 1 :]) == {3000}
+        assert a.mute_mic(False) and not a.mic_muted
+        m = len(mic.peaks)
+        await _until(lambda: len(mic.peaks) > m + 3)
+        assert mic.peaks[-1] == 3000
+        types = [e.type for e in a.bus.history]
+        assert types.count("assistant.mic_muted") == 1 and types.count("assistant.mic_unmuted") == 1
+        assert not [e for e in a.bus.history if e.type == "source.error"]  # muted isn't a missing permission
+    finally:
+        a.stop()
+        await asyncio.wait_for(run, 30)
+
+
+async def test_mute_through_the_host_and_kept_by_a_restart(tmp_path: Path) -> None:
+    built: list[Assistant] = []
+    host = _host(tmp_path, factory=_factory(built=built))
+    await host.mic_mute()  # nothing listens: nothing to mute
+    assert host.state()["mic_muted"] is False
+    await host.listen_start()
+    await host.mic_toggle()
+    assert host.state()["mic_muted"] is True and host.status == "listening" and built[0].mic_muted
+    await host.listen_restart()
+    assert len(built) == 2 and built[1].mic_muted and host.state()["mic_muted"]  # a restart keeps it
+    await host.mic_mute(False)
+    assert host.state()["mic_muted"] is False
+    await host.mic_mute()
+    await host.listen_stop()
+    await host.listen_start()  # a new start: your microphone is heard again
+    assert host.state()["mic_muted"] is False
+    await host.listen_stop()
+
+
 async def test_settings_change_restarts_at_once_between_meetings(tmp_path: Path) -> None:
     built: list[Assistant] = []
     host = _host(tmp_path, factory=_factory(built=built))

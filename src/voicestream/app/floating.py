@@ -121,6 +121,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "paused": "Paused",
         "pause": "Pause",
         "resume": "Resume",
+        "mute": "Mute microphone",
+        "mute_tip": "Mute your microphone: the others are still recorded",
+        "unmute": "Unmute microphone",
+        "unmute_tip": "Your microphone is muted: click to be recorded again",
         "stop_meeting": "Stop meeting",
         "stop_listening": "Stop listening",
         "stop_tip": "Stop: the notes are written and the microphone is let go",
@@ -174,6 +178,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "paused": "En pause",
         "pause": "Mettre en pause",
         "resume": "Reprendre",
+        "mute": "Couper le micro",
+        "mute_tip": "Couper votre micro : les autres sont toujours enregistrés",
+        "unmute": "Réactiver le micro",
+        "unmute_tip": "Votre micro est coupé : cliquez pour être de nouveau enregistré",
         "stop_meeting": "Arrêter la réunion",
         "stop_listening": "Arrêter l'écoute",
         "stop_tip": "Arrêter : les notes sont rédigées et le micro est libéré",
@@ -251,7 +259,7 @@ def meeting_mode(state: dict[str, Any]) -> str:
 @dataclass(frozen=True, slots=True)
 class PanelButton:
     key: str
-    """What a click does, for the shell: start, pause, resume, stop, accept, dismiss, keep, end, ok, show, retry, cancel
+    """What a click does, for the shell: start, pause, resume, mute, unmute, stop, accept, dismiss, keep, end, ok, show, retry, cancel
     (a stop: the start waiting for the last meeting's wrap-up is taken back)."""
     title: str
     label: str
@@ -417,10 +425,14 @@ def panel_model(state: dict[str, Any], lang: str, now: datetime | None = None, *
                               buttons=(PanelButton("resume", s["resume"], s["resume"], "play.fill", icon_only=True,
                                                    tooltip=tip(s["resume"])), stop))
         pause = PanelButton("pause", s["pause"], s["pause"], "pause.fill", icon_only=True, tooltip=s["pause"])
+        mic = (PanelButton("unmute", s["unmute"], s["unmute"], "mic.slash.fill", icon_only=True, tooltip=s["unmute_tip"],
+                           tint="red")
+               if state.get("mic_muted") else
+               PanelButton("mute", s["mute"], s["mute"], "mic.fill", icon_only=True, tooltip=s["mute_tip"]))
         if started is None:  # automatic: listening, no meeting yet (the next speech opens one)
-            return PanelModel("listening", s["listening"], "mic.fill", "secondary", s["listening"], buttons=(pause, stop))
+            return PanelModel("listening", s["listening"], "mic.fill", "secondary", s["listening"], buttons=(pause, mic, stop))
         return PanelModel("recording", "", "circle.fill", "red", s["recording"], animate=True, timer=timer,
-                          timer_label=timer_label, buttons=(pause, stop))
+                          timer_label=timer_label, buttons=(pause, mic, stop))
     if current == "starting":
         return PanelModel("starting", s["starting"], "circle.dotted", "secondary", buttons=(stop,))
     if start_queued(state):
@@ -458,6 +470,7 @@ def sample_states() -> dict[str, dict[str, Any]]:
         "idle": base,
         "idle_automatic": {**base, "mode": "automatic"},
         "recording": {**base, **meeting, "state": "listening"},
+        "recording_muted": {**base, **meeting, "state": "listening", "mic_muted": True},
         "paused": {**base, **meeting, "state": "paused"},
         "listening": {**base, "mode": "automatic", "state": "listening"},
         "starting": {**base, "state": "starting"},

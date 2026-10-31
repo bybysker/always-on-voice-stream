@@ -473,11 +473,47 @@ def other_side(meeting: Meeting, sure: bool = False) -> str | None:
     return name
 
 
-def speaker_label(seg: TranscriptSegment, other: str | None, others_label: str = "Others") -> str:
-    """``seg``'s speaker for the notes and the summary: the meeting audio's lines carry the other
+SPEAKER = "Speaker {n}"
+"""What a voice on the meeting audio is called until it has a name."""
+
+
+def voice_labels(meeting: Meeting) -> dict[int, str] | None:
+    """What each voice heard on the meeting audio is called: its name (:attr:`Meeting.voices`), else
+    ``Speaker N``. ``None`` while there is nothing to tell apart — one voice, unnamed: those lines stay
+    the meeting audio's (and carry the other person's name when there is only one, :func:`other_side`)."""
+    heard = sorted({s.voice for s in meeting.segments if s.voice is not None})
+    if len(heard) < 2 and not any(str(v) in meeting.voices for v in heard):
+        return None
+    return {v: meeting.voices.get(str(v)) or SPEAKER.format(n=v) for v in heard}
+
+
+def name_voice(meeting: Meeting, voice: int, name: str, *, by_you: bool) -> bool:
+    """Name voice ``voice`` of the meeting audio (an empty name takes the name back: ``Speaker N`` again).
+    Claude (``by_you=False``) never renames a voice you named. Returns whether anything changed."""
+    key, name = str(voice), " ".join(name.split())[:80]
+    if not by_you and key in meeting.voices_named_by_you:
+        return False
+    before = (meeting.voices.get(key), key in meeting.voices_named_by_you)
+    if name:
+        meeting.voices[key] = name
+    else:
+        meeting.voices.pop(key, None)
+    if by_you:
+        mine = [v for v in meeting.voices_named_by_you if v != key]
+        meeting.voices_named_by_you = [*mine, key] if name else mine
+    return (meeting.voices.get(key), key in meeting.voices_named_by_you) != before
+
+
+def speaker_label(seg: TranscriptSegment, other: str | None, others_label: str = "Others",
+                  voices: dict[int, str] | None = None) -> str:
+    """``seg``'s speaker for the notes and the summary: the meeting audio's lines carry their voice's name
+    or number when several voices were told apart (``voices``: :func:`voice_labels`), else the other
     person's name when there is only one (:func:`other_side`); the stored label stays as it is."""
-    if other and seg.source != "mic" and seg.speaker == others_label:
-        return other
+    if seg.source != "mic" and seg.speaker == others_label:
+        if voices and seg.voice in voices:
+            return voices[seg.voice]
+        if other and not voices:
+            return other
     return seg.speaker
 
 

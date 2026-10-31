@@ -360,14 +360,14 @@ class UIApp:
 
     # ----------------------------------------------------------------- speech
 
-    def say(self, text: str, source: str = "mic") -> None:
-        """A finished transcript line, as if the transcriber had just heard it."""
+    def say(self, text: str, source: str = "mic", voice: int | None = None) -> None:
+        """A finished transcript line, as if the transcriber had just heard it (``voice``: told apart as that voice)."""
         async def route() -> None:
             a = self.host.assistant
             assert a is not None, "not listening"
             now = a.clock.now()
             seg = self.TranscriptSegment(source=source, speaker=self.host.cfg.source_label(source), text=text,
-                                         t_start=max(0.0, now - 2.0), t_end=now)
+                                         t_start=max(0.0, now - 2.0), t_end=now, voice=voice)
             await a._route(seg)
 
         self.host.call(route()).result(10)
@@ -1680,6 +1680,19 @@ def test_a_meeting_started_by_hand_from_live(make_app: Callable[..., UIApp], ope
     expect(pg.locator("#live-pause")).to_have_text("Pause")
     assert not app.host.assistant.paused
 
+    # Mute your microphone alone: still recording (the others), said under the title, until Unmute
+    pg.click("#live-mic")
+    expect(pg.locator("#live-mic")).to_have_attribute("aria-label", "Unmute mic")
+    expect(pg.locator("#live-mic")).to_have_attribute("aria-pressed", "true")
+    expect(pg.locator("#mic-muted-pill")).to_be_visible()
+    expect(pg.locator("#state-pill")).to_contain_text("Recording")
+    assert app.host.assistant.mic_muted and not app.host.assistant.paused
+    p.shot("live-manual-mic-muted")
+    pg.click("#live-mic")
+    expect(pg.locator("#live-mic")).to_have_attribute("aria-label", "Mute mic")
+    expect(pg.locator("#mic-muted-pill")).to_be_hidden()
+    assert not app.host.assistant.mic_muted
+
     # Stop: no question; the meeting is wrapped up and Live waits for the next one
     pg.click("#live-stop")
     expect(pg.locator("#ask")).to_be_hidden()
@@ -2983,6 +2996,39 @@ def test_who_the_meeting_is_with_on_live_and_on_its_page(make_app: Callable[...,
     assert saved.participants == ["Paul Martin"] and saved.people_removed == ["Sam", "Julie"]
     assert "with Paul Martin" in (folder / "notes.md").read_text(encoding="utf-8")
     p.shot("meeting-people")
+
+
+def test_the_people_on_the_call_told_apart_and_named(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """Two voices on the meeting audio: "Speaker 1" and "Speaker 2" on their lines (the first line, said before the
+    second voice was heard, too); click one, say who it is, and every line of that voice carries the name."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meeting_start="manual")
+    p = open_page(app)
+    pg = p.page
+    pg.click("#live-start")
+    _wait_state(app, "listening")
+    app.say("Bonjour, on commence ?", source="system", voice=1)
+    expect(pg.locator("#lines .seg.others .spk")).to_have_text(["Others"])  # one voice: the meeting audio, as before
+    app.say("Oui, je partage mon écran.", source="system", voice=2)
+    app.say("Julie, tu peux continuer ?")
+    app.say("Bien sûr.", source="system", voice=2)
+    spk = pg.locator("#lines .seg.others .spk")
+    expect(spk).to_have_text(["Speaker 1", "Speaker 2", "Speaker 2"])
+    p.shot("live-voices")
+    spk.nth(1).click()
+    expect(pg.locator("#ask-title")).to_have_text("Who is Speaker 2?")
+    expect(pg.locator("#ask-input")).to_be_focused()
+    pg.keyboard.type("Julie")
+    p.shot("live-voices-naming")
+    pg.keyboard.press("Enter")
+    expect(spk).to_have_text(["Speaker 1", "Julie", "Julie"])
+    expect(pg.locator("#live-people")).to_contain_text("Julie")
+    # the strip's lane is everyone on the meeting audio: not Julie alone, now that she is one voice of two
+    expect(pg.locator("#live-voices-legend")).to_contain_text("Others")
+    expect(pg.locator("#live-voices-legend")).not_to_contain_text("Julie")
+    assert app.host.assistant is not None and app.host.assistant.current.meeting.voices == {"2": "Julie"}
+    p.shot("live-voices-named")
 
 
 def test_who_the_meeting_is_with_in_french(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:

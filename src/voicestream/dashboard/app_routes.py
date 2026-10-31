@@ -139,6 +139,13 @@ class PeopleEdit(_Body):
     remove: list[PersonName] = Field(default_factory=list, max_length=20)
 
 
+class VoiceName(_Body):
+    """``POST /api/meetings/{folder}/voices``: the name of a voice heard on the meeting audio (``""``: none)."""
+
+    voice: int = Field(ge=1, le=99)
+    name: Annotated[str, Field(max_length=80, pattern=r"^[^\x00-\x1f\x7f]*$")] = ""
+
+
 class HotkeyRecording(_Body):
     active: bool
 
@@ -222,6 +229,7 @@ class AppApi:
             Route(f"{m}/summarize", self.summarize_meeting, methods=["POST"]),
             Route(f"{m}/items", self.add_item, methods=["POST"]),
             Route(f"{m}/people", self.edit_people, methods=["POST"]),
+            Route(f"{m}/voices", self.name_voice, methods=["POST"]),
             Route(item, self.edit_item, methods=["PATCH"]),
             Route(f"{item}/dismiss", self.dismiss_item, methods=["POST"]),
             Route(f"{item}/restore", self.restore_item, methods=["POST"]),
@@ -281,6 +289,8 @@ class AppApi:
             await host.listen_pause()
         elif action == "resume":
             await host.listen_resume()
+        elif action in ("mute", "unmute"):
+            await host.mic_mute(action == "mute")
         elif action in ("stop", "restart"):
             # a graceful stop wraps the meeting up (summary, pushes): it can take a while, so answer
             # with "stopping" and let app.state events tell the rest
@@ -436,6 +446,14 @@ class AppApi:
         if not body.add and not body.remove:
             raise HTTPException(400, "nothing to change: give names to add or remove")
         return JSONResponse(self.host.meetings.edit_people(request.path_params["folder"], body.add, body.remove))
+
+    async def name_voice(self, request: Request) -> JSONResponse:
+        """A voice on the meeting audio named: the transcript's "Speaker 2" chip, on Live and on a meeting page."""
+        body = await _parse(request, VoiceName)
+        try:
+            return JSONResponse(self.host.meetings.name_voice(request.path_params["folder"], body.voice, body.name))
+        except KeyError:
+            raise HTTPException(404, f"no voice {body.voice} in this meeting") from None
 
     async def edit_item(self, request: Request) -> JSONResponse:
         fields = (await _parse(request, ItemEdit)).model_dump(mode="json", exclude_unset=True)

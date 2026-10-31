@@ -47,7 +47,7 @@ def _missing(title: str, **kw: object) -> WireNewItem:
 
 def _summary(**kw: object) -> WireSummary:
     base: dict[str, object] = dict(title="Q4 planning", tldr="We planned Q4.", notes_markdown="## Summary\n- Planned Q4",
-                                   updates=[], missing_items=[], participants=[], language="en",
+                                   updates=[], missing_items=[], participants=[], speakers=[], language="en",
                                    followup_subject="", followup_body="")
     return WireSummary(**{**base, **kw})
 

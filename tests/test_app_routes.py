@@ -154,6 +154,9 @@ def test_listen_lifecycle_over_http(client: TestClient, host: AppHost) -> None:
     assert client.post("/api/listen/pause").json()["state"] == "paused"
     assert client.get("/api/state").json()["listening"] == "paused"
     assert client.post("/api/listen/resume").json()["state"] == "listening"
+    assert client.post("/api/listen/mute").json()["mic_muted"] is True
+    assert client.get("/api/state").json()["mic_muted"] is True
+    assert client.post("/api/listen/unmute").json()["mic_muted"] is False
     first = host.assistant
     client.post("/api/listen/restart")
     _wait_state(client, "listening")

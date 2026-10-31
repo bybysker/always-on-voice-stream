@@ -614,6 +614,7 @@ class AppHost:
             "setup_done": self.prefs.setup_done,
             "state": self.status,
             "in_meeting": meeting is not None,
+            "mic_muted": self._assistant is not None and self._assistant.mic_muted,
             "meeting": meeting,
             "error": self.error,
             "restart_pending": self.restart_pending,
@@ -737,6 +738,8 @@ class AppHost:
                 self._publish_state()
         elif ev.type == "meeting.started":
             self.notice = None  # what ended the last one is old news
+            self._publish_state()
+        elif ev.type in ("assistant.mic_muted", "assistant.mic_unmuted"):
             self._publish_state()
         elif ev.type in ("assistant.paused", "assistant.resumed"):
             if ev.type == "assistant.paused":
@@ -864,8 +867,9 @@ class AppHost:
         else:
             self._publish_state()
 
-    async def listen_start(self, paused: bool = False) -> None:
-        """Start listening (idempotent); ``paused`` starts it paused (a restart while paused). A failure
+    async def listen_start(self, paused: bool = False, mic_muted: bool = False) -> None:
+        """Start listening (idempotent); ``paused`` starts it paused, ``mic_muted`` with your microphone muted
+        (a restart keeps both as they were). A failure
         becomes state ``error`` with a plain message; a speech model still downloading, state
         ``starting`` until it is in."""
         if self._run_task is not None and self._stop_requested:
@@ -905,6 +909,8 @@ class AppHost:
         self._dead_sources = set()
         if paused:
             assistant.pause()
+        if mic_muted:
+            assistant.mute_mic()
         started = asyncio.Event()
         unlisten = self.bus.listen(lambda ev: started.set() if ev.type == "assistant.started" else None)
         task = self._run_task = asyncio.ensure_future(self._run(assistant))
@@ -992,6 +998,19 @@ class AppHost:
         if self.status == "paused":
             self._set_status("listening")
 
+    async def mic_mute(self, muted: bool = True) -> None:
+        """Mute (or unmute) your microphone while meeting audio is still recorded: what you say is no longer
+        heard, what the others say still is. Lasts until unmuted, or until listening stops."""
+        a = self._assistant
+        if a is None or self._stop_requested:
+            return
+        a.mute_mic(muted)
+
+    async def mic_toggle(self) -> None:
+        a = self._assistant
+        if a is not None:
+            await self.mic_mute(not a.mic_muted)
+
     async def listen_stop(self, force: bool = False, timeout: float | None = None) -> None:
         """Stop listening and wait for it (``timeout``: give up waiting, the stop continues). The meeting
         in progress is wrapped up unless ``force``; a forced stop never takes more than ~:data:`FORCE_STOP_S`.
@@ -1068,13 +1087,14 @@ class AppHost:
     async def listen_restart(self, force: bool = False) -> None:
         """Stop (ending the meeting in progress) and start again with the current settings."""
         paused = self._assistant.paused if self._assistant is not None else False
+        mic_muted = self._assistant.mic_muted if self._assistant is not None else False
         self.restart_pending = False
         self._stop_pressed = False
         if self._assistant is not None:
             await self._stop(force=force)
             if self._stop_pressed:  # you pressed Stop while the meeting was being wrapped up: stay stopped
                 return
-        await self.listen_start(paused=paused)
+        await self.listen_start(paused=paused, mic_muted=mic_muted)
 
     # ---------------------------------------------------------------- meetings
 

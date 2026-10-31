@@ -32,6 +32,8 @@ vad = ["webrtcvad-wheels>=2.0.14"]
 local = ["faster-whisper>=1.0"]
 # Periodic screenshots of what's being shared.
 screen = ["mss>=10.2", "pillow>=10.0"]
+# Telling the people on the meeting audio apart by voice, on this computer (voicestream/voices.py).
+voices = ["onnxruntime>=1.17"]
 # Live web dashboard (transcript, action items, approve/run buttons).
 dashboard = ["starlette>=0.37", "uvicorn>=0.29"]
 # Agents that actually do tasks mid-meeting.
@@ -51,8 +53,8 @@ mac = [
 ]
 # The app's backend (`voicestream app`): settings written from the UI with your comments kept
 # (tomlkit), API keys in the macOS Keychain (keyring; elsewhere ~/.voicestream/.env).
-app = ["voicestream[dashboard]", "tomlkit>=0.13.2", "keyring>=25.5"]
-all = ["voicestream[audio,local,screen,dashboard,agents,mac,app]"]
+app = ["voicestream[dashboard,voices]", "tomlkit>=0.13.2", "keyring>=25.5"]
+all = ["voicestream[audio,local,screen,dashboard,voices,agents,mac,app]"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "starlette>=0.37", "uvicorn>=0.29", "pillow>=10.0", "tomlkit>=0.13.2", "keyring>=25.5"]
 
 [project.scripts]

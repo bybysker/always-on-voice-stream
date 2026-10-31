@@ -83,6 +83,8 @@ class TranscriptSegment(BaseModel):
     wall_time: datetime = Field(default_factory=utcnow)
     backend: str = ""
     confidence: float | None = None
+    voice: int | None = None
+    """Which voice on the meeting audio said it (1, 2…: :mod:`voicestream.voices`), ``None``: not told apart."""
 
     def render(self) -> str:
         return f"[{fmt_ts(self.t_start)}] {self.speaker}: {self.text}"
@@ -249,6 +251,11 @@ class Meeting(BaseModel):
     """Participant name -> where it came from. The transcript keeps its raw speaker labels ("Others");
     the windows and notes put a name on them from here."""
     people_removed: list[str] = Field(default_factory=list)
+    voices: dict[str, str] = Field(default_factory=dict)
+    """The names given to the voices heard on the meeting audio (``{"2": "Julie"}``, keyed by voice number): by you,
+    or by Claude at the wrap-up. Two voices may share a name (the same person, heard as two)."""
+    voices_named_by_you: list[str] = Field(default_factory=list)
+    """The voices you named (Claude's wrap-up never renames those)."""
     """Names you took out of :attr:`participants`: never added back to this meeting, by hearing them or by Claude."""
     segments: list[TranscriptSegment] = Field(default_factory=list)
     screen_notes: list[ScreenNote] = Field(default_factory=list)

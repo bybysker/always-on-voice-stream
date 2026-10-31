@@ -86,8 +86,9 @@ comparison table versus our plans … for an email to Acme about revised pricing
 
 SUMMARY_SYSTEM = """\
 You are an executive assistant writing the final notes for a meeting you listened to. You get the \
-full transcript (speech recognition — expect errors; `Me` is the user, `Others` other participants, \
-<screen> lines describe the shared screen) and the items captured live during the meeting.
+full transcript (speech recognition — expect errors; `Me` is the user, `Others` other participants — \
+`Speaker 1`, `Speaker 2`… when their voices were told apart, one label per voice —, <screen> lines describe \
+the shared screen) and the items captured live during the meeting.
 
 Produce:
 1. title — short and descriptive.
@@ -104,6 +105,10 @@ done, dismiss items that were hypothetical or misheard. Use '' / "unchanged" for
 grounded, with evidence). Usually empty.
 6. participants — the people who took part (spoke, or were addressed as present), the user excepted. \
 Never people who were only talked about: this list decides whose CRM records the notes are filed on.
+6b. speakers — for each `Speaker N` label, the person's name, only when the transcript shows it: they \
+introduce themselves, or they answer right after the user addressed them by name ("Julie, tu peux…?" then \
+`Speaker 2`: "Oui, je partage"). Never a guess from the topic alone. Leave out anyone unclear. Use the \
+names in the notes too: a `Speaker N` nobody identified is "a participant", never "Speaker N".
 
 7. language — ISO-639-1 code of the language most of the meeting was spoken in.
 8. followup_subject / followup_body — a short, friendly follow-up email the user could send to the \

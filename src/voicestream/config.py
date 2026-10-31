@@ -45,6 +45,9 @@ class SystemAudioConfig(_Section):
     ffmpeg_input: str | None = None
     """e.g. ``-f pulse -i default.monitor`` or ``-f avfoundation -i :BlackHole 2ch``."""
     label: str = "Others"
+    voices: bool = True
+    """Tell the people on the meeting audio apart by their voices, on this computer ("Speaker 1", "Speaker 2"…
+    until they are named; see :mod:`voicestream.voices`). Needs ONNX Runtime; the 26 MB model is downloaded once."""
 
 
 class CaptureConfig(_Section):
