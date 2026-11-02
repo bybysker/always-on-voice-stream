@@ -10,7 +10,7 @@ name: mac app
 
 on:
   push:
-    branches: [claude/clever-pascal-hdj7ym]
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
     inputs:

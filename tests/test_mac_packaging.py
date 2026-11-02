@@ -431,7 +431,7 @@ def test_release_job_publishes_tagged_builds_only() -> None:
 def test_ci_workflow() -> None:
     wf = (ROOT / ".github" / "workflows" / "mac-app.yml").read_text(encoding="utf-8")
     assert "runs-on: macos-15" in wf
-    assert "branches: [claude/clever-pascal-hdj7ym]" in wf and 'tags: ["v*"]' in wf and "workflow_dispatch:" in wf
+    assert "branches: [main]" in wf and 'tags: ["v*"]' in wf and "workflow_dispatch:" in wf
     assert 'python-version: "3.12"' in wf and "pyinstaller==6.22.3" in wf
     assert 'VOICESTREAM_WHISPER_TEST_GPU: "0"' in wf and 'VOICESTREAM_WHISPER_TEST_REQUIRED: "1"' in wf
     assert "continue-on-error: true" in wf  # the Metal run is informational
