@@ -132,8 +132,8 @@
 /* the focused control is never left under the phone's top bar or the settings' save bar */
 html { background: var(--ground); scroll-padding-top: 16px; -webkit-tap-highlight-color: transparent; }
 html:has(body.raise-toasts) { scroll-padding-bottom: 80px; }
-/* a window, not a page: the whole of it doesn't bounce under a mouse or a trackpad */
-@media (pointer: fine) { html { overscroll-behavior: none; } }
+/* no overscroll-behavior anywhere: with it (none on the page, contain on the panes) the Mac app's WebKit
+   window scrolled nowhere, trackpad or mouse wheel; a bounce at the ends is the lesser evil */
 a, button, input, select, textarea, label, summary { touch-action: manipulation; }
 html, body { margin: 0; }
 body {
@@ -584,7 +584,7 @@ body.live-meeting main { min-height: 0; display: flex; flex-direction: column; }
 }
 .pane-head h2 { font-size: var(--fs-body); line-height: 20px; }
 .pane-head label { font-size: var(--fs-small); color: var(--muted); display: flex; gap: 6px; align-items: center; min-height: 28px; cursor: pointer; }
-.scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.scroll { flex: 1; min-height: 0; overflow-y: auto; }
 
 /* the transcript: the two voices, your lines one tone step apart */
 .transcript { padding: 8px 8px 16px; }
@@ -983,7 +983,7 @@ table.data th { color: var(--muted); font-weight: 400; }
 
 /* -------------------------------------------------------------- setup wizard */
 .setup {
-  position: fixed; inset: 0; z-index: 10; overflow-y: auto; overscroll-behavior: contain; background: var(--ground);
+  position: fixed; inset: 0; z-index: 10; overflow-y: auto; background: var(--ground);
   /* the step and its buttons as one column, centred in the window while it is short */
   display: grid; grid-template-columns: 280px minmax(0, 1fr); grid-template-rows: 1fr auto auto 1fr;
 }
@@ -1068,7 +1068,7 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
 .viewer { width: min(900px, calc(100vw - 32px)); max-height: calc(100vh - 48px); }
 .viewer-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
 .viewer-head span { font: 13px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
-.viewer pre { margin: 0; padding: 16px; max-height: calc(100vh - 120px); overflow: auto; overscroll-behavior: contain; font: 13px/20px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.viewer pre { margin: 0; padding: 16px; max-height: calc(100vh - 120px); overflow: auto; font: 13px/20px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .boot { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); }
 .boot.failed { color: var(--negative); padding: 24px; text-align: center; }
 
@@ -1129,7 +1129,7 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
   .menu-btn .icon { width: 18px; height: 18px; }
   html { scroll-padding-top: 68px; }  /* clear of the bar at the top */
   .sidebar-sheet {
-    display: none; position: fixed; inset: 53px 0 0 0; z-index: 19; overflow-y: auto; overscroll-behavior: contain;
+    display: none; position: fixed; inset: 53px 0 0 0; z-index: 19; overflow-y: auto;
     padding: 16px; background: var(--ground);
   }
   body.menu-open .sidebar-sheet { display: flex; }
