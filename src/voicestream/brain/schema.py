@@ -12,7 +12,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ..models import ItemKind, ItemStatus
+from ..models import Classification, ClientContact, ItemKind, ItemStatus
+from ..models import _name_key as name_key
 from .tracker import ExtractedItem, ExtractionResult, ItemUpdate
 
 
@@ -61,6 +62,26 @@ class WireSpeaker(BaseModel):
     name: str = Field(description="That person's name as said in the meeting.")
 
 
+class WireContact(BaseModel):
+    name: str = Field(description="Their name as said in the meeting.")
+    email: str = Field(description="Their e-mail address only if it was said or shown in full; else ''.")
+    role: str = Field(description="Their job or role at the organization if said; else ''.")
+
+
+class WireClassification(BaseModel):
+    kind: Literal["client", "prospect", "partner", "internal", "other"]
+    confidence: float = Field(description="0-1: how clearly the transcript shows this kind.")
+    company: str = Field(description="The client's or prospect's organization as named in the meeting; '' if not named or not a client/prospect meeting.")
+    contacts: list[WireContact] = Field(description="People from that organization who took part; [] if none or not a client/prospect meeting.")
+    step: Literal["none", "first_call", "discovery", "proposal", "won", "lost"]
+    offer: str = Field(description="The offer discussed, written exactly as one of the user's offers when one fits; '' if none.")
+    budget: str = Field(description="Budget or price discussed, as said; '' if none.")
+    objection: str = Field(description="The prospect's main doubt or objection, in their words; '' if none.")
+    lost_reason: str = Field(description="Why they said no, only when step is 'lost'; else ''.")
+    next_step: str = Field(description="The agreed next step with its date; '' if none.")
+    reason: str = Field(description="One short sentence saying why this kind, in the notes' language.")
+
+
 class WireSummary(BaseModel):
     title: str = Field(description="Short descriptive meeting title.")
     tldr: str = Field(description="2-3 sentence summary.")
@@ -84,6 +105,7 @@ class WireSummary(BaseModel):
         description="Body of that email in Markdown, written in the meeting's language as the user (first person): "
         "thanks, 2-4 key points/decisions, each person's next steps with dates, a sign-off with the user's name; '' if no subject."
     )
+    classification: WireClassification = Field(description="What kind of meeting this was, for the user's CRM.")
 
 
 def _opt(s: str) -> str | None:
@@ -122,6 +144,39 @@ def wire_update_to_update(w: WireUpdate) -> ItemUpdate:
         delegate=None if w.delegate == "unchanged" else (w.delegate == "yes"),
         agent_prompt=_opt(w.agent_prompt),
         segment_refs=list(w.segment_refs),
+    )
+
+
+def wire_to_classification(w: WireClassification, offers: list[str]) -> Classification:
+    """Claude's answer, held to its rules: only a client or prospect meeting has a company and deal facts,
+    a reason for a loss only when lost, and an offer written as in ``brain.offers`` when it is one of them."""
+    business = w.kind in ("client", "prospect")
+    step = w.step if business else "none"
+
+    def clean(s: str, limit: int = 300) -> str:
+        return " ".join((s or "").split())[:limit] if business else ""
+
+    offer = clean(w.offer, 120)
+    for known in offers:  # "identite" → "Identité", as your CRM's field spells it
+        if offer and name_key(known) == name_key(offer):
+            offer = known
+    contacts = [
+        ClientContact(name=" ".join(c.name.split())[:120], email=c.email.strip()[:160], role=" ".join(c.role.split())[:120])
+        for c in (w.contacts if business else [])
+        if c.name.strip()
+    ]
+    return Classification(
+        kind=w.kind,
+        confidence=min(1.0, max(0.0, w.confidence)),
+        company=clean(w.company, 160),
+        contacts=contacts,
+        step=step,
+        offer=offer,
+        budget=clean(w.budget),
+        objection=clean(w.objection),
+        lost_reason=clean(w.lost_reason) if step == "lost" else "",
+        next_step=clean(w.next_step),
+        reason=" ".join((w.reason or "").split())[:300],
     )
 
 

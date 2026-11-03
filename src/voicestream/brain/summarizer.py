@@ -9,12 +9,13 @@ from datetime import date, datetime
 
 from .. import known_people
 from ..config import Config
-from ..models import FollowUpEmail, Item, ItemKind, ItemStatus, Meeting, fmt_ts
+from ..models import Classification, FollowUpEmail, Item, ItemKind, ItemStatus, Meeting, fmt_ts
+from ..models import _name_key as name_key
 from ..transcribe.echo import words
 from .llm import LLM, LLMError, text_block
 from .people import finalize, name_voice, other_side, speaker_label, voice_labels
-from .prompts import SUMMARY_SYSTEM, meeting_context, render_items, render_screen, render_segment
-from .schema import WireSummary, wire_new_to_item, wire_update_to_update
+from .prompts import SUMMARY_SYSTEM, business_context, meeting_context, render_items, render_screen, render_segment
+from .schema import WireSummary, wire_new_to_item, wire_to_classification, wire_update_to_update
 from .tracker import ExtractionResult, ItemTracker
 
 log = logging.getLogger(__name__)
@@ -59,6 +60,7 @@ async def summarize(
                 text_block(
                     meeting_context(meeting, cfg.user_name, today, cfg.brain.attendees, cfg.brain.language)
                     + named
+                    + (f"\n{business}" if (business := business_context(cfg.brain.business, cfg.brain.offers)) else "")
                     + f"\n\nItems captured live:\n{render_items([i for i in meeting.items.values() if not i.dismissed])}"
                 ),
             ]
@@ -100,11 +102,30 @@ async def summarize(
                 meeting.followup_email = FollowUpEmail(
                     subject=wire.followup_subject.strip()[:200], body_markdown=wire.followup_body.strip()
                 )
+            meeting.classification = keep_yours(meeting.classification,
+                                                wire_to_classification(wire.classification, cfg.brain.offers))
         except LLMError as exc:
             log.warning("summary failed (%s); writing basic notes", exc)
     if not meeting.language:  # no model summary (offline, over budget, failed): still French notes for a French meeting
         meeting.language = detect_language(" ".join(s.text for s in meeting.segments))
     return rerender(meeting, cfg.user_name)
+
+
+def keep_yours(previous: Classification | None, new: Classification) -> Classification:
+    """A summary written again keeps the kind and company you set in the app (and your contacts when it
+    found none); the deal facts are the new reading's."""
+    if previous is None or not previous.by_you:
+        return new
+    contacts = new.contacts if new.contacts else previous.contacts
+    if previous.company and new.company and name_key(new.company) != name_key(previous.company):
+        contacts = previous.contacts  # the people Claude found work somewhere else than where you said
+    business = previous.kind in ("client", "prospect")
+    return new.model_copy(update={
+        "kind": previous.kind, "company": previous.company, "confidence": 1.0, "by_you": True,
+        "contacts": contacts if business else [],
+        **({} if business else {"step": "none", "offer": "", "budget": "", "objection": "", "lost_reason": "",
+                                 "next_step": ""}),
+    })
 
 
 def is_short_clip(cfg: Config, meeting: Meeting) -> bool:
@@ -200,6 +221,8 @@ def render_notes(meeting: Meeting, tldr: str, body: str, user_name: str) -> str:
     if meeting.participants:
         meta += f" · {t['with']} {', '.join(meeting.participants)}"
     lines += [meta, ""]
+    if (line := classification_line(meeting)) is not None:
+        lines += [line, ""]
     if tldr:
         lines += [f"> {tldr}", ""]
 
@@ -233,6 +256,30 @@ def render_notes(meeting: Meeting, tldr: str, body: str, user_name: str) -> str:
                 lines += [f"- `{f}`" for f in it.agent.result_files]
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+KIND_LABELS = {
+    "en": {"client": "Client meeting", "prospect": "Prospect", "partner": "Partner", "internal": "Internal",
+           "other": "Other"},
+    "fr": {"client": "Rendez-vous client", "prospect": "Prospect", "partner": "Partenaire", "internal": "Interne",
+           "other": "Autre"},
+}  # fmt: skip
+STEP_LABELS = {
+    "en": {"first_call": "first call", "discovery": "discovery", "proposal": "proposal", "won": "won", "lost": "lost"},
+    "fr": {"first_call": "premier appel", "discovery": "découverte", "proposal": "proposition", "won": "gagné",
+           "lost": "perdu"},
+}  # fmt: skip
+
+
+def classification_line(meeting: Meeting) -> str | None:
+    """``**Prospect** · GAIA · discovery · Identité`` under the notes' title: only for a client or prospect
+    meeting (the others aren't worth a line in every tool)."""
+    c = meeting.classification
+    if c is None or not c.is_business:
+        return None
+    lang = _lang(meeting)
+    bits = [f"**{KIND_LABELS[lang][c.kind]}**", c.company, STEP_LABELS[lang].get(c.step, ""), c.offer]
+    return " · ".join(b for b in bits if b)
 
 
 def _action_line(it: Item, t: dict[str, str] = _LABELS["en"]) -> str:

@@ -16,13 +16,13 @@ import numpy as np
 import pytest
 from pydantic import BaseModel
 
-from helpers import bursts, noise, seg, write_wav
+from helpers import OTHER_MEETING, bursts, noise, seg, write_wav
 from voicestream import models
 from voicestream.agents.runner import Engine, EngineResult
 from voicestream.audio.base import AudioSource, Clock, float_to_int16
 from voicestream.audio.file import WavFileSource
 from voicestream.brain.llm import ScriptedLLM
-from voicestream.brain.schema import WireExtraction, WireNewItem, WireSummary, WireUpdate
+from voicestream.brain.schema import WireClassification, WireExtraction, WireNewItem, WireSummary, WireUpdate
 from voicestream.config import Config
 from voicestream.costs import CostMeter
 from voicestream.events import EventBus
@@ -39,6 +39,8 @@ LIFECYCLE = {"assistant.started", "meeting.started", "segment", "meeting.ending"
 
 
 def _blank(annotation: Any) -> Any:
+    if annotation is WireClassification:
+        return OTHER_MEETING.model_dump()
     origin = typing.get_origin(annotation)
     if origin is list:
         return []

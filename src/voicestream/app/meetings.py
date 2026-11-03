@@ -39,10 +39,11 @@ from ..brain.tracker import ItemTracker
 from ..config import Config
 from ..dispatch import Dispatcher, pending_review
 from ..events import EventBus
-from ..models import Event, ItemKind, Meeting
+from ..models import Classification, Event, ItemKind, Meeting
 from ..storage import (
     RECORDING_LOCK,
     atomic_write,
+    fold,
     is_recording,
     list_sessions,
     load_meeting,
@@ -131,13 +132,19 @@ def summary(meeting: Meeting, folder: Path, user_name: str, *, live: bool = Fals
         "has_notes": (folder / "notes.md").is_file() or bool(meeting.summary_markdown),
         "short_clip": meeting.short_clip,
         "interrupted": meeting.interrupted,
+        "classification": (
+            meeting.classification.model_dump(mode="json", include={"kind", "company", "step", "confidence", "by_you"})
+            if meeting.classification else None
+        ),
     }
 
 
 def _search_text(meeting: Meeting, folder: Path) -> str:
     parts = [folder.name, meeting.title or "", meeting.tldr or "", *meeting.participants]
+    if (c := meeting.classification) is not None and c.is_business:
+        parts += [c.kind, c.company]  # "prospect", "GAIA"
     parts += [i.title for i in meeting.items.values() if not i.dismissed]
-    return " ".join(parts).casefold()
+    return fold(" ".join(parts)).casefold()  # "gaia" finds GAÏA, "reunion" a "Réunion"
 
 
 async def push_meeting(
@@ -378,7 +385,7 @@ class Meetings:
                 if hit[0]["in_progress"] and self._recover(d.name, d) is not None:
                     hit = self._summary(d) or hit  # cut off, and ended just now
                 rows.append(hit)
-        needle = q.strip().casefold()
+        needle = fold(q.strip()).casefold()
         if needle:
             rows = [r for r in rows if needle in r[1]]
         rows.sort(key=lambda r: r[0]["started_at"], reverse=True)
@@ -421,6 +428,7 @@ class Meetings:
             "folder": folder,
             "in_memory": s is not None,
             "review": self._review_state(meeting, s),
+            "crm": self._crm_state(meeting, s),
         }
 
     def _review_state(self, meeting: Meeting, s: MeetingSession | None) -> dict[str, Any]:
@@ -496,6 +504,38 @@ class Meetings:
         self._write_transcript(d, meeting)
         self.host.bus.publish("meeting.people", **people_event(meeting), folder=d.name)
         return {**people_event(meeting), "folder": d.name}
+
+    def classify(self, folder: str, kind: str, company: str) -> dict[str, Any]:
+        """What the meeting was, as you say: a client or prospect meeting (with its company), or not. Its notes
+        say it again; your CRM gets it with the next push (a meeting being recorded: with its wrap-up, which
+        keeps what you said)."""
+        s = self.live_session(folder)
+        if s is not None:
+            meeting, where = s.meeting, s.store.dir.name
+        else:
+            meeting, d = self._editable(folder)
+            where = d.name
+        meeting.classification = (meeting.classification or Classification()).set_by_you(kind, company)
+        if s is not None:
+            s.save_soon()
+        else:
+            self._write(d, meeting)
+        result = {"classification": meeting.classification.model_dump(mode="json"), "folder": where,
+                  "crm": self._crm_state(meeting, s)}
+        self.host.bus.publish("meeting.classified", meeting_id=meeting.id, **result)
+        return result
+
+    def _crm_state(self, meeting: Meeting, s: MeetingSession | None) -> list[dict[str, Any]]:
+        """Each tool that takes only some meetings (a CRM): whether this one goes there, and why not."""
+        from ..sinks.base import Sink as BaseSink
+
+        # sinks built afresh need no closing: their HTTP clients are only made when they send something
+        sinks = s.dispatcher.sinks if s is not None else self._sinks()[0]
+        return [
+            {"sink": sink.name, "files": sink.accepts_meeting(meeting), "reason": sink.skip_reason(meeting),
+             "sent": sink.name in meeting.notes_ref}
+            for sink in sinks if type(sink).accepts_meeting is not BaseSink.accepts_meeting
+        ]
 
     def name_voice(self, folder: str, voice: int, name: str) -> dict[str, Any]:
         """A voice heard on the meeting audio, named by you ("Speaker 2" is Julie; ``""``: no name again). The name

@@ -68,6 +68,15 @@ class Sink(ABC):
             return False
         return True
 
+    def accepts_meeting(self, meeting: Meeting) -> bool:
+        """Whether this meeting's items and notes go here at all (a CRM takes client meetings only). Items
+        already sent stay in sync either way."""
+        return True
+
+    def skip_reason(self, meeting: Meeting) -> str:
+        """Why :meth:`accepts_meeting` said no, for the dashboard's push result."""
+        return "not for this tool"
+
     @abstractmethod
     async def push_item(self, item: Item, meeting: Meeting) -> str:
         """Create the item externally; return a URL or id."""
@@ -103,6 +112,7 @@ REGISTRY: dict[str, str] = {
     "command": "voicestream.sinks.command:CommandSink",
     "hubspot": "voicestream.sinks.hubspot:HubSpotSink",
     "promethee": "voicestream.sinks.promethee:PrometheeSink",
+    "twenty": "voicestream.sinks.twenty:TwentySink",
 }
 
 

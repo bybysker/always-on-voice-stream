@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from helpers import WEDNESDAY, seg
+from helpers import OTHER_MEETING, WEDNESDAY, seg
 from test_app_meetings import WED
 
 from voicestream import voices
@@ -126,7 +126,7 @@ async def test_claude_names_the_voices_it_can_tell(cfg: Config) -> None:
     assert "[#1 00:03 Speaker 1] Sure, sharing now" in full_transcript(m)
     cfg.brain.provider = "anthropic"
     reply = WireSummary(title="Sync", tldr="", notes_markdown="", updates=[], missing_items=[],
-                        participants=["Julie", "Paul"], language="en", followup_subject="", followup_body="",
+                        participants=["Julie", "Paul"], language="en", followup_subject="", followup_body="", classification=OTHER_MEETING,
                         speakers=[WireSpeaker(speaker="Speaker 1", name="Julie"), WireSpeaker(speaker="speaker 2", name="Paul"),
                                   WireSpeaker(speaker="Speaker 3", name="Samuel"), WireSpeaker(speaker="Bob", name="Bob")])
     await summarize(cfg, m, ItemTracker(m, None, "Alex", today=WEDNESDAY), ScriptedLLM([reply]))

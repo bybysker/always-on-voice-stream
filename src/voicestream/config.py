@@ -231,6 +231,13 @@ class BrainConfig(_Section):
     attendees: list[str] = Field(default_factory=list)
     vocabulary: list[str] = Field(default_factory=list)
     """Names/jargon that help both the transcriber and the extractor."""
+    business: str = ""
+    """What you sell and to whom, in a sentence or two. The wrap-up classifies each meeting (client,
+    prospect, partner, internal, other): with this, only this business's clients and prospects count as
+    such, so a meeting for another of your activities isn't filed in this business's CRM."""
+    offers: list[str] = Field(default_factory=list)
+    """The offers you sell (e.g. ``["Visibilité", "Formation", "Identité"]``): a client meeting names
+    the one discussed, as written here, so it can fill a field of your CRM."""
 
 
 class ScreenConfig(_Section):

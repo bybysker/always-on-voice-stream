@@ -64,6 +64,9 @@ wake_phrases = ["hey claude", "okay claude", "ok claude", "hey assistant", "dis 
 commands_from = ["mic"]    # only YOU can give the assistant voice commands
 # attendees = ["Ashley", "Sam", "Sarah"]   # people you meet often; others are remembered by themselves (people.json)
 # vocabulary = ["Acme", "Monday.com", "OKR"]   # names/jargon: helps transcription and extraction
+# The wrap-up classifies each meeting (client, prospect, partner, internal, other) for your CRM:
+# business = "Video creation for small businesses in France"   # only this business's clients count
+# offers = ["Visibilité", "Formation", "Identité"]              # a client meeting names the one discussed
 
 [screen]
 enabled = false            # describe what's on screen (shared slides) every interval_s when it changes
@@ -122,6 +125,12 @@ enabled = true
 # [sinks.hubspot]          # meeting logged on matched contacts/companies + your tasks (HUBSPOT_TOKEN)
 # enabled = true
 # owner_email = "you@example.com"
+
+# [sinks.twenty]           # client & prospect meetings file themselves in Twenty CRM (TWENTY_API_KEY):
+# enabled = true           # company, contacts, deal (moved forward only), notes and your tasks
+# base_url = "https://crm.example.com"
+# owner_email = "you@example.com"
+# fields = { formule = "offer", doutePrincipal = "objection", raisonDeLaPerte = "lost_reason" }
 
 # [sinks.promethee]        # your to-do list in Promethee via its MCP server (PROMETHEE_TOKEN),
 # enabled = true           # sent once you validate it at the end of the meeting

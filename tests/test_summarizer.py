@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from helpers import WEDNESDAY, seg
+from helpers import OTHER_MEETING, WEDNESDAY, seg
 from voicestream.brain import summarizer as summarizer_mod
 from voicestream.brain.llm import LLMError, ScriptedLLM
 from voicestream.brain.prompts import SUMMARY_SYSTEM
-from voicestream.brain.schema import WireNewItem, WireSummary, WireUpdate
-from voicestream.brain.summarizer import full_transcript, rerender, summarize
+from voicestream.brain.schema import WireClassification, WireContact, WireNewItem, WireSummary, WireUpdate
+from voicestream.brain.summarizer import full_transcript, keep_yours, rerender, summarize
 from voicestream.brain.tracker import ExtractedItem, ExtractionResult, ItemTracker
 from voicestream.config import Config
-from voicestream.models import AgentStatus, ItemStatus, Meeting
+from voicestream.models import AgentStatus, Classification, ClientContact, ItemStatus, Meeting
 
 
 def _meeting() -> tuple[Meeting, ItemTracker]:
@@ -48,7 +48,7 @@ def _missing(title: str, **kw: object) -> WireNewItem:
 def _summary(**kw: object) -> WireSummary:
     base: dict[str, object] = dict(title="Q4 planning", tldr="We planned Q4.", notes_markdown="## Summary\n- Planned Q4",
                                    updates=[], missing_items=[], participants=[], speakers=[], language="en",
-                                   followup_subject="", followup_body="")
+                                   followup_subject="", followup_body="", classification=OTHER_MEETING)
     return WireSummary(**{**base, **kw})
 
 
@@ -201,3 +201,69 @@ def test_french_notes_get_french_section_headings() -> None:
 
 def test_summary_prompt_asks_for_headings_in_the_notes_language() -> None:
     assert "Points clés" in SUMMARY_SYSTEM
+
+
+def _classified(**kw: object) -> WireClassification:
+    return OTHER_MEETING.model_copy(update=kw)
+
+
+async def test_the_wrap_up_classifies_a_prospect_meeting(cfg: Config) -> None:
+    cfg.brain.business = "Social Creative Agency: video creation for French SMBs"
+    cfg.brain.offers = ["Visibilité", "Formation", "Identité"]
+    m, tracker = _meeting()
+    llm = ScriptedLLM([_summary(language="fr", classification=_classified(
+        kind="prospect", confidence=0.92, company=" GAIA ", step="discovery", offer="identite", budget="5 000 €",
+        objection="Et si aucune piste ne me plaît ?", lost_reason="not lost", next_step="Proposition le 6/11",
+        contacts=[WireContact(name="Julie  Martin", email="julie@gaia.fr", role="directrice"), WireContact(name=" ", email="", role="")],
+        reason="Julie découvre l'offre Identité."))])
+    notes = await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
+
+    c = m.classification
+    assert c is not None and (c.kind, c.confidence, c.company, c.step) == ("prospect", 0.92, "GAIA", "discovery")
+    assert c.offer == "Identité"  # as brain.offers spells it, for the CRM's select
+    assert c.lost_reason == ""  # only when lost
+    assert [(x.name, x.email, x.role) for x in c.contacts] == [("Julie Martin", "julie@gaia.fr", "directrice")]
+    assert not c.by_you
+    (call,) = llm.calls
+    assert "The user's business: Social Creative Agency: video creation for French SMBs" in call["content"][1]["text"]
+    assert "The user's offers: Visibilité, Formation, Identité" in call["content"][1]["text"]
+    lines = notes.splitlines()
+    assert lines[4] == "**Prospect** · GAIA · découverte · Identité"  # under the date line
+    assert "classification" in SUMMARY_SYSTEM and '"prospect"' in SUMMARY_SYSTEM
+
+
+async def test_other_kinds_carry_no_company_and_no_notes_line(cfg: Config) -> None:
+    m, tracker = _meeting()
+    llm = ScriptedLLM([_summary(classification=_classified(kind="partner", confidence=0.8, company="Studio Lumen",
+                                                           step="proposal", offer="x", contacts=[WireContact(name="Léo", email="", role="")]))])
+    notes = await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
+    c = m.classification
+    assert c is not None and (c.kind, c.company, c.step, c.offer, c.contacts) == ("partner", "", "none", "", [])
+    assert "**Partner**" not in notes and "Studio Lumen" not in notes
+
+
+async def test_a_rewritten_summary_keeps_the_kind_and_company_you_set(cfg: Config) -> None:
+    m, tracker = _meeting()
+    m.classification = Classification(kind="client", confidence=1.0, company="Gaïa", by_you=True,
+                                      contacts=[ClientContact(name="Julie Martin")])
+    llm = ScriptedLLM([_summary(classification=_classified(kind="internal", confidence=0.9, reason="Team talk."))])
+    await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
+    c = m.classification
+    assert c is not None and (c.kind, c.company, c.by_you, c.confidence) == ("client", "Gaïa", True, 1.0)
+    assert [x.name for x in c.contacts] == ["Julie Martin"]
+
+    m.classification = Classification(kind="internal", confidence=1.0, by_you=True)
+    llm = ScriptedLLM([_summary(classification=_classified(kind="prospect", confidence=0.9, company="Acme", step="proposal",
+                                                           contacts=[WireContact(name="Bob", email="", role="")]))])
+    await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
+    c = m.classification
+    assert c is not None and (c.kind, c.company, c.step, c.contacts) == ("internal", "", "none", [])
+
+
+def test_keep_yours_keeps_your_contacts_when_claude_names_another_company() -> None:
+    yours = Classification(kind="prospect", company="Gaïa", by_you=True, contacts=[ClientContact(name="Julie")])
+    new = Classification(kind="prospect", company="Acme", confidence=0.8, contacts=[ClientContact(name="Bob")], step="proposal")
+    kept = keep_yours(yours, new)
+    assert (kept.company, [c.name for c in kept.contacts], kept.step) == ("Gaïa", ["Julie"], "proposal")
+    assert keep_yours(None, new) is new
+    assert keep_yours(new, yours) is yours  # Claude's own earlier reading is replaced

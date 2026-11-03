@@ -785,6 +785,115 @@ def test_meetings_list_detail_and_editing(make_app: Callable[..., UIApp], open_p
     expect(pg.locator("#notes")).to_contain_text("Send the final budget")
 
 
+TWENTY = '\n[sinks.twenty]\nenabled = true\nbase_url = "https://crm.example.com"\n'
+
+
+def _classify_on_disk(app: UIApp, title: str, **classification: Any) -> None:
+    """What Claude's wrap-up would have written: the meeting's classification and its notes' line."""
+    from voicestream.brain.summarizer import rerender
+    from voicestream.models import Classification
+    from voicestream.storage import atomic_write, load_meeting
+
+    folder = app.root / "data" / "sessions" / app.folder_of(title)
+    meeting, _ = load_meeting(folder)
+    meeting.classification = Classification(**classification)
+    atomic_write(folder / "meeting.json", meeting.model_dump_json(indent=1))
+    atomic_write(folder / "notes.md", rerender(meeting, "Camille"))
+
+
+def test_a_client_meeting_is_shown_corrected_and_waits_for_the_crm(make_app: Callable[..., UIApp],
+                                                                  open_page: Callable[..., Page]) -> None:
+    from playwright.sync_api import expect
+
+    from voicestream.storage import load_meeting
+
+    app = make_app(setup_done=True, meetings=True, config_extra=TWENTY, sinks=("twenty",))
+    _classify_on_disk(app, "Hiring plan", kind="prospect", confidence=0.5, company="GAIA", step="discovery",
+                      reason="Julie asks about the Identité offer.")
+    p = open_page(app)
+    pg = p.page
+    pg.click("nav a[href='#/meetings']")
+    row = pg.locator(".mrow", has_text="Hiring plan")
+    expect(row.locator(".class-chip")).to_have_text("Prospect · GAIA")
+    expect(pg.locator(".mrow .class-chip")).to_have_count(1)  # the others are no client's
+    pg.fill("#meeting-search", "gaia")
+    expect(pg.locator(".mrow")).to_have_count(1)
+    pg.fill("#meeting-search", "")
+
+    row.click()
+    expect(pg.locator("#class-text")).to_have_text("Prospect · GAIA · discovery")
+    expect(pg.locator("#class-text")).to_have_class(re.compile(r"\bwarn\b"))
+    expect(pg.locator("#class-text")).to_have_attribute("title", "Julie asks about the Identité offer.")
+    expect(pg.locator("#class-line")).to_contain_text("Claude isn’t sure: check it, then “Send to my tools” sends it to Twenty CRM")
+    expect(pg.locator("#notes")).not_to_contain_text("Prospect · GAIA")  # the page says it above the notes
+    p.shot("meeting-classification")
+
+    # you say what it was: a client, with the company as your CRM writes it
+    pg.click("#class-change")
+    expect(pg.locator("#class-kind")).to_be_focused()
+    pg.select_option("#class-kind", "client")
+    pg.fill("#class-company", "GAÏA SAS")
+    pg.click("#class-save")
+    expect(pg.locator(".toast.ok", has_text="“Send to my tools” now sends it to Twenty CRM.")).to_be_visible()
+    expect(pg.locator("#class-text")).to_have_text("Client meeting · GAÏA SAS · discoveryset by you")
+    expect(pg.locator("#class-line")).to_contain_text("Not in Twenty CRM yet: “Send to my tools” sends it")
+    expect(pg.locator("#class-change")).to_be_focused()
+    c = load_meeting(app.root / "data" / "sessions" / app.folder_of("Hiring plan"))[0].classification
+    assert c is not None and (c.kind, c.company, c.by_you, c.confidence, c.step) == ("client", "GAÏA SAS", True, 1.0, "discovery")
+
+    # or that it was no client meeting at all: no company to give, and nothing waits for the CRM
+    pg.click("#class-change")
+    pg.select_option("#class-kind", "internal")
+    expect(pg.locator("#class-company")).to_be_hidden()
+    pg.keyboard.press("Escape")
+    expect(pg.locator("#class-text")).to_contain_text("Client meeting")  # Escape kept what was there
+    pg.click("#class-change")
+    pg.select_option("#class-kind", "internal")
+    pg.click("#class-save")
+    expect(pg.locator("#class-text")).to_have_text("Internalset by you")
+    expect(pg.locator("#class-line")).not_to_contain_text("Twenty")
+    c = load_meeting(app.root / "data" / "sessions" / app.folder_of("Hiring plan"))[0].classification
+    assert c is not None and (c.kind, c.company, c.step) == ("internal", "", "none")
+    pg.click(".detail-head a.back")
+    expect(pg.locator(".mrow .class-chip")).to_have_count(0)
+
+    # a meeting from before classifications can be classified by hand
+    pg.locator(".mrow", has_text="Budget review").click()
+    expect(pg.locator("#class-text")).to_have_text("not classified yet")
+    expect(pg.locator("#class-change")).to_have_text("Classify")
+
+    # Settings → Your tools: the Twenty card
+    pg.goto(app.url.split("#")[0] + "#/settings/tools")
+    card = pg.locator("[data-tool=twenty]")
+    expect(card).to_contain_text("Client meetings file themselves")
+    expect(card).to_contain_text("Only client and prospect meetings go to Twenty")
+    for label in ("Your Twenty’s address", "Twenty API key", "Your Twenty email", "What you sell", "Your offers",
+                  "Create what Twenty doesn’t have", "Move deals forward"):
+        expect(card.get_by_text(label, exact=True)).to_be_visible()
+    expect(card.locator("[data-path='sinks.twenty.base_url'] input")).to_have_value("https://crm.example.com")
+    card.locator("[data-path='brain.offers'] input").fill("Visibilité, Formation,  Identité ,")
+    pg.get_by_role("button", name="Save").last.click()
+    _wait(lambda: app.host.cfg.brain.offers == ["Visibilité", "Formation", "Identité"])
+
+
+def test_a_client_meeting_in_french(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meetings=True, config_extra=TWENTY, sinks=("twenty",))
+    _classify_on_disk(app, "Hiring plan", kind="prospect", confidence=0.9, company="GAIA", step="proposal")
+    p = open_page(app, locale="fr-FR")
+    pg = p.page
+    pg.click("nav a[href='#/meetings']")
+    pg.locator(".mrow", has_text="Hiring plan").click()
+    expect(pg.locator("#class-h")).to_have_text("Type")
+    expect(pg.locator("#class-text")).to_have_text("Prospect · GAIA · proposition")
+    expect(pg.locator("#class-line")).to_contain_text("Pas encore dans Twenty CRM : « Envoyer vers mes outils » la transmet")
+    expect(pg.locator("#class-change")).to_have_text("Modifier")
+    pg.click("#class-change")
+    expect(pg.locator("#class-kind option")).to_have_text(["Rendez-vous client", "Prospect", "Partenaire", "Interne", "Autre"])
+    p.shot("meeting-classification-fr")
+
+
 def test_settings_save_validation_and_model_download(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
     from playwright.sync_api import expect
 

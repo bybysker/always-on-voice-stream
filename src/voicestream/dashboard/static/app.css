@@ -444,6 +444,17 @@ main { flex: 1; outline: none; }
 .people-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 8px; min-width: 0; }
 .live-head > .people-line { flex: 1 1 100%; margin-top: -4px; }
 .people-label { color: var(--muted); font-size: var(--fs-small); }
+/* who the meeting was with, for your CRM: "Prospect · GAIA · discovery", and where it went */
+.class-line { margin-top: 2px; }
+.class-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.class-chip.client, .class-chip.prospect { background: var(--pill-positive-bg); color: var(--pill-positive-ink); }
+.class-chip.warn { background: var(--pill-warning-bg); color: var(--pill-warning-ink); }
+.class-chip .probably { color: inherit; opacity: .75; font-style: italic; font-weight: 400; }
+.class-crm { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: var(--fs-small); }
+.class-crm.ok { color: var(--positive); }
+.class-crm.warn { color: var(--warning); }
+.class-crm .icon { width: 14px; height: 14px; }
+form.class-form select { max-width: 100%; }
 .person-chips { display: contents; list-style: none; }
 .person-chip {
   display: inline-flex; align-items: center; gap: 4px; min-height: 26px; max-width: 100%; padding: 0 2px 0 10px;

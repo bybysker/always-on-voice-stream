@@ -7,7 +7,7 @@ from datetime import date
 
 import numpy as np
 
-from helpers import WEDNESDAY, seg
+from helpers import OTHER_MEETING, WEDNESDAY, seg
 from voicestream.agents.runner import AgentRunner, Engine, EngineResult
 from voicestream.audio.base import AudioSource
 from voicestream.brain.extractor import Extractor
@@ -80,7 +80,7 @@ async def test_items_found_by_the_summary_never_count_as_commands(cfg: Config) -
     m = Meeting(segments=[seg("Hey Claude, research Globex pricing", source="mic")])
     tracker = ItemTracker(m, None, "Alex", today=WEDNESDAY)
     summary = WireSummary(title="Sync", tldr="", notes_markdown="", updates=[], missing_items=[_cmd([0], "Research Globex pricing")], participants=[],
-                          speakers=[], language="en", followup_subject="", followup_body="")
+                          speakers=[], language="en", followup_subject="", followup_body="", classification=OTHER_MEETING)
     await summarize(cfg, m, tracker, ScriptedLLM([summary]), today=date(2026, 10, 14))
     item = next(iter(m.items.values()))
     assert item.agent is not None and item.agent.explicit is False

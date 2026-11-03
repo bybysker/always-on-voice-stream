@@ -139,6 +139,14 @@ class PeopleEdit(_Body):
     remove: list[PersonName] = Field(default_factory=list, max_length=20)
 
 
+class ClassificationEdit(_Body):
+    """``POST /api/meetings/{folder}/classification``: what the meeting was, as you say (its company for a
+    client or prospect meeting)."""
+
+    kind: Literal["client", "prospect", "partner", "internal", "other"]
+    company: Annotated[str, Field(max_length=160, pattern=r"^[^\x00-\x1f\x7f]*$")] = ""
+
+
 class VoiceName(_Body):
     """``POST /api/meetings/{folder}/voices``: the name of a voice heard on the meeting audio (``""``: none)."""
 
@@ -229,6 +237,7 @@ class AppApi:
             Route(f"{m}/summarize", self.summarize_meeting, methods=["POST"]),
             Route(f"{m}/items", self.add_item, methods=["POST"]),
             Route(f"{m}/people", self.edit_people, methods=["POST"]),
+            Route(f"{m}/classification", self.classify, methods=["POST"]),
             Route(f"{m}/voices", self.name_voice, methods=["POST"]),
             Route(item, self.edit_item, methods=["PATCH"]),
             Route(f"{item}/dismiss", self.dismiss_item, methods=["POST"]),
@@ -446,6 +455,11 @@ class AppApi:
         if not body.add and not body.remove:
             raise HTTPException(400, "nothing to change: give names to add or remove")
         return JSONResponse(self.host.meetings.edit_people(request.path_params["folder"], body.add, body.remove))
+
+    async def classify(self, request: Request) -> JSONResponse:
+        """A meeting's kind corrected (client, prospect…): the meeting page's "Client meeting · GAIA" line."""
+        body = await _parse(request, ClassificationEdit)
+        return JSONResponse(self.host.meetings.classify(request.path_params["folder"], body.kind, body.company))
 
     async def name_voice(self, request: Request) -> JSONResponse:
         """A voice on the meeting audio named: the transcript's "Speaker 2" chip, on Live and on a meeting page."""

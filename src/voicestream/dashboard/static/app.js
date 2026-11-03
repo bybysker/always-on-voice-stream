@@ -462,7 +462,7 @@ const S = {
 const EVENT_TYPES = [
   'state', 'app.state', 'app.warning', 'assistant.started', 'assistant.stopped', 'assistant.paused', 'assistant.resumed',
   'meeting.started', 'meeting.updated', 'meeting.ending', 'meeting.ended', 'meeting.notes_updated', 'meeting.saved',
-  'meeting.people', 'meeting.voices',
+  'meeting.people', 'meeting.voices', 'meeting.classified',
   'segment', 'transcript.partial', 'level', 'extraction', 'item.added', 'item.updated', 'agent.updated', 'item.pushed',
   'sink.error', 'notes.pushed', 'oauth.changed', 'cost', 'screen', 'source.error', 'source.stopped', 'agent.budget', 'agent.held',
   'model.download', 'settings.changed', 'app.focus',
@@ -541,6 +541,9 @@ function handle(type, ev) {
       break;
     case 'meeting.voices':
       onDetailVoices(d);
+      break;
+    case 'meeting.classified':
+      onDetailClassified(d);
       break;
     case 'cost':
       return setCost(d);
@@ -2855,6 +2858,8 @@ function notesBody(md, meeting) {
   skipBlank();
   if (i < rows.length && /^#\s/.test(rows[i])) { i++; skipBlank(); }
   if (i < rows.length && /^\*[^*].*\*(\s·.*)?$/.test(rows[i].trim())) { i++; skipBlank(); }
+  // "**Prospect** · GAIA · discovery": the classification line the page shows above the notes too
+  if (isBusiness(meeting.classification) && i < rows.length && /^\*\*[^*]+\*\*(\s·.*)?$/.test(rows[i].trim())) { i++; skipBlank(); }
   if (meeting.tldr && i < rows.length && rows[i].trim() === '> ' + meeting.tldr.trim()) { i++; }
   return rows.slice(i).join('\n');
 }
@@ -2909,6 +2914,7 @@ function meetingChips(m) {
   else if (m.in_progress) chips.push(h('span', { class: 'pill warn' }, t('meetings.in_progress')));
   if (m.interrupted) chips.push(h('span', { class: 'pill warn', title: t('meetings.interrupted_note') }, t('meetings.interrupted')));
   if (m.short_clip) chips.push(h('span', { class: 'pill', title: t('meetings.short_clip_note') }, t('meetings.short_clip')));
+  if (isBusiness(m.classification)) chips.push(classChip(m.classification));
   return chips;
 }
 
@@ -2918,6 +2924,111 @@ function meetingSent(m) {
   return pushed.length
     ? h('span', { class: 'sent-to' }, icon('check'), t('meetings.sent_to', { tools: pushed.map(sinkLabel).join(', ') }))
     : h('span', { class: 'sent-to none' }, t('meetings.fact.not_sent'));
+}
+
+// ------------------------------------------------------------ who a meeting was with (for your CRM)
+
+const MEETING_KINDS = ['client', 'prospect', 'partner', 'internal', 'other'];
+const isBusiness = (c) => !!c && (c.kind === 'client' || c.kind === 'prospect');
+
+/** The Meetings list's chip for a client or prospect meeting: "Prospect · GAIA". */
+function classChip(c) {
+  return h('span', { class: 'pill class-chip ' + c.kind, title: t('class.kind.' + c.kind) },
+    [t('class.kind.' + c.kind), c.company].filter(Boolean).join(' · '));
+}
+
+/** "Client meeting · GAIA · discovery": a classification in a few words. */
+function classText(c) {
+  const bits = [t('class.kind.' + c.kind)];
+  if (isBusiness(c)) {
+    if (c.company) bits.push(c.company);
+    if (c.step && c.step !== 'none') bits.push(t('class.step.' + c.step));
+  }
+  return bits.join(' · ');
+}
+
+/** What each tool that takes only client meetings (a CRM) does with this one, in words. */
+function crmStatus(D) {
+  const m = D.data.meeting, c = m.classification;
+  return (D.data.crm || []).map((x) => {
+    const tool = sinkLabel(x.sink);
+    if (x.sent) return h('span', { class: 'class-crm ok' }, icon('check'), t('class.crm_sent', { tool }));
+    if (!isBusiness(c)) return null;
+    if (x.files) return h('span', { class: 'class-crm' }, m.ended_at ? t('class.crm_push', { tool }) : t('class.crm_end', { tool }));
+    return h('span', { class: 'class-crm warn' }, c.by_you ? t('class.crm_kind', { tool, kind: t('class.kind.' + c.kind) }) : t('class.crm_unsure', { tool }));
+  }).filter(Boolean);
+}
+
+/** Who the meeting was with, for your CRM: Claude's reading (or yours), where it goes, and a way to
+ *  correct it. A meeting not classified yet (recording, or from before) can be classified by hand. */
+function classLine(D, readOnly) {
+  const m = D.data.meeting, c = m.classification;
+  if (!c && !(D.data.crm || []).length) return null;
+  const label = h('span', { class: 'people-label', id: 'class-h' }, t('class.label'));
+  if (D.classEditing && !readOnly) {
+    const kind = h('select', { id: 'class-kind', 'aria-label': t('class.kind_label') },
+      MEETING_KINDS.map((k) => h('option', { value: k, selected: (c ? c.kind : 'client') === k || null }, t('class.kind.' + k))));
+    const company = h('input', { id: 'class-company', class: 'person-in', value: (c && c.company) || '', maxlength: 160,
+      placeholder: t('class.company_ph'), 'aria-label': t('class.company'), autocomplete: 'off', spellcheck: 'false' });
+    const sync = () => { company.hidden = !['client', 'prospect'].includes(kind.value); };
+    kind.addEventListener('change', sync);
+    sync();
+    const form = h('form', { class: 'entry person-add class-form', id: 'class-form', autocomplete: 'off' }, kind, company,
+      h('button', { type: 'submit', class: 'btn small', id: 'class-save' }, t('class.save')),
+      h('button', { type: 'button', class: 'btn ghost small icon-only', id: 'class-cancel', 'aria-label': t('common.cancel'),
+        title: t('common.cancel'), onclick: () => closeClassEditor(D) }, icon('x')));
+    form.addEventListener('submit', (e) => { e.preventDefault(); saveClass(D, kind.value, company.hidden ? '' : company.value.trim(), e.submitter); });
+    form.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); closeClassEditor(D); } });
+    return h('div', { class: 'people-line class-line', id: 'class-line', role: 'group', 'aria-labelledby': 'class-h' }, label, form);
+  }
+  const unsure = c && isBusiness(c) && !c.by_you && (D.data.crm || []).some((x) => !x.files && !x.sent);
+  return h('div', { class: 'people-line class-line', id: 'class-line', role: 'group', 'aria-labelledby': 'class-h' }, label,
+    c ? h('span', { class: 'pill class-chip ' + c.kind + (unsure ? ' warn' : ''), id: 'class-text', title: c.reason || null },
+      classText(c), c.by_you ? h('span', { class: 'probably' }, t('class.by_you')) : null)
+      : h('span', { class: 'muted', id: 'class-text' }, t('class.unset')),
+    ...crmStatus(D),
+    !readOnly && btn(c ? t('class.change') : t('class.set'), { cls: 'ghost small', id: 'class-change', onclick: () => openClassEditor(D) }, 'edit'));
+}
+
+function openClassEditor(D) {
+  D.classEditing = true;
+  D.editing.add('class');
+  drawDetail();
+  const el = $('class-kind');
+  if (el) el.focus();
+}
+
+function closeClassEditor(D, focus = true) {
+  D.classEditing = false;
+  D.editing.delete('class');
+  drawDetail();
+  if (focus && $('class-change')) $('class-change').focus();
+}
+
+async function saveClass(D, kind, company, button) {
+  const res = await act(button, () => api('POST', `/api/meetings/${enc(D.folder)}/classification`, { kind, company }));
+  if (!res || S.detail !== D) return;
+  D.data.meeting.classification = res.classification;
+  D.data.crm = res.crm || [];
+  closeClassEditor(D);
+  const waiting = (res.crm || []).filter((x) => x.files && !x.sent).map((x) => sinkLabel(x.sink));
+  if (waiting.length && D.data.meeting.ended_at) {
+    toast(t('class.saved_push', { tools: waiting.join(', ') }), 'ok', t('class.saved'),
+      { label: t('meetings.push'), run: () => { const b = $('push-meeting'); if (b) pushMeeting(b); } });
+  } else {
+    toast(t('class.saved'), 'ok');
+  }
+  refreshMeetingsSoon();
+}
+
+/** Another window (or the wrap-up) classified the meeting whose page is open. */
+function onDetailClassified(d) {
+  const D = S.detail;
+  refreshMeetingsSoon();
+  if (!D || !D.data || D.data.meeting.id !== d.meeting_id || D.classEditing) return;
+  D.data.meeting.classification = d.classification;
+  D.data.crm = d.crm || [];
+  if (S.route.name === 'meetings') drawDetail();
 }
 
 function renderMeetingList() {
@@ -3100,6 +3211,7 @@ function drawDetail() {
         ? h('span', { class: 'with-sep' + (typeof el === 'string' ? ' facts-here' : '') }, h('span', { 'aria-hidden': 'true', class: 'sep' }, '·'), el)
         : el))),
       D.people.el,
+      classLine(D, readOnly),
       m.tldr && h('p', { class: 'tldr' }, m.tldr), actions),
     reviewCard(D, readOnly),
     ...notes.map((n) => h('div', { class: 'readonly-note' }, n)),
@@ -3592,7 +3704,7 @@ const SECTION_PREFIXES = {
   agents: ['agents', 'budget.agents_daily_usd'],
   advanced: ['data_dir', 'dashboard', 'pricing', 'vad', 'echo', 'screen', 'dispatch', 'budget'],
 };
-const MAIN_TOOLS = ['reminders', 'markdown', 'google', 'hubspot', 'promethee', 'shortcuts', 'command'];
+const MAIN_TOOLS = ['reminders', 'markdown', 'google', 'hubspot', 'twenty', 'promethee', 'shortcuts', 'command'];
 
 function sectionFor(path) {
   let best = 'advanced', len = -1;
@@ -3725,6 +3837,14 @@ function textInput(path, { type = 'text', placeholder = '', nullIfEmpty = true, 
   const cur = val(path);
   const el = h('input', { type, id: fid(path), class: cls, value: cur == null ? '' : Array.isArray(cur) ? cur.join(' ') : String(cur), placeholder, autocomplete: 'off', spellcheck: 'false' });
   el.addEventListener('input', () => setDraft(path, el.value.trim() === '' && nullIfEmpty ? null : el.value.trim()));
+  return el;
+}
+
+/** A list setting typed as words separated by commas ("Visibilité, Formation, Identité"). */
+function listInput(path, { placeholder = '' } = {}) {
+  const cur = val(path);
+  const el = h('input', { type: 'text', id: fid(path), value: Array.isArray(cur) ? cur.join(', ') : '', placeholder, autocomplete: 'off' });
+  el.addEventListener('input', () => setDraft(path, el.value.split(',').map((w) => w.trim()).filter(Boolean)));
   return el;
 }
 
@@ -4605,6 +4725,17 @@ function toolFields(name, cat) {
         keyField('HUBSPOT_TOKEN', { label: t('tools.hubspot.token'), help: t('tools.hubspot.token_help') }),
         field(p('owner_email'), t('tools.hubspot.owner'), textInput(p('owner_email'), { type: 'email', placeholder: 'you@company.com' }), { help: t('tools.hubspot.owner_help') }),
         settingSwitch(p('log_meeting'), t('tools.hubspot.log'), t('tools.hubspot.log_help')),
+      ];
+    case 'twenty':
+      return [
+        h('p', { class: 'help small muted' }, t('tools.twenty.lead')),
+        field(p('base_url'), t('tools.twenty.url'), textInput(p('base_url'), { type: 'url', placeholder: 'https://crm.example.com', nullIfEmpty: false }), { help: t('tools.twenty.url_help') }),
+        keyField('TWENTY_API_KEY', { label: t('tools.twenty.key'), help: t('tools.twenty.key_help') }),
+        field(p('owner_email'), t('tools.twenty.owner'), textInput(p('owner_email'), { type: 'email', placeholder: 'you@company.com' }), { help: t('tools.twenty.owner_help') }),
+        field('brain.business', t('tools.twenty.business'), textInput('brain.business', { nullIfEmpty: false, placeholder: t('tools.twenty.business_ph') }), { help: t('tools.twenty.business_help') }),
+        field('brain.offers', t('tools.twenty.offers'), listInput('brain.offers', { placeholder: t('tools.twenty.offers_ph') }), { help: t('tools.twenty.offers_help') }),
+        settingSwitch(p('create_records'), t('tools.twenty.create'), t('tools.twenty.create_help')),
+        settingSwitch(p('move_stage'), t('tools.twenty.stage'), t('tools.twenty.stage_help')),
       ];
     case 'promethee':
       return [
@@ -5956,6 +6087,29 @@ const STRINGS = {
     'tool.reminders.name': 'Apple Reminders', 'tool.reminders.desc': 'Your to-dos in the Reminders app, on all your devices.',
     'tool.google.name': 'Google', 'tool.google.desc': 'Calendar reminders, notes in Docs, a Gmail draft of the follow-up.',
     'tool.hubspot.name': 'HubSpot', 'tool.hubspot.desc': 'Tasks and meeting notes in your CRM.',
+    'tool.twenty.name': 'Twenty CRM', 'tool.twenty.desc': 'Client meetings file themselves: company, contacts, deal, notes and your tasks.',
+    'tools.twenty.lead': 'Only client and prospect meetings go to Twenty, once Claude is sure (or you said so on the meeting’s page). Internal, partner and personal meetings never do.',
+    'tools.twenty.url': 'Your Twenty’s address', 'tools.twenty.url_help': 'Where you open Twenty, e.g. https://crm.example.com (Twenty’s cloud: https://api.twenty.com).',
+    'tools.twenty.key': 'Twenty API key', 'tools.twenty.key_help': 'In Twenty: Settings → APIs & Webhooks → Create key. Its role needs to read and write companies, people, opportunities, notes and tasks.',
+    'tools.twenty.owner': 'Your Twenty email', 'tools.twenty.owner_help': 'Your to-dos become Twenty tasks assigned to you.',
+    'tools.twenty.business': 'What you sell', 'tools.twenty.business_ph': 'Video creation for small businesses in France',
+    'tools.twenty.business_help': 'A sentence for Claude: only this business’s clients and prospects count as client meetings.',
+    'tools.twenty.offers': 'Your offers', 'tools.twenty.offers_ph': 'Visibility, Training, Identity',
+    'tools.twenty.offers_help': 'Separated by commas: a client meeting names the one discussed, as written here.',
+    'tools.twenty.create': 'Create what Twenty doesn’t have', 'tools.twenty.create_help': 'The company, people and deal a meeting names. Off: only records that exist are used.',
+    'tools.twenty.stage': 'Move deals forward', 'tools.twenty.stage_help': 'To the stage the meeting reached (discovery, proposal, won, lost). Never backward.',
+    'class.label': 'Kind', 'class.kind_label': 'Kind of meeting', 'class.unset': 'not classified yet',
+    'class.kind.client': 'Client meeting', 'class.kind.prospect': 'Prospect', 'class.kind.partner': 'Partner',
+    'class.kind.internal': 'Internal', 'class.kind.other': 'Other',
+    'class.step.first_call': 'first call', 'class.step.discovery': 'discovery', 'class.step.proposal': 'proposal',
+    'class.step.won': 'won', 'class.step.lost': 'lost',
+    'class.company': 'Company', 'class.company_ph': 'Company, as in your CRM',
+    'class.change': 'Change', 'class.set': 'Classify', 'class.save': 'Save', 'class.by_you': 'set by you',
+    'class.saved': 'Saved', 'class.saved_push': '“Send to my tools” now sends it to {tools}.',
+    'class.crm_sent': 'Filed in {tool}', 'class.crm_push': 'Not in {tool} yet: “Send to my tools” sends it',
+    'class.crm_end': 'Goes to {tool} when the meeting ends',
+    'class.crm_unsure': 'Claude isn’t sure: check it, then “Send to my tools” sends it to {tool}',
+    'class.crm_kind': '{tool} doesn’t take {kind} meetings',
     'tool.promethee.name': 'Promethee', 'tool.promethee.desc': 'Your to-do list in Promethee, through its MCP server, once you validate it.',
     'tool.shortcuts.name': 'Shortcuts (Promethee…)', 'tool.shortcuts.desc': 'Send each to-do to a shortcut.',
     'tool.command.name': 'Command or app link', 'tool.command.desc': 'For apps with a command line or a link.',
@@ -6515,6 +6669,29 @@ const STRINGS = {
     'tool.reminders.name': 'Rappels Apple', 'tool.reminders.desc': 'Vos tâches dans l’app Rappels, sur tous vos appareils.',
     'tool.google.name': 'Google', 'tool.google.desc': 'Rappels dans Agenda, notes dans Docs, brouillon Gmail de l’e-mail de suivi.',
     'tool.hubspot.name': 'HubSpot', 'tool.hubspot.desc': 'Tâches et notes de réunion dans votre CRM.',
+    'tool.twenty.name': 'Twenty CRM', 'tool.twenty.desc': 'Les rendez-vous clients se classent seuls : société, contacts, opportunité, notes et vos tâches.',
+    'tools.twenty.lead': 'Seuls les rendez-vous clients et prospects vont dans Twenty, une fois que Claude en est sûr (ou que vous l’avez dit sur la page de la réunion). Les réunions internes, avec des partenaires ou personnelles, jamais.',
+    'tools.twenty.url': 'L’adresse de votre Twenty', 'tools.twenty.url_help': 'Là où vous ouvrez Twenty, par exemple https://crm.exemple.fr (le cloud de Twenty : https://api.twenty.com).',
+    'tools.twenty.key': 'Clé d’API Twenty', 'tools.twenty.key_help': 'Dans Twenty : Paramètres → API et webhooks → Créer une clé. Son rôle doit pouvoir lire et modifier sociétés, personnes, opportunités, notes et tâches.',
+    'tools.twenty.owner': 'Votre e-mail Twenty', 'tools.twenty.owner_help': 'Vos tâches deviennent des tâches Twenty qui vous sont attribuées.',
+    'tools.twenty.business': 'Ce que vous vendez', 'tools.twenty.business_ph': 'Création vidéo pour les PME en France',
+    'tools.twenty.business_help': 'Une phrase pour Claude : seuls les clients et prospects de cette activité comptent comme rendez-vous clients.',
+    'tools.twenty.offers': 'Vos offres', 'tools.twenty.offers_ph': 'Visibilité, Formation, Identité',
+    'tools.twenty.offers_help': 'Séparées par des virgules : un rendez-vous client nomme celle dont il a été question, écrite comme ici.',
+    'tools.twenty.create': 'Créer ce que Twenty n’a pas', 'tools.twenty.create_help': 'La société, les personnes et l’opportunité qu’une réunion nomme. Désactivé : seules les fiches existantes servent.',
+    'tools.twenty.stage': 'Faire avancer les opportunités', 'tools.twenty.stage_help': 'Jusqu’à l’étape atteinte par la réunion (découverte, proposition, gagné, perdu). Jamais en arrière.',
+    'class.label': 'Type', 'class.kind_label': 'Type de réunion', 'class.unset': 'pas encore classée',
+    'class.kind.client': 'Rendez-vous client', 'class.kind.prospect': 'Prospect', 'class.kind.partner': 'Partenaire',
+    'class.kind.internal': 'Interne', 'class.kind.other': 'Autre',
+    'class.step.first_call': 'premier appel', 'class.step.discovery': 'découverte', 'class.step.proposal': 'proposition',
+    'class.step.won': 'gagné', 'class.step.lost': 'perdu',
+    'class.company': 'Société', 'class.company_ph': 'Société, comme dans votre CRM',
+    'class.change': 'Modifier', 'class.set': 'Classer', 'class.save': 'Enregistrer', 'class.by_you': 'défini par vous',
+    'class.saved': 'Enregistré', 'class.saved_push': '« Envoyer vers mes outils » la transmet maintenant à {tools}.',
+    'class.crm_sent': 'Classée dans {tool}', 'class.crm_push': 'Pas encore dans {tool} : « Envoyer vers mes outils » la transmet',
+    'class.crm_end': 'Ira dans {tool} à la fin de la réunion',
+    'class.crm_unsure': 'Claude n’en est pas sûr : vérifiez, puis « Envoyer vers mes outils » la transmet à {tool}',
+    'class.crm_kind': '{tool} ne prend pas les réunions « {kind} »',
     'tool.promethee.name': 'Promethee', 'tool.promethee.desc': 'Votre liste de tâches dans Promethee, via son serveur MCP, une fois validée.',
     'tool.shortcuts.name': 'Raccourcis (Promethee…)', 'tool.shortcuts.desc': 'Envoyer chaque tâche à un raccourci.',
     'tool.command.name': 'Commande ou lien d’app', 'tool.command.desc': 'Pour les apps qui ont une ligne de commande ou un lien.',

@@ -115,10 +115,44 @@ names in the notes too: a `Speaker N` nobody identified is "a participant", neve
 other participants, written in the meeting's language in the user's voice (first person, signed with \
 the user's name): thanks, the key points/decisions, each person's next steps with dates. Leave both \
 '' when there were no other participants or nothing worth following up.
+9. classification — what kind of meeting this was, for the user's CRM:
+   - kind: "client" (an existing client of the user's business: their project, a delivery, a review, \
+a renewal), "prospect" (a sales conversation with someone who may buy: a call-back to qualify, a \
+discovery meeting, a proposal, a negotiation), "partner" (an outside organization that buys nothing: \
+a supplier, a freelancer, a partner, an investor), "internal" (only the user's own team), "other" \
+(personal, another activity, a talk or video playing, or too little to tell). When the context \
+describes the user's business, "client" and "prospect" are only for that business: a client of \
+another activity is "other".
+   - confidence — how clearly the transcript shows it (who the people are, what they buy or would \
+buy); not from the topic alone.
+   - company — the client's or prospect's organization exactly as named (a self-employed person's \
+trade name counts). '' if nobody named it: never guess one.
+   - contacts — the people from that organization who took part (never the user or their team), \
+with an e-mail only if it was said or shown in full, and their role if said.
+   - step — where the deal stood after this meeting: "first_call" (a short call to qualify and set \
+a meeting), "discovery" (a meeting to understand the need), "proposal" (an offer and price presented \
+or negotiated), "won" (they said yes or signed), "lost" (they said no), "none" (no sales step: a \
+client's project meeting, a follow-up).
+   - offer — the offer discussed, written exactly as one of the user's offers when one fits; '' if none.
+   - budget, objection (their main doubt, in their words), lost_reason (only when lost), \
+next_step (with its date) — '' when not said.
+   - reason — one short sentence on why this kind.
+   For "partner", "internal" and "other", company, contacts and the deal facts stay empty and step \
+is "none".
 
 Write everything (title, tldr, notes, item titles, email) in the language requested in the context. \
 Never invent facts that are not in the transcript.
 """
+
+
+def business_context(business: str, offers: list[str]) -> str:
+    """What the classification needs to know about the user's business (``brain.business``/``offers``)."""
+    lines = []
+    if business.strip():
+        lines.append(f"The user's business: {' '.join(business.split())}")
+    if offers:
+        lines.append(f"The user's offers: {', '.join(o.strip() for o in offers if o.strip())}")
+    return "\n".join(lines)
 
 
 SCREEN_SYSTEM = """\

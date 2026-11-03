@@ -69,7 +69,7 @@ class Dispatcher:
             if sink.supports_update and item.pushed_revision.get(sink.name, 0) < item.revision:
                 return "update"
             return None
-        if not sink.accepts(item, self.dc.min_confidence):
+        if not sink.accepts(item, self.dc.min_confidence) or not sink.accepts_meeting(self.meeting):
             return None
         if sink.cfg.review and not _decided(self.meeting, sink.name, item.id, approved=True):
             return None  # waits for the end-of-meeting review
@@ -158,6 +158,9 @@ class Dispatcher:
                 action = "update" if sink.name in item.pushed else "create"
                 if action == "create" and (item.dismissed or item.status == ItemStatus.CANCELLED):
                     results[sink.name] = "skipped (dismissed or cancelled)"
+                    continue
+                if action == "create" and not sink.accepts_meeting(self.meeting):
+                    results[sink.name] = f"skipped ({sink.skip_reason(self.meeting)})"
                     continue
                 if action == "create" and sink.cfg.review:
                     _decide(self.meeting, sink.name, [item.id], approved=True)  # pushing it by hand is approving it
@@ -268,6 +271,9 @@ class Dispatcher:
         for sink in sorted(self.sinks, key=lambda s: s.name in LINKS_OTHER_NOTES):
             if not (sink.supports_notes and sink.cfg.notes) or (sink_names is not None and sink.name not in sink_names):
                 continue
+            if sink.name not in self.meeting.notes_ref and not sink.accepts_meeting(self.meeting):
+                log.info("notes → %s skipped: %s", sink.name, sink.skip_reason(self.meeting))
+                continue
             for attempt in range(2):  # notes are pushed once per meeting: give a transient failure one more go
                 try:
                     ref = await sink.push_notes(self.meeting, notes_markdown)
@@ -302,9 +308,10 @@ def pending_review(meeting: Meeting, sinks: Collection[Sink], min_confidence: fl
     """The items waiting for your go-ahead (a sink with ``review = true`` would take them and you haven't
     decided yet), in the meeting's order."""
     ids = []
+    sinks = [s for s in sinks if s.cfg.review and s.accepts_meeting(meeting)]
     for item in meeting.items.values():
         for sink in sinks:
-            if not sink.cfg.review or sink.name in item.pushed:
+            if sink.name in item.pushed:
                 continue
             if _decided(meeting, sink.name, item.id, approved=True) or _decided(meeting, sink.name, item.id, approved=False):
                 continue

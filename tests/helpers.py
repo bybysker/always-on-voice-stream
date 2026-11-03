@@ -9,9 +9,13 @@ from pathlib import Path
 import numpy as np
 
 from voicestream.audio.base import float_to_int16
+from voicestream.brain.schema import WireClassification
 from voicestream.models import SAMPLE_RATE, TranscriptSegment
 
 WEDNESDAY = date(2026, 10, 14)
+OTHER_MEETING = WireClassification(kind="other", confidence=0.0, company="", contacts=[], step="none", offer="",
+                                   budget="", objection="", lost_reason="", next_step="", reason="")
+"""The wrap-up's classification of a meeting that is no client's (what scripted summaries answer)."""
 
 
 def seg(text: str, source: str = "mic", t: float = 0.0, dur: float = 3.0) -> TranscriptSegment:

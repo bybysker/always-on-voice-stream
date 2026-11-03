@@ -238,6 +238,64 @@ class PersonInfo(BaseModel):
         return self.model or self.you or not self.heard
 
 
+MeetingKind = Literal["client", "prospect", "partner", "internal", "other"]
+"""What a meeting was, for your CRM: with a ``client`` of your business, a ``prospect`` (a sales
+conversation), a ``partner`` (a supplier, a freelancer, any outside organization that buys nothing),
+``internal`` (your own team only) or ``other`` (personal, another activity, a video…)."""
+SalesStep = Literal["none", "first_call", "discovery", "proposal", "won", "lost"]
+"""Where the deal stood after the meeting: a ``first_call`` to qualify (a call-back), a ``discovery``
+meeting to learn the need, a ``proposal`` presented or negotiated, ``won`` (they said yes), ``lost``
+(they said no); ``none``: not a sales step (a client's project meeting, a follow-up)."""
+
+
+class ClientContact(BaseModel):
+    """Someone from the client's side who took part, with what the meeting said about them."""
+
+    name: str
+    email: str = ""
+    role: str = ""
+
+
+class Classification(BaseModel):
+    """Who a meeting was with, for your CRM: written by Claude at the wrap-up, correctable by you.
+
+    Only ``client`` and ``prospect`` meetings carry a company and the deal facts; the others leave
+    them empty. A CRM sink acts only on the kinds it is set for, and only when Claude is sure enough
+    (``confidence``) or you said so (``by_you``)."""
+
+    kind: MeetingKind = "other"
+    confidence: float = 0.0
+    company: str = ""
+    """The client's or prospect's organization as named in the meeting ('' if it wasn't)."""
+    contacts: list[ClientContact] = Field(default_factory=list)
+    step: SalesStep = "none"
+    offer: str = ""
+    """The offer discussed: one of ``brain.offers`` when one fits."""
+    budget: str = ""
+    objection: str = ""
+    """The prospect's main doubt or objection, in their words."""
+    lost_reason: str = ""
+    next_step: str = ""
+    reason: str = ""
+    """Why Claude chose this kind, in a sentence."""
+    by_you: bool = False
+    """You set it in the app: a summary written again keeps your kind and company."""
+
+    @property
+    def is_business(self) -> bool:
+        """A meeting with a client or a prospect."""
+        return self.kind in ("client", "prospect")
+
+    def set_by_you(self, kind: str, company: str) -> Classification:
+        """This classification with the kind and company you gave (a spelling you fix keeps its contacts and
+        facts); any other kind than client or prospect has no company, contacts or deal facts."""
+        if kind not in ("client", "prospect"):
+            return Classification(kind=kind, confidence=1.0, reason=self.reason, by_you=True)  # type: ignore[arg-type]
+        facts = self.model_dump() if self.is_business else {}
+        return Classification(**{**facts, "kind": kind, "company": " ".join(company.split())[:160],
+                                 "confidence": 1.0, "by_you": True})
+
+
 class Meeting(BaseModel):
     # microseconds: back-to-back meetings (always-on mode) can start within the same second, and
     # sinks key their refs and idempotency ids on this
@@ -267,6 +325,8 @@ class Meeting(BaseModel):
     """Model-written notes sections (the full notes are re-rendered from these + items)."""
     followup_email: FollowUpEmail | None = None
     """Ready-to-send recap for the other participants (sinks may create it as a draft)."""
+    classification: Classification | None = None
+    """Who the meeting was with, for your CRM (client, prospect…): set at the wrap-up, or by you."""
     summary_markdown: str | None = None
     notes_ref: dict[str, str] = Field(default_factory=dict)
     review: dict[str, ReviewDecision] = Field(default_factory=dict)

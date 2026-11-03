@@ -258,7 +258,9 @@ The next time someone speaks, a new meeting starts. Pass `--once` for a single m
      earlier meeting at about a tenth of the price.
 7. **Wrap-up.** When the meeting ends, Claude Sonnet 5.5 reads the whole transcript once. It
    merges duplicates, fixes owners and deadlines, catches anything missed, and writes the notes.
-   Items and notes are then pushed to your sinks.
+   It also **classifies the meeting**: with a client, a prospect, a partner, your own team, or
+   something else, and for a client or prospect the company, the people, where the deal stands and
+   what was discussed. Items and notes are then pushed to your sinks.
 
 Each meeting gets a folder in `~/.voicestream/sessions/2026-10-14_153000-weekly-sync/` with these
 files:
@@ -355,6 +357,7 @@ minute.
 | `google` | Your tasks become Google Calendar reminders at 09:00 on their due date. Each meeting gets a Google Doc in a "Meeting notes" folder. Gmail sends a recap to you and saves a follow-up **draft** for the attendees; drafts are never sent. | [Google bridge](#google-calendar-docs-and-gmail) |
 | `reminders` | Your tasks go into an Apple Reminders list ("Meetings"), with due date and alert. | `enabled = true`, then allow Automation once. |
 | `hubspot` | The meeting is logged on the contacts and companies that took part in it. Your follow-ups become HubSpot tasks. | [HubSpot key](#hubspot) |
+| `twenty` | Client and prospect meetings file themselves in Twenty CRM: company, contacts, deal moved forward, notes, your tasks. Other meetings never reach it. | [Twenty key](#twenty-crm-client-meetings) |
 | `promethee` | Your to-do list goes to Promethee through its MCP server, **once you validate it** at the end of the meeting. | [Promethee](#promethee-mcp-server) |
 | `shortcuts` | Runs a macOS Shortcut per task or meeting, with the data as JSON. Use it for any app with Shortcuts actions, such as Promethee. | [Apps on your Mac](#promethee-and-other-apps-on-your-mac) |
 | `command` | Runs a command or opens a URL scheme per task, e.g. `open "promethee://add?title={title_url}"`. | [Apps on your Mac](#promethee-and-other-apps-on-your-mac) |
@@ -427,6 +430,60 @@ To update the bridge later, paste the new code (`voicestream google-bridge | pbc
 Participants are matched to HubSpot contacts and companies by name, accents ignored. Only people
 who took part count, not people who were merely talked about. A record is associated only when the
 match is unique, and contacts are never created.
+
+### Twenty CRM (client meetings)
+
+[Twenty](https://twenty.com) (cloud or self-hosted) gets only your **client and prospect meetings**.
+Internal, partner and personal meetings never reach it, because voicestream records all of them.
+
+```
+ meeting ends ─► Claude classifies it ─► client or prospect, and sure? ─┬─ yes ─► company · contacts · deal · note · tasks in Twenty
+                 (kind, company, step,                                  └─ no ──► "Claude isn't sure" on the meeting's page:
+                  offer, objection…)                                              you fix it in two clicks, then Send to my tools
+```
+
+1. In Twenty, open **Settings** → **APIs & Webhooks** → **Create key**. Its role needs to read and
+   write companies, people, opportunities, notes and tasks. With the **Data model** permission too,
+   voicestream learns your pipeline's stages and custom fields.
+2. In **Settings → Your tools → Twenty CRM**, give your Twenty's address, the key and your Twenty
+   e-mail, plus what you sell and your offers (they help Claude tell your client meetings apart).
+   Click **Test**: it says which stage each step moves a deal to, and which fields it found.
+
+Each meeting page shows its kind under "With" (**Prospect · GAIA · discovery**), and the
+Meetings list puts a chip on client meetings; search finds them by company. **Change** corrects
+the kind or the company: what you set is kept when the notes are rewritten, and goes to Twenty with
+the next **Send to my tools**.
+
+What reaches Twenty for a client or prospect meeting:
+
+| Record | What happens |
+|---|---|
+| Company | Found by name, ignoring case, accents and legal forms (SAS, SARL, Inc…). Not found: created. Two that match: neither is used, nothing is created. |
+| People | Each person from the client's side: by e-mail, else by full name (a first name alone only among the company's people). Not found: created under the company. Phone numbers heard in a meeting stay in the note, never on a record. |
+| Deal | The company's latest open opportunity, or a new one for a prospect ("GAIA · Identité"). It **only moves forward**: first call → Screening, discovery → Meeting, proposal → Proposal, won → Customer, lost → your lost stage. A won or lost deal never moves. |
+| Fields | `fields` writes the meeting's facts into the deal's custom fields: a text field takes the words, a select the option they name. |
+| Note | The notes, headed by the facts (budget, main objection, next step, contacts) and where it was filed, on the deal, the company and the people. |
+| Tasks | Your to-dos, assigned to you, due at 09:00 on their date, linked to the deal and the company. |
+
+Tasks wait for the wrap-up, where the meeting is classified, even with `dispatch.mode = "immediate"`
+(unless you classify the meeting yourself while it is recorded).
+`create_records = false` only uses records that exist; `move_stage = false` never moves a deal. The
+lost stage is `stages.lost`, or a stage called Lost or Perdu. A self-hosted pipeline with French
+stages and custom fields:
+
+```toml
+[brain]
+business = "Studio de création vidéo pour les PME en France"
+offers = ["Visibilité", "Formation", "Identité"]
+
+[sinks.twenty]
+enabled = true
+base_url = "https://crm.example.com"
+owner_email = "you@example.com"
+stages = { lost = "PERDU" }   # the stage's value, not its label
+fields = { formule = "offer", doutePrincipal = "objection", raisonDeLaPerte = "lost_reason" }
+# min_classification_confidence = 0.7   # below this, the meeting waits for you
+```
 
 ### Promethee (MCP server)
 
@@ -720,6 +777,8 @@ mistake in the config file is reported with the file and the setting, e.g.
 | `brain.extract_interval_s` | `90` | Seconds between extraction calls |
 | `brain.wake_phrases` | `["hey claude", …]` | Phrases that address the assistant directly |
 | `brain.vocabulary` | `[]` | Names and jargon for the transcriber and Claude |
+| `brain.business` | `""` | What you sell: only this business's clients and prospects count as client meetings |
+| `brain.offers` | `[]` | Your offers: a client meeting names the one discussed, as written here |
 | `dispatch.mode` | `end` | When items are pushed |
 | `agents.mode` | `suggest` | See [Agents](#agents-that-do-the-work-mid-meeting) |
 | `agents.engine` | `agent-sdk` | Full agent, or `api` for a single call |
