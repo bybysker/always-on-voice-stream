@@ -64,6 +64,13 @@ wake_phrases = ["hey claude", "okay claude", "ok claude", "hey assistant", "dis 
 commands_from = ["mic"]    # only YOU can give the assistant voice commands
 # attendees = ["Ashley", "Sam", "Sarah"]   # people you meet often; others are remembered by themselves (people.json)
 # vocabulary = ["Acme", "Monday.com", "OKR"]   # names/jargon: helps transcription and extraction
+notes_template = "auto"    # Claude picks per meeting: general, sales, interview, one_on_one, project, recruiting
+# fields = ["Budget: what budget did they mention?", "Next step"]   # answered at the top of every meeting's notes
+# [brain.templates.board]  # a template of your own (one with a built-in's id replaces it)
+# name = "Board meeting"
+# when = "a board or investor meeting"
+# sections = ["Summary", "Metrics", "Asks", "Decisions"]
+# fields = ["Runway", "Next board date"]
 
 [screen]
 enabled = false            # describe what's on screen (shared slides) every interval_s when it changes

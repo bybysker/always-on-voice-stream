@@ -61,13 +61,20 @@ class WireSpeaker(BaseModel):
     name: str = Field(description="That person's name as said in the meeting.")
 
 
+class WireField(BaseModel):
+    name: str = Field(description="A field's name exactly as listed in the context, e.g. 'Budget'.")
+    value: str = Field(description="The meeting's answer in a few words (<= 30), names and numbers as said; '' if not discussed.")
+
+
 class WireSummary(BaseModel):
     title: str = Field(description="Short descriptive meeting title.")
     tldr: str = Field(description="2-3 sentence summary.")
+    template: str = Field(description="Id of the notes template the notes follow (the one given, or the one picked).")
     notes_markdown: str = Field(
-        description="Meeting notes in Markdown: ## Summary, ## Key points, ## Decisions, ## Open questions. "
-        "Do NOT include the action-item list (it is rendered separately)."
+        description="Meeting notes in Markdown, one ## section per section of the notes template (omit empty ones). "
+        "Do NOT include the action-item list (it is rendered separately), nor the fields."
     )
+    fields: list[WireField] = Field(description="One entry per field listed in the context for the template used; [] if none are listed.")
     updates: list[WireUpdate] = Field(description="Corrections to existing items after reading the whole meeting.")
     missing_items: list[WireNewItem] = Field(description="Important items the live pass missed; [] if none.")
     participants: list[str] = Field(

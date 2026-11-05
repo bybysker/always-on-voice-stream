@@ -1,4 +1,4 @@
-"""Command line: ``voicestream run | replay | import | devices | doctor | init | sessions | summarize | push | cost | app``."""
+"""Command line: ``voicestream run | replay | import | devices | doctor | init | sessions | summarize | push | ask | mcp | cost | app``."""
 
 from __future__ import annotations
 
@@ -419,6 +419,77 @@ def cmd_cost(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ask(args: argparse.Namespace) -> int:
+    from .brain.llm import ClaudeLLM, LLMUnavailable
+    from .costs import CostMeter
+    from .library import Library, ask
+
+    cfg = load_config(args.config)
+    costs = CostMeter(cfg)
+
+    async def go() -> dict:
+        llm, reason = None, None
+        if args.offline or cfg.brain.provider != "anthropic":
+            reason = "offline"
+        elif costs.over_budget():
+            reason = "over_budget"
+            print("note: today's Claude budget is spent (budget.daily_usd): showing the matches only", file=sys.stderr)
+        else:
+            try:
+                llm = ClaudeLLM(on_usage=costs.add_llm)
+            except LLMUnavailable as exc:
+                reason = "no_key"
+                print(f"note: {exc}: showing the matches only", file=sys.stderr)
+        try:
+            return await ask(cfg, Library(), args.question, llm, days=args.days, offline_reason=reason)
+        finally:
+            if llm is not None:
+                await llm.aclose()
+
+    result = asyncio.run(go())
+    print(format_answer(result))
+    return 0
+
+
+def format_answer(result: dict) -> str:
+    """``voicestream ask``'s output: the answer and its sources, or the matches without Claude."""
+    from .models import fmt_ts
+
+    def when(iso: str) -> str:
+        return datetime.fromisoformat(iso).astimezone().strftime("%a %Y-%m-%d %H:%M")
+
+    out: list[str] = []
+    if result.get("answer"):
+        out += [result["answer"], ""]
+        if result["citations"]:
+            out.append("Sources:")
+        for c in result["citations"]:
+            src = f"  [{c['n']}] {c['title'] or '(untitled)'} · {when(c['started_at'])}"
+            if c.get("line"):
+                text = c["line"]["text"]
+                src += f" · {fmt_ts(c['line']['t'])} {c['line']['speaker']}: “{text[:160]}{'…' if len(text) > 160 else ''}”"
+            out.append(src + f"  ({c['folder']})")
+        return "\n".join(out).rstrip()
+    if result.get("error"):
+        out += [f"note: Claude didn't answer ({result['error']}): the matches", ""]
+    meetings = result.get("meetings") or []
+    if not meetings:
+        return "\n".join([*out, "No meeting matches."])
+    out.append(f"Matches in {len(meetings)} of {result.get('searched', len(meetings))} meetings:")
+    for m in meetings:
+        out += ["", f"{m['title'] or '(untitled)'} · {when(m['started_at'])}  ({m['folder']})"]
+        if not m["excerpts"] and m.get("tldr"):
+            out.append(f"  {m['tldr']}")
+        out += [f"  {fmt_ts(x['t'])} {x['speaker']}: {x['text']}" for x in m["excerpts"][:8]]
+    return "\n".join(out)
+
+
+def cmd_mcp(args: argparse.Namespace) -> int:
+    from .mcp_server import main as serve
+
+    return serve(args.config)
+
+
 def cmd_app(args: argparse.Namespace) -> int:
     from .app.launcher import run
 
@@ -508,6 +579,15 @@ def build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser("cost", help="today's spend and a daily estimate")
     c.add_argument("--hours", type=float, default=8.0, help="hours of meetings per day for the estimate")
     c.set_defaults(func=cmd_cost)
+
+    q = sub.add_parser("ask", help="ask a question about all your meetings (Claude answers, citing the lines)")
+    q.add_argument("question")
+    q.add_argument("--days", type=int, help="only meetings from the last DAYS days (default: as the question says)")
+    q.add_argument("--offline", action="store_true", help="no Claude: only search the meetings")
+    q.set_defaults(func=cmd_ask)
+
+    mc = sub.add_parser("mcp", help="serve your meetings to Claude Desktop / Claude Code over MCP (stdio, read-only)")
+    mc.set_defaults(func=cmd_mcp)
 
     # a stdlib-only module: cheap to import at parse time
     from .app.launcher import add_arguments as app_arguments
