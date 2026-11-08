@@ -34,13 +34,14 @@ from zoneinfo import ZoneInfo
 
 from .. import known_people, library
 from ..brain.people import name_voice, other_side, people_event, speaker_label, voice_labels
-from ..brain.summarizer import rerender, summarize
+from ..brain.summarizer import recap_points, rerender, summarize
 from ..brain.templates import AUTO, all_templates
 from ..brain.tracker import ItemTracker
 from ..config import Config
 from ..dispatch import Dispatcher, pending_review
 from ..events import EventBus
-from ..models import Event, ItemKind, Meeting
+from ..exports import Export, export, recap_view
+from ..models import Event, ItemKind, Meeting, Recap
 from ..stats import conversation_stats
 from ..storage import (
     RECORDING_LOCK,
@@ -412,7 +413,9 @@ class Meetings:
                 done.append(d.name)
         return done
 
-    def detail(self, folder: str) -> dict[str, Any]:
+    def _current(self, folder: str) -> tuple[Meeting, Path, MeetingSession | None]:
+        """The meeting as it is now: in memory, or on disk (ended here if its recording was cut off; with the
+        lines heard so far when another voicestream is recording it)."""
         d = resolve_folder(self.cfg, folder)
         s = self.live_session(folder)
         meeting = s.meeting if s is not None else self._load(folder)[0]
@@ -422,6 +425,10 @@ class Meetings:
                 heard = read_transcript(d)
                 if len(heard) > len(meeting.segments):
                     meeting = meeting.model_copy(update={"segments": heard})
+        return meeting, d, s
+
+    def detail(self, folder: str) -> dict[str, Any]:
+        meeting, d, s = self._current(folder)
         return {
             "meeting": meeting.model_dump(mode="json"),
             "notes_markdown": notes_markdown(d, meeting),
@@ -431,6 +438,7 @@ class Meetings:
             "stats": conversation_stats(meeting, self._speaker(meeting)),
             "templates": [t.view() for t in all_templates(self.cfg.brain).values()],
             "template_setting": self.cfg.brain.notes_template,
+            "recap": recap_view(meeting, self.cfg.user_name),
         }
 
     def _speaker(self, meeting: Meeting) -> Callable[[Any], str]:
@@ -554,6 +562,54 @@ class Meetings:
         else:
             self._write(d, meeting)
         return {"fields": dict(meeting.fields), "folder": d.name}
+
+    def edit_recap(
+        self,
+        folder: str,
+        *,
+        overview: str | None = None,
+        discussed: list[str] | None = None,
+        next_steps: list[str] | None = None,
+        hide: Collection[str] = (),
+        show: Collection[str] = (),
+    ) -> dict[str, Any]:
+        """The summary for the people you met, corrected on the Summary tab: its text (``None``: as it is;
+        changed text is marked as yours) and the items left out of it (``hide``) or put back (``show``)."""
+        s = self.live_session(folder)
+        if s is not None and not s.finished:
+            raise MeetingBusy("the meeting is still in progress: its summary is written when it ends")
+        meeting, d = (s.meeting, s.store.dir) if s is not None else self._editable(folder)
+        unknown = [i for i in (*hide, *show) if i not in meeting.items]
+        if unknown:
+            raise KeyError(unknown[0])
+        recap = meeting.recap
+        if recap is None:  # the one made from its notes (exports.recap_view), kept from now on
+            view = recap_view(meeting, self.cfg.user_name)
+            recap = meeting.recap = Recap(overview=view["overview"], discussed=view["discussed"],
+                                          next_steps=view["next_steps"], from_notes=True)
+        if overview is not None:
+            recap.overview = " ".join(overview.split())[:1200]
+        if discussed is not None:
+            recap.discussed = recap_points(discussed)
+        if next_steps is not None:
+            recap.next_steps = recap_points(next_steps)
+        if (overview, discussed, next_steps) != (None, None, None):
+            recap.edited = True
+        recap.hidden = [i for i in recap.hidden if i not in show] + [i for i in dict.fromkeys(hide) if i not in recap.hidden]
+        if s is not None:
+            s.save_soon()
+        else:
+            save_meeting(d, meeting)  # the notes don't hold the summary: nothing else to write
+        self.host.bus.publish("meeting.saved", meeting_id=meeting.id, folder=d.name)
+        return {"recap": recap_view(meeting, self.cfg.user_name), "folder": d.name}
+
+    async def export(self, folder: str, what: str, fmt: str) -> Export:
+        """A meeting's summary or transcript as a file (:mod:`voicestream.exports`), as its page shows it now.
+        Made in a thread (a long transcript is many pages) from a copy taken here, on the loop: a meeting in
+        progress keeps changing meanwhile. ``ValueError``: no such file."""
+        meeting = self._current(folder)[0].model_copy(deep=True)
+        cfg = self.cfg
+        return await asyncio.to_thread(export, meeting, what, fmt, user_name=cfg.user_name, others_label=cfg.capture.system.label)
 
     def _write_transcript(self, d: Path, meeting: Meeting) -> None:
         label, other, voices = self.cfg.capture.system.label, other_side(meeting), voice_labels(meeting)

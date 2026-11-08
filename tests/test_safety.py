@@ -80,7 +80,8 @@ async def test_items_found_by_the_summary_never_count_as_commands(cfg: Config) -
     m = Meeting(segments=[seg("Hey Claude, research Globex pricing", source="mic")])
     tracker = ItemTracker(m, None, "Alex", today=WEDNESDAY)
     summary = WireSummary(title="Sync", tldr="", notes_markdown="", updates=[], missing_items=[_cmd([0], "Research Globex pricing")], participants=[],
-                          speakers=[], language="en", followup_subject="", followup_body="", template="general", fields=[])
+                          speakers=[], language="en", followup_subject="", followup_body="", template="general", fields=[],
+                          recap_overview="", recap_discussed=[], recap_next_steps=[])
     await summarize(cfg, m, tracker, ScriptedLLM([summary]), today=date(2026, 10, 14))
     item = next(iter(m.items.values()))
     assert item.agent is not None and item.agent.explicit is False

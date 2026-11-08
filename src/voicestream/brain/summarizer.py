@@ -9,7 +9,7 @@ from datetime import date, datetime
 
 from .. import known_people
 from ..config import Config
-from ..models import FollowUpEmail, Item, ItemKind, ItemStatus, Meeting, fmt_ts
+from ..models import FollowUpEmail, Item, ItemKind, ItemStatus, Meeting, Recap, fmt_ts
 from ..transcribe.echo import words
 from .llm import LLM, LLMError, text_block
 from .people import finalize, name_voice, other_side, speaker_label, voice_labels
@@ -108,11 +108,31 @@ async def summarize(
                 meeting.followup_email = FollowUpEmail(
                     subject=wire.followup_subject.strip()[:200], body_markdown=wire.followup_body.strip()
                 )
+            # written again: Claude's text replaces yours (the page asks first), the items you left out stay out
+            meeting.recap = Recap(
+                overview=" ".join(wire.recap_overview.split())[:1200],
+                discussed=recap_points(wire.recap_discussed),
+                next_steps=recap_points(wire.recap_next_steps),
+                hidden=meeting.recap.hidden if meeting.recap else [],
+            )
         except LLMError as exc:
             log.warning("summary failed (%s); writing basic notes", exc)
     if not meeting.language:  # no model summary (offline, over budget, failed): still French notes for a French meeting
         meeting.language = detect_language(" ".join(s.text for s in meeting.segments))
     return rerender(meeting, cfg.user_name)
+
+
+MAX_RECAP_POINTS = 30
+
+
+def recap_points(points: list[str]) -> list[str]:
+    """A summary's points as one line each: blank ones dropped, a bullet the model typed taken off."""
+    out = []
+    for p in points:
+        line = " ".join(p.split()).lstrip("-*•· ").strip()
+        if line:
+            out.append(line[:400])
+    return out[:MAX_RECAP_POINTS]
 
 
 def is_short_clip(cfg: Config, meeting: Meeting) -> bool:

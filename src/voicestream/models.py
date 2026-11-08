@@ -209,6 +209,25 @@ class FollowUpEmail(BaseModel):
     """Recipient e-mail addresses when known (otherwise left for you to fill in)."""
 
 
+class Recap(BaseModel):
+    """The summary you can send to the people you met (the meeting page's Summary tab, and its PDF): written
+    for them, so without your notes' fields and private sections (objections, budget, competitors…).
+    The to-dos, decisions and open questions in it are the meeting's items (:mod:`voicestream.exports`)."""
+
+    overview: str = ""
+    """Two or three sentences: what the meeting was for and where things stand."""
+    discussed: list[str] = Field(default_factory=list)
+    """What was discussed, a point each."""
+    next_steps: list[str] = Field(default_factory=list)
+    """What happens next, as agreed: milestones, meetings, decisions to come (the to-dos are the items)."""
+    hidden: list[str] = Field(default_factory=list)
+    """The items you left out of it (ids): kept when the notes are written again."""
+    edited: bool = False
+    """You changed its text (writing the notes again replaces it, so the page asks first)."""
+    from_notes: bool = False
+    """Made from the meeting's notes (it was summarized before these summaries existed), not by Claude."""
+
+
 class ReviewDecision(BaseModel):
     """What you decided, at the end of the meeting, about the to-dos waiting for a tool that asks first
     (``review = true``): the approved ones are sent, the rejected ones never are."""
@@ -267,6 +286,8 @@ class Meeting(BaseModel):
     """Model-written notes sections (the full notes are re-rendered from these + items)."""
     followup_email: FollowUpEmail | None = None
     """Ready-to-send recap for the other participants (sinks may create it as a draft)."""
+    recap: Recap | None = None
+    """The summary to send them as a PDF; ``None``: written before it existed (or without Claude)."""
     template: str | None = None
     """The notes template the notes were written with (:mod:`.brain.templates`); ``None``: basic notes."""
     template_choice: str | None = None

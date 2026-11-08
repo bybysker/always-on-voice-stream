@@ -62,7 +62,8 @@ ROUTES = [
     ("GET", "/api/doctor"), ("GET", "/api/devices"), ("GET", "/api/meetings"), ("GET", f"/api/meetings/{PLANNING}"),
     ("POST", f"/api/meetings/{PLANNING}/push"), ("POST", f"/api/meetings/{PLANNING}/review"),
     ("POST", f"/api/meetings/{PLANNING}/summarize"), ("POST", f"/api/meetings/{PLANNING}/items"), ("POST", f"/api/meetings/{PLANNING}/people"),
-    ("PATCH", f"/api/meetings/{PLANNING}/items/A1"),
+    ("PATCH", f"/api/meetings/{PLANNING}/items/A1"), ("PATCH", f"/api/meetings/{PLANNING}/recap"),
+    ("GET", f"/api/meetings/{PLANNING}/export?what=summary"), ("POST", f"/api/meetings/{PLANNING}/save"),
     ("POST", f"/api/meetings/{PLANNING}/items/A1/dismiss"), ("GET", "/api/cost"), ("GET", "/api/models"),
     ("POST", "/api/models/base/download"), ("DELETE", "/api/models/base"), ("POST", "/api/setup/complete"),
     ("PATCH", "/api/prefs"), ("POST", "/api/reveal"), ("POST", "/api/open-settings"), ("POST", "/api/permissions/microphone"),
@@ -319,6 +320,61 @@ def test_meeting_routes(client: TestClient, host: AppHost, monkeypatch: pytest.M
         time.sleep(0.05)
     assert any(e.type == "meeting.notes_updated" and e.data["folder"] == PLANNING for e in host.bus.history)
     assert client.post(f"/api/meetings/{LIVE_ELSEWHERE}/summarize").status_code == 409
+
+
+def test_downloading_a_meetings_summary_and_transcript(client: TestClient) -> None:
+    r = client.get(f"/api/meetings/{PLANNING}/export?what=summary&format=pdf")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/pdf" and r.content.startswith(b"%PDF-1.4")
+    assert r.headers["content-disposition"] == ('attachment; filename="2026-10-14 Q4 planning - Summary.pdf"; '
+                                                "filename*=UTF-8''2026-10-14%20Q4%20planning%20-%20Summary.pdf")
+    assert r.headers["cache-control"] == "no-store"  # like everything else that holds what was said
+    r = client.get(f"/api/meetings/{PLANNING}/export?what=transcript&format=txt")
+    assert r.headers["content-type"] == "text/plain; charset=utf-8"
+    assert r.text.startswith("Q4 planning\n") and "] Alex: I'll send the deck by Friday." in r.text  # you, by name
+    assert client.get(f"/api/meetings/{PLANNING}/export?what=transcript").content.startswith(b"%PDF")  # PDF by default
+    # a meeting another voicestream is recording: what was said so far (reading changes nothing)
+    assert client.get(f"/api/meetings/{LIVE_ELSEWHERE}/export?what=transcript&format=txt").status_code == 200
+    for bad in ("what=summary&format=txt", "what=notes", "format=pdf"):
+        r = client.get(f"/api/meetings/{PLANNING}/export?{bad}")
+        assert r.status_code == 400 and "summary as pdf, transcript as pdf/txt" in r.json()["error"]
+    assert client.get("/api/meetings/..%2F..%2Fetc/export?what=summary").status_code == 404
+
+
+def test_editing_the_summary_for_the_people_you_met(client: TestClient, host: AppHost) -> None:
+    recap = client.get(f"/api/meetings/{PLANNING}").json()["recap"]
+    assert (recap["written"], recap["overview"], [t["id"] for t in recap["todos"]]) == (False, "Q4 planning in short", ["A1", "A2"])
+    r = client.patch(f"/api/meetings/{PLANNING}/recap", json={"hide": ["A2"]})
+    recap = r.json()["recap"]
+    assert [t["hidden"] for t in recap["todos"]] == [False, True] and not recap["written"] and not recap["edited"]
+    r = client.patch(f"/api/meetings/{PLANNING}/recap", json={"overview": " We planned  Q4. ", "discussed": ["Roadmap", " "],
+                                                               "show": ["A2"], "hide": ["D1"]})
+    recap = r.json()["recap"]
+    assert (recap["overview"], recap["discussed"], recap["edited"]) == ("We planned Q4.", ["Roadmap"], True)
+    assert [t["hidden"] for t in recap["todos"]] == [False, False] and recap["decisions"][0]["hidden"]
+    saved = load_meeting(host.cfg.data_path / "sessions" / PLANNING)[0].recap
+    assert saved is not None and (saved.overview, saved.hidden, saved.from_notes) == ("We planned Q4.", ["D1"], True)
+    assert client.patch(f"/api/meetings/{PLANNING}/recap", json={"hide": ["ZZ"]}).status_code == 404
+    assert client.patch(f"/api/meetings/{PLANNING}/recap", json={}).status_code == 400
+    assert client.patch(f"/api/meetings/{PLANNING}/recap", json={"discussed": "Roadmap"}).status_code == 400
+    assert client.patch(f"/api/meetings/{LIVE_ELSEWHERE}/recap", json={"overview": "x"}).status_code == 409
+
+
+def test_saving_a_file_through_the_mac_apps_save_panel(client: TestClient, host: AppHost, tmp_path: Path) -> None:
+    body = {"what": "summary", "format": "pdf"}
+    r = client.post(f"/api/meetings/{PLANNING}/save", json=body)
+    assert r.status_code == 409 and "download the file instead" in r.json()["error"]  # in a browser: no panel
+    asked: list[str] = []
+    out = tmp_path / "chosen"
+    out.mkdir()
+    host.save_dialog = lambda name: asked.append(name) or str(out / name)
+    assert client.post(f"/api/meetings/{PLANNING}/save", json=body).json() == {"saved": True, "name": "2026-10-14 Q4 planning - Summary.pdf"}
+    assert asked == ["2026-10-14 Q4 planning - Summary.pdf"] and (out / asked[0]).read_bytes().startswith(b"%PDF")
+    host.save_dialog = lambda name: None  # Cancel
+    assert client.post(f"/api/meetings/{PLANNING}/save", json={"what": "transcript", "format": "txt"}).json() == {"saved": False}
+    host.save_dialog = lambda name: str(tmp_path / "missing" / "folder" / name)
+    r = client.post(f"/api/meetings/{PLANNING}/save", json=body)
+    assert r.status_code == 409 and r.json()["error"].startswith("could not save 2026-10-14 Q4 planning - Summary.pdf")
+    assert client.post(f"/api/meetings/{PLANNING}/save", json={"what": "summary", "format": "txt"}).status_code == 400
 
 
 @pytest.mark.parametrize(

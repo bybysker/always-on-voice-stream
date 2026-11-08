@@ -41,7 +41,8 @@ def seg(text: str, source: str = "system", t: float = 0.0, dur: float = 4.0, spe
 def _summary(**kw: Any) -> dict[str, Any]:
     return {"title": "Acme discovery", "tldr": "Acme wants fewer no-shows.", "notes_markdown": "## Summary\n\n- Acme call.",
             "updates": [], "missing_items": [], "participants": ["Léa"], "speakers": [], "language": "en",
-            "followup_subject": "", "followup_body": "", "template": "general", "fields": [], **kw}
+            "followup_subject": "", "followup_body": "", "template": "general", "fields": [],
+            "recap_overview": "", "recap_discussed": [], "recap_next_steps": [], **kw}
 
 
 # ------------------------------------------------------------------ templates

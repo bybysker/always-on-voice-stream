@@ -33,6 +33,7 @@ from ..app.meetings import MeetingBusy, MeetingNotFound, resolve_folder
 from ..app.prefs import FloatingPosition, Hotkey, MeetingStart, Minutes, layout_context
 from ..app.settings import SINK_LABELS, SettingsError, save_checked, settings_view
 from ..costs import estimate_daily
+from ..exports import Export
 from ..mcp_server import client_config
 from ..sinks.base import SinkError
 from ..sinks.oauth import SignIn, TokenStore
@@ -146,6 +147,29 @@ class FieldsEdit(_Body):
     values: dict[Annotated[str, Field(max_length=60)], Annotated[str, Field(max_length=300)]] = Field(max_length=40)
 
 
+Point = Annotated[str, Field(max_length=500)]
+ItemId = Annotated[str, Field(min_length=1, max_length=20)]
+
+
+class RecapEdit(_Body):
+    """``PATCH /api/meetings/{folder}/recap``: the summary for the people you met, corrected (``null``: as it is)."""
+
+    overview: str | None = Field(None, max_length=2000)
+    discussed: list[Point] | None = Field(None, max_length=50)
+    next_steps: list[Point] | None = Field(None, max_length=50)
+    hide: list[ItemId] = Field(default_factory=list, max_length=500)
+    """Items to leave out of it."""
+    show: list[ItemId] = Field(default_factory=list, max_length=500)
+    """Items to put back in it."""
+
+
+class SaveRequest(_Body):
+    """``POST /api/meetings/{folder}/save``: a meeting's file, saved where you choose in the Mac app's Save panel."""
+
+    what: Literal["summary", "transcript"]
+    format: Literal["pdf", "txt"] = "pdf"
+
+
 class AskRequest(_Body):
     """``POST /api/ask``: a question about your meetings."""
 
@@ -219,6 +243,7 @@ class AppApi:
         self.host = host
         self.api = api
         self.signins: dict[str, SignIn] = {}
+        self._saving = asyncio.Lock()  # one Save panel at a time
 
     def exception_handlers(self) -> dict[Any, Any]:
         return {
@@ -250,6 +275,9 @@ class AppApi:
             Route(f"{m}/review", self.review_meeting, methods=["POST"]),
             Route(f"{m}/summarize", self.summarize_meeting, methods=["POST"]),
             Route(f"{m}/fields", self.edit_fields, methods=["PATCH"]),
+            Route(f"{m}/recap", self.edit_recap, methods=["PATCH"]),
+            Route(f"{m}/export", self.export_meeting, methods=["GET"]),
+            Route(f"{m}/save", self.save_meeting_file, methods=["POST"]),
             Route(f"{m}/items", self.add_item, methods=["POST"]),
             Route(f"{m}/people", self.edit_people, methods=["POST"]),
             Route(f"{m}/voices", self.name_voice, methods=["POST"]),
@@ -471,6 +499,50 @@ class AppApi:
             return JSONResponse(self.host.meetings.edit_fields(request.path_params["folder"], body.values))
         except KeyError as exc:
             raise HTTPException(404, f"no field {exc.args[0]!r} in this meeting") from None
+
+    async def edit_recap(self, request: Request) -> JSONResponse:
+        """The Summary tab: its text corrected, items left out of it or put back."""
+        body = await _parse(request, RecapEdit)
+        changes = body.model_dump(exclude_unset=True)
+        if not changes:
+            raise HTTPException(400, "nothing to change: give the summary's new text or the items to hide or show")
+        try:
+            return JSONResponse(self.host.meetings.edit_recap(request.path_params["folder"], **changes))
+        except KeyError as exc:
+            raise HTTPException(404, f"no item {exc.args[0]!r} in this meeting") from None
+
+    async def _export(self, request: Request, what: str, fmt: str) -> Export:
+        try:
+            return await self.host.meetings.export(request.path_params["folder"], what, fmt)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    async def export_meeting(self, request: Request) -> Response:
+        """``?what=summary|transcript&format=pdf|txt``: the file, as a download (a browser saves it)."""
+        q = request.query_params
+        e = await self._export(request, q.get("what", ""), q.get("format", "pdf"))
+        return Response(e.data, media_type=e.media_type, headers={"content-disposition": e.content_disposition()})
+
+    async def save_meeting_file(self, request: Request) -> JSONResponse:
+        """The Mac app's window can't download (WebKit there would show a PDF in place of the app): the file is
+        saved where you choose in the native Save panel. ``saved``: false when you cancelled it."""
+        body = await _parse(request, SaveRequest)
+        dialog = self.host.save_dialog
+        if dialog is None:
+            raise HTTPException(409, "the Save panel is the Mac app's: download the file instead")
+        if self._saving.locked():
+            raise HTTPException(409, "a Save panel is already open")
+        async with self._saving:
+            e = await self._export(request, body.what, body.format)
+            chosen = await asyncio.to_thread(dialog, e.filename)
+            if not chosen:
+                return JSONResponse({"saved": False})
+            path = Path(chosen)
+            try:
+                await asyncio.to_thread(path.write_bytes, e.data)
+            except OSError as exc:
+                raise HTTPException(409, f"could not save {path.name}: {exc.strerror or exc}") from None
+        return JSONResponse({"saved": True, "name": path.name})
 
     async def add_item(self, request: Request) -> JSONResponse:
         new = await _parse(request, NewItem)

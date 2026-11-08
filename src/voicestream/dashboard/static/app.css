@@ -797,6 +797,47 @@ form.edit .row input { flex: 1 1 120px; }
 .email-body { border-radius: var(--radius-card); padding: 12px 16px; background: var(--raised); }
 .tlines { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
 
+/* a meeting's summary for the people you met, laid out as its PDF prints it */
+.recap-bar { margin-bottom: 12px; align-items: flex-start; }
+.recap-bar > p { max-width: 72ch; margin: 0; line-height: 18px; }
+.recap-bar + .notice { margin-bottom: 12px; }
+.recap-sheet {
+  max-width: 760px; padding: 28px 32px; border: 1px solid var(--border); border-radius: var(--radius-card);
+  background: var(--surface); line-height: 22px; overflow-wrap: anywhere;
+}
+.recap-sheet .kicker { margin: 0 0 6px; color: var(--hue-text); font-size: var(--fs-tick); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.recap-sheet h2 { font-size: 20px; line-height: 28px; margin: 0 0 4px; }
+.recap-sheet > p.muted { margin: 2px 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.recap-sheet > .recap-section:first-of-type, .recap-sheet > .recap-empty { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--rule); }
+.recap-section { margin-top: 22px; }
+.recap-section h3 { font-size: var(--fs-section); margin: 0 0 6px; }
+.recap-section p { margin: 0; max-width: 72ch; }
+.recap-section ul { margin: 0; padding-left: 0; list-style: none; }
+.recap-section li { display: flex; align-items: center; gap: 8px; min-height: 28px; margin: 2px 0; }
+.recap-section li::before { content: "•"; color: var(--hue); flex: none; width: 12px; }
+.recap-items .text { flex: 0 1 auto; min-width: 0; }
+/* leaving an item out: a quiet button at the end of its line */
+.recap-items li .btn, .recap-todo .btn { min-height: 28px; padding: 0 10px; margin-left: auto; color: var(--muted); }
+.recap-items li .btn:hover, .recap-todo .btn:hover { color: var(--text); }
+.left-out .text { color: var(--muted); text-decoration: line-through; }
+.recap-todo {
+  display: grid; grid-template-columns: 18px minmax(0, 1fr) 128px 96px; gap: 12px; align-items: center;
+  min-height: 40px; padding: 4px 0; border-top: 1px solid var(--rule);
+}
+.recap-todo.head { min-height: 0; padding: 0 0 6px; border-top: 0; border-bottom: 1px solid var(--text); color: var(--muted); font-size: var(--fs-tick); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.recap-todo .box { width: 14px; height: 14px; border: 1.5px solid var(--muted); border-radius: 3px; display: inline-flex; align-items: center; justify-content: center; }
+.recap-todo.head .box, .recap-todo.head span:first-child { border: 0; }
+.recap-todo .box .icon { width: 12px; height: 12px; color: var(--hue); stroke-width: 3; }
+.recap-todo .title { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; min-width: 0; }
+.recap-todo.done .text { color: var(--muted); }
+.recap-form { max-width: 760px; }
+@media (max-width: 720px) {
+  .recap-sheet { padding: 20px 18px; }
+  .recap-todo { grid-template-columns: 18px minmax(0, 1fr); row-gap: 2px; padding: 8px 0; }
+  .recap-todo.head > :nth-child(3), .recap-todo.head > :nth-child(4) { display: none; }
+  .recap-todo > :nth-child(3), .recap-todo > :nth-child(4) { grid-column: 2; font-size: var(--fs-small); line-height: 18px; }
+}
+
 /* ------------------------------------------------------------------- costs */
 .costs-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--gap); margin-bottom: var(--gap); }
 .costs-grid > .history { grid-column: span 8; display: flex; flex-direction: column; }

@@ -91,6 +91,18 @@ class WireSummary(BaseModel):
         description="Body of that email in Markdown, written in the meeting's language as the user (first person): "
         "thanks, 2-4 key points/decisions, each person's next steps with dates, a sign-off with the user's name; '' if no subject."
     )
+    recap_overview: str = Field(
+        description="For the summary sent to the participants: 2-3 sentences on what the meeting was for and where "
+        "things stand, written for them; '' if nothing was discussed."
+    )
+    recap_discussed: list[str] = Field(
+        description="For that summary: the topics discussed, one plain-text point each (<= 25 words), in the order "
+        "they came up; [] if none."
+    )
+    recap_next_steps: list[str] = Field(
+        description="For that summary: what happens next as agreed (milestones, meetings, decisions to come, with dates "
+        "as said), not the individual to-dos; [] if none."
+    )
 
 
 def _opt(s: str) -> str | None:

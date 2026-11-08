@@ -121,8 +121,18 @@ names in the notes too: a `Speaker N` nobody identified is "a participant", neve
 other participants, written in the meeting's language in the user's voice (first person, signed with \
 the user's name): thanks, the key points/decisions, each person's next steps with dates. Leave both \
 '' when there were no other participants or nothing worth following up.
+9. recap_overview / recap_discussed / recap_next_steps — a summary the user will send as a PDF to the \
+people they met (clients, collaborators), next to the to-dos, decisions and open questions (rendered from \
+the items). Write it for them: neutral and factual, in the meeting's language, about the meeting ("we \
+agreed…", "Acme will…"), never addressed to the user. recap_overview: 2–3 sentences on what the meeting \
+was for and where things stand. recap_discussed: the topics discussed, one plain-text point each (no \
+Markdown), concrete (names, numbers, dates as said), in the order they came up. recap_next_steps: what \
+happens next as agreed — milestones, the next meeting, decisions still to make, with their dates — not \
+the individual to-dos. Leave out anything the user would not show them: the user's own assessments (how \
+interested they seem, objections or risks the user is noting, budget guesses, competitors, salary or \
+negotiation positions) and anything said only among the user's side. Empty when the meeting gave nothing.
 
-Write everything (title, tldr, notes, item titles, email) in the language requested in the context. \
+Write everything (title, tldr, notes, item titles, email, summary) in the language requested in the context. \
 Never invent facts that are not in the transcript.
 """
 
