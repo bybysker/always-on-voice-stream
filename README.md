@@ -11,6 +11,10 @@ English, and has Claude turn it into action items, decisions and notes.
   scheme or a command.
 - When someone says "il nous faut une analyse concurrentielle d'ici vendredi", a Claude agent
   can start on it while you're still in the meeting.
+- The notes take the shape of the meeting (a sales call gets pain points, budget and competitors; a
+  one-on-one gets wins and blockers), led by the **AI fields** you choose ("Budget", "Next step").
+- **Ask your meetings** anything ("Qu'a dit Acme sur nos prix ?"): Claude answers from all of them and
+  shows the exact lines it read. **Claude Desktop and Claude Code** can read them too, over MCP.
 
 ```
  your mic ──┐                                        ┌─ live extraction (Claude Haiku) ─┬─ Google Calendar · Apple Reminders · HubSpot · Shortcuts/apps
@@ -35,6 +39,10 @@ settings. Agent work is extra and has its own budget.
 - [Speech-to-text backends](#speech-to-text-backends)
 - [Sending items to your tools](#sending-items-to-your-tools)
 - [Agents that do the work mid-meeting](#agents-that-do-the-work-mid-meeting)
+- [Notes templates and AI fields](#notes-templates-and-ai-fields)
+- [Ask your meetings](#ask-your-meetings)
+- [Your meetings in Claude Desktop and Claude Code (MCP)](#your-meetings-in-claude-desktop-and-claude-code-mcp)
+- [How the conversation went](#how-the-conversation-went)
 - [Dashboard and terminal commands](#dashboard-and-terminal-commands)
 - [Recordings and existing transcripts](#recordings-and-existing-transcripts)
 - [Costs and budget](#costs-and-budget)
@@ -257,8 +265,9 @@ The next time someone speaks, a new meeting starts. Pass `--once` for a single m
    - The transcript is sent as append-only blocks with prompt caching, so each call re-reads the
      earlier meeting at about a tenth of the price.
 7. **Wrap-up.** When the meeting ends, Claude Sonnet 5.5 reads the whole transcript once. It
-   merges duplicates, fixes owners and deadlines, catches anything missed, and writes the notes.
-   Items and notes are then pushed to your sinks.
+   merges duplicates, fixes owners and deadlines, catches anything missed, and writes the notes in
+   the [template](#notes-templates-and-ai-fields) that fits the meeting, with your AI fields
+   answered at the top. Items and notes are then pushed to your sinks.
 
 Each meeting gets a folder in `~/.voicestream/sessions/2026-10-14_153000-weekly-sync/` with these
 files:
@@ -602,6 +611,122 @@ safeguards:
 - Agents cannot email, schedule or message anyone. They prepare drafts and say what's left for
   you to do.
 
+## Notes templates and AI fields
+
+A sales call and a one-on-one don't need the same notes. At the wrap-up, Claude writes them in a
+**template**: a list of sections, plus **fields**, short answers that lead the notes.
+
+| Template | When it fits | Sections | Fields |
+|---|---|---|---|
+| `general` | anything else | Summary, Key points, Decisions, Open questions | — |
+| `sales` | a prospect or customer call about buying, renewing, expanding | Summary, Customer context, Pain points, Current solution, Decision process and timeline, Objections and concerns, Competitors | Budget, Decision maker, Timeline, Competitors, Next step |
+| `interview` | user research, discovery to learn rather than sell | Summary, Who they are, Goals, Pain points, Current workarounds, Requests, Notable quotes, Insights | Main pain point, Top request |
+| `one_on_one` | a manager and a team member, mentoring | Summary, Wins, Challenges and blockers, Feedback, Goals and growth, Open questions | — |
+| `project` | stand-up, sprint or project review, team sync | Summary, Progress, Blockers, Risks, Decisions, Open questions | Status |
+| `recruiting` | interviewing a candidate | Summary, Background and experience, Strengths, Concerns, Motivation, Practical details | Role, Salary expectations, Availability |
+
+```
+ brain.notes_template = "auto" ──► Claude reads the meeting, picks the template that fits ─┐
+ brain.notes_template = "sales" ─► always that one                                         ├─► notes.md
+ the meeting's page: Notes template ▾ ─► that one for this meeting, notes written again ──┘     ## At a glance  ← fields
+                                                                                                 - **Budget:** 40 k€/an
+                                                                                                 ## Pain points …
+```
+
+- `auto` (the default) costs nothing extra: the choice is made in the same wrap-up call.
+- **Fields for every meeting** (`brain.fields`, Settings → Claude → Meeting notes) are asked of every
+  meeting, on top of the template's: one per line, a name and, after a colon, what to look for
+  (`"Budget: what budget, and in which currency, did they mention?"`). Claude answers in a few
+  words, or leaves it empty when the meeting didn't say; it never guesses.
+- The answered fields lead the notes under **At a glance** (**En bref** in French), so they reach
+  everything the notes go to: the Google Doc, Notion, the HubSpot meeting log. On the meeting's
+  page they are beside the notes; **Edit** corrects them, and the next **Send to my tools** updates
+  your tools.
+- Your own templates go in the settings file. One with a built-in's id replaces it:
+
+  ```toml
+  [brain.templates.board]
+  name = "Board meeting"
+  when = "a board or investor meeting"   # what Claude reads to pick it
+  sections = ["Summary", "Metrics", "Asks", "Decisions"]
+  fields = ["Runway", "Next board date"]
+  ```
+
+## Ask your meetings
+
+The **Ask** screen (or `voicestream ask "…"`) answers a question from all your meetings: "What did I
+promise this week?", "Qu'ont dit les clients de nos prix ?", "Compare the budgets of my last three
+prospects". Every claim carries a number; each number is a line of a transcript you can click, which
+opens that meeting's transcript on that line.
+
+```
+ question ──► Claude Haiku: search words in French and English, synonyms, the period ("this week" = 7 days)
+          ──► on your Mac: every meeting's title, summary, fields, to-dos, notes and transcript scored;
+              the best 8, with the matching lines and a line of context around each
+          ──► Claude Sonnet reads only those, answers with [1] [2]… ──► each [n] checked against a real line
+```
+
+- A citation that points at a meeting or a line Claude wasn't shown is dropped, and what is quoted
+  under the answer is the line as it was transcribed, never Claude's wording of it.
+- **Which meetings** narrows it to the last 7 days, month or 3 months, or all of them; "as the
+  question says" lets "this week" or "ce mois-ci" decide.
+- Without a Claude key, over the daily budget, or with Claude turned off, Ask still searches: it shows
+  the lines your words are in, with the words marked.
+- A question costs about $0.02–0.06 (it counts against `budget.daily_usd`).
+
+```bash
+voicestream ask "Qu'est-ce que j'ai promis à Acme ?"
+voicestream ask "pricing objections" --days 90
+voicestream ask "Globex" --offline        # only the search, no Claude
+```
+
+## Your meetings in Claude Desktop and Claude Code (MCP)
+
+`voicestream mcp` is an MCP server: Claude Desktop, Claude Code or any MCP client can search your
+meetings, read a meeting's notes, fields, to-dos and transcript, and list your open to-dos across
+meetings. Then ask Claude things like "Draft the follow-up to Acme from what we said on Tuesday" or
+"Which of my to-dos are late?".
+
+**Settings → Claude → Your meetings in Claude** shows the exact lines to paste, with **Copy**. With
+the Mac app they look like this:
+
+```json
+{"mcpServers": {"voicestream": {"command": "/Applications/Voicestream.app/Contents/MacOS/Voicestream", "args": ["mcp"]}}}
+```
+
+(Claude Desktop: **Settings → Developer → Edit Config**; with the command-line install
+`"command": "voicestream"`.) For Claude Code: `claude mcp add voicestream -- voicestream mcp`.
+
+| Tool | What it gives |
+|---|---|
+| `search_meetings` | the meetings that best match some words, with the matching lines |
+| `list_meetings` | the latest meetings: date, length, people, summary, fields |
+| `get_meeting` | one meeting: notes, fields, to-dos, decisions, open questions, follow-up draft, talk time |
+| `get_transcript` | a meeting's transcript, a page of lines at a time |
+| `list_action_items` | to-dos across meetings: yours or everyone's, open, done or all |
+
+It only reads. It can't change, send or delete anything, makes no model call of its own, and runs
+only while Claude runs it (over stdin/stdout: nothing listens on the network). What Claude reads
+through it goes to Anthropic, as anything you show Claude does. Its descriptions tell the client that
+a transcript is what people said, to report, never instructions to follow.
+
+## How the conversation went
+
+A meeting's **Conversation** tab shows who talked how much, worked out on your computer from the
+transcript's times (no model call):
+
+| Figure | What it is |
+|---|---|
+| You spoke | your share of the talk time |
+| Your longest stretch | the longest you held the floor: your lines with no one else in between and pauses of at most 5 s |
+| Questions you asked | question marks in your lines (speech-to-text punctuates the questions it hears) |
+| Turns per minute | how often the speaker changed: a dialogue rather than a talk |
+
+Then everyone's share, talk time, longest stretch, questions and words per minute. In a sales call or
+a customer interview it adds a gentle note when you talked more than 60 % of the time, held the floor
+for more than 2½ minutes, or asked under one question every ten minutes. These figures are for you:
+they are never in the notes, the follow-up e-mail or anything sent to your tools.
+
 ## Dashboard and terminal commands
 
 The dashboard (`dashboard.enabled`, bound to 127.0.0.1 and protected by a per-run token) shows:
@@ -644,6 +769,8 @@ voicestream import call.vtt --me "Alex Martin" --date 2026-10-12T14:00
 voicestream sessions                            # list recorded meetings
 voicestream summarize last                      # re-run the notes
 voicestream push last --sink notion             # push a saved meeting
+voicestream ask "What did Acme say about pricing?"   # a question about all your meetings
+voicestream mcp                                 # your meetings for Claude Desktop / Claude Code (MCP, stdio)
 ```
 
 `replay` runs as fast as possible by default. Use `--speed 1` for real time, which also shows it
@@ -673,6 +800,7 @@ of meetings, with about 60% speech:
 | Wrap-up and notes | `claude-sonnet-5-5`, once per meeting | ≈ $0.05–0.15 per meeting |
 | Screen descriptions (optional) | `claude-haiku-5-5` | ≈ $0.05 |
 | Agents (optional) | `claude-opus-5-5` | ≈ $0.02–0.30 per task, capped |
+| Ask (optional) | `claude-haiku-5-5` + `claude-sonnet-5-5` | ≈ $0.02–0.06 per question |
 
 That is about $0.76 a day (≈ $15 a month over 20 working days) with speech-to-text on your Mac,
 and about $2.20 with OpenAI's. `budget.daily_usd` (default $3) is a soft cap on transcription plus Claude. When it's reached,
@@ -720,6 +848,9 @@ mistake in the config file is reported with the file and the setting, e.g.
 | `brain.extract_interval_s` | `90` | Seconds between extraction calls |
 | `brain.wake_phrases` | `["hey claude", …]` | Phrases that address the assistant directly |
 | `brain.vocabulary` | `[]` | Names and jargon for the transcriber and Claude |
+| `brain.notes_template` | `auto` | The notes' [template](#notes-templates-and-ai-fields), or `auto`: Claude picks per meeting |
+| `brain.fields` | `[]` | AI fields every meeting answers at the top of its notes |
+| `brain.templates` | `{}` | Your own notes templates |
 | `dispatch.mode` | `end` | When items are pushed |
 | `agents.mode` | `suggest` | See [Agents](#agents-that-do-the-work-mid-meeting) |
 | `agents.engine` | `agent-sdk` | Full agent, or `api` for a single call |
@@ -748,7 +879,10 @@ Package layout under `src/voicestream/`:
 |---|---|
 | `audio/` | Capture sources, the streaming resampler, VAD and the speech gate |
 | `transcribe/` | Speech-to-text backends and the echo filter |
-| `brain/` | Prompts, strict wire schemas, extractor, tracker, summarizer, offline heuristic |
+| `brain/` | Prompts, strict wire schemas, extractor, tracker, summarizer, notes templates, offline heuristic |
+| `library.py` | Ask: searching every meeting, and Claude's cited answers |
+| `mcp_server.py` | `voicestream mcp`: the meetings over MCP, read-only |
+| `stats.py` | How the conversation went (talk time, monologues, questions) |
 | `sinks/` | Integrations |
 | `agents/` | Agent runner |
 | `dashboard/` | Web UI |

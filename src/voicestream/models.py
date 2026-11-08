@@ -267,6 +267,12 @@ class Meeting(BaseModel):
     """Model-written notes sections (the full notes are re-rendered from these + items)."""
     followup_email: FollowUpEmail | None = None
     """Ready-to-send recap for the other participants (sinks may create it as a draft)."""
+    template: str | None = None
+    """The notes template the notes were written with (:mod:`.brain.templates`); ``None``: basic notes."""
+    template_choice: str | None = None
+    """The template you picked on the meeting's page (``auto``: Claude picks); ``None``: the setting's."""
+    fields: dict[str, str] = Field(default_factory=dict)
+    """AI fields: name -> the meeting's answer in a few words (``""``: the meeting didn't say), in order."""
     summary_markdown: str | None = None
     notes_ref: dict[str, str] = Field(default_factory=dict)
     review: dict[str, ReviewDecision] = Field(default_factory=dict)

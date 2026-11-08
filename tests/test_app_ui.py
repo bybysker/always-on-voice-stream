@@ -2019,7 +2019,7 @@ def test_the_keyboard_reaches_and_answers_everything(make_app: Callable[..., UIA
           return [el.id || el.textContent.trim().slice(0, 24), getComputedStyle(el).outlineStyle]; }"""))
         if stops[-1][0] == "live-start":
             break
-    assert stops[-1][0] == "live-start" and len(stops) <= 6, stops  # the screens, today's spending, Start
+    assert stops[-1][0] == "live-start" and len(stops) <= 7, stops  # the five screens, today's spending, Start
     assert all(style == "solid" for _, style in stops), stops  # every stop shows the focus
     pg.keyboard.press("Enter")
     _wait_state(app, "listening")

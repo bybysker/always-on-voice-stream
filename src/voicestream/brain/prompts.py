@@ -93,11 +93,17 @@ the shared screen) and the items captured live during the meeting.
 Produce:
 1. title — short and descriptive.
 2. tldr — 2–3 sentences: what the meeting was about and what was decided.
-3. notes_markdown — crisp Markdown notes with sections "## Summary", "## Key points", \
-"## Decisions" and "## Open questions" (omit empty sections), the headings translated into the notes' \
-language (French: "## Résumé", "## Points clés", "## Décisions", "## Questions ouvertes"). Bullet \
-points, concrete facts, names and numbers. Do NOT include an action-items section; it is rendered \
-separately from the item list.
+3. template — the id of the notes template the notes follow. The context gives either one template \
+(use it) or a list of them (pick the one that fits this meeting best: what it was for, not the words \
+used; "general" when none clearly fits).
+3b. notes_markdown — crisp Markdown notes with one "## " section per section of that template, in its \
+order (omit sections the meeting gave nothing for), the headings translated into the notes' language \
+(French for the general template: "## Résumé", "## Points clés", "## Décisions", "## Questions \
+ouvertes"). Bullet points, concrete facts, names and numbers. Do NOT include an action-items section; \
+it is rendered separately from the item list. Do NOT repeat the fields either.
+3c. fields — one entry per field the context lists for that template (and for every meeting), with \
+its name exactly as listed: the answer in a few words, as the meeting said it (amounts with their \
+currency, dates as said); '' when the meeting didn't say. Never a guess.
 4. updates — corrections to the live items now that you have the full context: merge duplicates \
 (dismiss the redundant one), fix owners and deadlines, mark items completed during the meeting as \
 done, dismiss items that were hypothetical or misheard. Use '' / "unchanged" for fields you keep.

@@ -15,6 +15,7 @@ from .llm import LLM, LLMError, text_block
 from .people import finalize, name_voice, other_side, speaker_label, voice_labels
 from .prompts import SUMMARY_SYSTEM, meeting_context, render_items, render_screen, render_segment
 from .schema import WireSummary, wire_new_to_item, wire_update_to_update
+from .templates import GENERAL, choose, fields_for, prompt_block
 from .tracker import ExtractionResult, ItemTracker
 
 log = logging.getLogger(__name__)
@@ -54,11 +55,13 @@ async def summarize(
             other = other_side(meeting, sure=True)
             named = (f"\nThe other side of the meeting ('{others}' lines) is {other}: their lines carry that name."
                      if other and voice_labels(meeting) is None else "")
+            template, templates = choose(cfg.brain, meeting.template_choice)
             content = [
                 text_block(f"<transcript>\n{full_transcript(meeting, others)}\n</transcript>", cache=True),
                 text_block(
                     meeting_context(meeting, cfg.user_name, today, cfg.brain.attendees, cfg.brain.language)
                     + named
+                    + f"\n\n{prompt_block(template, templates, cfg.brain)}"
                     + f"\n\nItems captured live:\n{render_items([i for i in meeting.items.values() if not i.dismissed])}"
                 ),
             ]
@@ -90,6 +93,11 @@ async def summarize(
                 number = re.fullmatch(r"\s*speaker\s+(\d+)\s*", sp.speaker, flags=re.IGNORECASE)
                 if number and sp.name.strip() and number.group(1) not in meeting.voices:
                     name_voice(meeting, int(number.group(1)), sp.name, by_you=False)
+            # the template you chose, else the one Claude picked (one that doesn't exist: the general one)
+            used = template or templates.get(wire.template.strip()) or templates[GENERAL]
+            meeting.template = used.id
+            answers = {f.name.strip().casefold(): " ".join(f.value.split())[:300] for f in wire.fields}
+            meeting.fields = {f.name: answers.get(f.name.casefold(), "") for f in fields_for(used, cfg.brain)}
             if wire.title.strip():
                 meeting.title = wire.title.strip()[:120]
             meeting.tldr = wire.tldr.strip() or None
@@ -151,11 +159,13 @@ _LABELS = {
         "meeting": "Meeting", "recorded": "recorded", "with": "with", "actions": "Action items",
         "decisions": "Decisions", "questions": "Open questions", "notes": "Notes",
         "agents": "Work done by agents during the meeting", "due": "due", "agent": "agent",
+        "fields": "At a glance",
     },
     "fr": {
         "meeting": "Réunion", "recorded": "enregistrées", "with": "avec", "actions": "Actions",
         "decisions": "Décisions", "questions": "Questions ouvertes", "notes": "Notes",
         "agents": "Travail réalisé par les agents pendant la réunion", "due": "échéance", "agent": "agent",
+        "fields": "En bref",
     },
 }  # fmt: skip
 _FR_DAYS = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
@@ -202,6 +212,9 @@ def render_notes(meeting: Meeting, tldr: str, body: str, user_name: str) -> str:
     lines += [meta, ""]
     if tldr:
         lines += [f"> {tldr}", ""]
+    answered = [(name, value) for name, value in meeting.fields.items() if value.strip()]
+    if answered:
+        lines += [f"## {t['fields']}", ""] + [f"- **{name}:** {value}" for name, value in answered] + [""]
 
     actions = [i for i in meeting.items_of(ItemKind.ACTION) if i.status != ItemStatus.CANCELLED]
     if actions:

@@ -449,6 +449,7 @@ const S = {
   setupCompleted: false,
   heldStt: null,             // {name, changes}: a speech-to-text choice saved, sent once its model has downloaded
   meetings: { q: '', rows: [], total: 0, loaded: false, error: null },
+  qa: { draft: '', days: null, busy: false, result: null, error: null },  // Ask: the question, its answer
   detail: null,              // {folder, data, tab, error, summarizing, pushing, showDismissed, editing, expanded, filter}
   costHours: 4,
   dismissed: new Set(),      // warnings hidden from the Live screen
@@ -687,8 +688,8 @@ async function reveal(what, folder) {
 
 // ================================================================== the shell itself
 
-const SCREENS = ['live', 'meetings', 'costs', 'settings'];
-const NAV_ICONS = { live: 'mic', meetings: 'meetings', costs: 'costs', settings: 'settings' };
+const SCREENS = ['live', 'meetings', 'ask', 'costs', 'settings'];
+const NAV_ICONS = { live: 'mic', meetings: 'meetings', ask: 'sparkle', costs: 'costs', settings: 'settings' };
 
 function buildShell() {
   fill($('brand-mark'), brandMark());
@@ -1187,6 +1188,7 @@ function navigate(focus) {
   const r = S.route;
   if (r.name === 'live') renderLive();
   else if (r.name === 'meetings') renderMeetings(prev);
+  else if (r.name === 'ask') renderAsk();
   else if (r.name === 'costs') renderCosts();
   else if (r.name === 'settings') renderSettings();
   document.title = t('nav.' + r.name) + ' · Voicestream';
@@ -2856,6 +2858,14 @@ function notesBody(md, meeting) {
   if (i < rows.length && /^#\s/.test(rows[i])) { i++; skipBlank(); }
   if (i < rows.length && /^\*[^*].*\*(\s·.*)?$/.test(rows[i].trim())) { i++; skipBlank(); }
   if (meeting.tldr && i < rows.length && rows[i].trim() === '> ' + meeting.tldr.trim()) { i++; }
+  // and the fields ("At a glance"), which the page shows beside the notes
+  if (Object.values(meeting.fields || {}).some(Boolean)) {
+    skipBlank();
+    if (i < rows.length && /^##\s+(At a glance|En bref)\s*$/.test(rows[i])) {
+      i++;
+      while (i < rows.length && !/^#{1,2}\s/.test(rows[i])) i++;
+    }
+  }
   return rows.slice(i).join('\n');
 }
 
@@ -2909,6 +2919,7 @@ function meetingChips(m) {
   else if (m.in_progress) chips.push(h('span', { class: 'pill warn' }, t('meetings.in_progress')));
   if (m.interrupted) chips.push(h('span', { class: 'pill warn', title: t('meetings.interrupted_note') }, t('meetings.interrupted')));
   if (m.short_clip) chips.push(h('span', { class: 'pill', title: t('meetings.short_clip_note') }, t('meetings.short_clip')));
+  if (m.template && m.template !== 'general') chips.push(h('span', { class: 'pill', title: t('template.label') }, templateName(m.template)));
   return chips;
 }
 
@@ -2964,7 +2975,9 @@ function meetingRow(m, bucket) {
     when,
     h('div', { class: 'what' },
       h('div', { class: 'what-top' }, h('h3', {}, m.title || t('meetings.untitled')), meetingChips(m)),
-      m.tldr && h('p', { class: 'tldr' }, m.tldr)),
+      m.tldr && h('p', { class: 'tldr' }, m.tldr),
+      Object.keys(m.fields || {}).length ? h('p', { class: 'mfields' }, Object.entries(m.fields).slice(0, 3).map(([k, v]) =>
+        h('span', {}, h('span', { class: 'muted' }, k), ' ', v))) : null),
     h('div', { class: 'col-todos num' }, c.action ? h('span', {}, tp('count.actions', c.action)) : dash,
       m.my_actions ? h('span', { class: 'mine' }, tp('count.mine', m.my_actions)) : null),
     h('div', { class: 'col-decided num' }, c.decision ? h('span', {}, tp('count.decisions', c.decision)) : dash.cloneNode(true),
@@ -2975,7 +2988,7 @@ function meetingRow(m, bucket) {
 
 // ------------------------------------------------------------------ meeting detail
 
-const TABS = ['notes', 'actions', 'transcript', 'email'];
+const TABS = ['notes', 'actions', 'transcript', 'email', 'conversation'];
 
 async function renderDetail(folder, prev) {
   const same = S.detail && S.detail.folder === folder;
@@ -2985,6 +2998,9 @@ async function renderDetail(folder, prev) {
   }
   const tab = S.route.parts[1];
   if (TABS.includes(tab)) S.detail.tab = tab;
+  // a line of the transcript in the address (a source of an Ask answer): shown, in view, unfiltered
+  const seg = tab === 'transcript' ? S.route.parts[2] || null : null;
+  if (seg !== S.detail.focusSeg) { S.detail.focusSeg = seg; S.detail.scrolledTo = null; if (seg) S.detail.filter = ''; }
   if (!S.detail.data) fill($('screen-meetings'), h('div', { class: 'detail-head' },
     h('a', { class: 'back', href: '#/meetings' }, icon('back'), t('meetings.all')), h('h1', {}, t('common.loading'))));
   else drawDetail();
@@ -3104,7 +3120,7 @@ function drawDetail() {
     reviewCard(D, readOnly),
     ...notes.map((n) => h('div', { class: 'readonly-note' }, n)),
     (m.segments || []).length ? voices.el : null,
-    h('div', { class: 'detail-grid' }, h('div', { class: 'tabwrap' }, tabs, panel), detailFacts(m, duration)));
+    h('div', { class: 'detail-grid' }, h('div', { class: 'tabwrap' }, tabs, panel), detailFacts(m, duration, D)));
 }
 
 /** The tools that wait for your go-ahead (``review = true``), by name: "Promethee". */
@@ -3177,7 +3193,7 @@ function langName(code) {
 }
 
 /** The meeting's facts beside its tabs: how long, in what language, with whom, what came out, where it went. */
-function detailFacts(m, duration) {
+function detailFacts(m, duration, D) {
   const items = Object.values(m.items || {}).filter((i) => !i.dismissed);
   const todos = items.filter((i) => i.kind === 'action');
   const mine = todos.filter((i) => i.status === 'open' && isMine(i.owner)).length;
@@ -3194,7 +3210,7 @@ function detailFacts(m, duration) {
     ['decisions', fmtNum(decisions)],
     ['sent', Object.keys(pushed).length ? Object.keys(pushed).map(sinkLabel).join(', ') : h('span', { class: 'none' }, t('meetings.fact.not_sent'))],
   ];
-  return h('aside', { class: 'facts', 'aria-labelledby': 'facts-h' }, h('h2', { id: 'facts-h' }, t('meetings.facts')),
+  return h('aside', { class: 'facts', 'aria-labelledby': 'facts-h' }, D ? fieldsBlock(D) : null, h('h2', { id: 'facts-h' }, t('meetings.facts')),
     h('dl', { class: 'kv' }, rows.flatMap(([key, value]) => [h('dt', {}, t('meetings.fact.' + key)), h('dd', {}, value)])));
 }
 
@@ -3211,12 +3227,14 @@ function detailPanel(D) {
   const { m } = detailState(D);
   if (D.tab === 'notes') {
     const md = D.data.notes_markdown;
+    const row = m.ended_at && D.data.templates ? templateRow(D) : null;
     if (!md) {
-      return h('div', { class: 'empty-state' }, icon('sparkle', 'xl'), h('strong', {}, t('meetings.no_notes')),
-        m.ended_at ? t('meetings.no_notes_text') : t('meetings.no_notes_live'));
+      return h('div', {}, row, h('div', { class: 'empty-state' }, icon('sparkle', 'xl'), h('strong', {}, t('meetings.no_notes')),
+        m.ended_at ? t('meetings.no_notes_text') : t('meetings.no_notes_live')));
     }
-    return h('div', { class: 'prose', id: 'notes' }, renderMarkdown(notesBody(md, m)));
+    return h('div', {}, row, h('div', { class: 'prose', id: 'notes' }, renderMarkdown(notesBody(md, m))));
   }
+  if (D.tab === 'conversation') return conversationPanel(D);
   if (D.tab === 'actions') return actionsPanel(D);
   if (D.tab === 'transcript') return transcriptPanel(D);
   return emailPanel(D);
@@ -3276,6 +3294,14 @@ function transcriptPanel(D) {
         : h('span', { class: 'spk' }, spk(s)), h('span', {}, s.text)))));
     for (const item of Object.values(D.data.meeting.items || {})) markSaid(list, item);
     if (!rows.length) list.append(h('p', { class: 'muted' }, t('meetings.find_none')));
+    const hit = D.focusSeg && [...list.children].find((el) => el.dataset.seg === D.focusSeg);
+    if (hit) {
+      hit.classList.add('hit');
+      if (D.scrolledTo !== D.focusSeg) {  // once: a redraw (the meeting saved) leaves the scroll where you put it
+        D.scrolledTo = D.focusSeg;
+        requestAnimationFrame(() => hit.scrollIntoView({ block: 'center' }));
+      }
+    }
   };
   filter.addEventListener('input', debounce(() => { D.filter = filter.value.trim(); draw(); }, 150));
   draw();
@@ -3330,12 +3356,14 @@ async function pushMeeting(button) {
   reloadDetailSoon();
 }
 
-async function rewriteNotes() {
+/** ``template``: write them with this notes template from now on (the picker above the notes). */
+async function rewriteNotes(template) {
   const D = S.detail;
+  if (typeof template !== 'string') template = null;  // the button's click event
   // waiting before the request is sent: offline, the notes can be rewritten before it even answers
   D.summarizing = true;
   drawDetail();
-  const ok = await act(null, () => api('POST', `/api/meetings/${enc(D.folder)}/summarize`));
+  const ok = await act(null, () => api('POST', `/api/meetings/${enc(D.folder)}/summarize`, template ? { template } : undefined));
   if (ok === undefined && S.detail === D) {
     D.summarizing = false;
     drawDetail();
@@ -3373,6 +3401,302 @@ function onMeetingSaved(d) {
   if (S.detail && d.folder === S.detail.folder && !S.detail.summarizing) reloadDetailSoon();
   if (S.lastMeeting && S.lastMeeting.folder === d.folder) { S.lastMeetingLoaded = false; refreshLast(); }
   refreshMeetingsSoon();
+}
+
+// ------------------------------------------------------- notes template, fields, conversation
+
+/** A template's name: the app's own words for the built-in ones, yours for your own. */
+function templateName(id, list) {
+  if (!id) return '';
+  if (has('template.' + id)) return t('template.' + id);
+  const found = (list || []).find((x) => x.id === id);
+  return found ? found.name : id;
+}
+
+/** Above the notes: which template they follow, and a choice to write them again with another. */
+function templateRow(D) {
+  const { m, inProgress } = detailState(D);
+  const list = D.data.templates || [];
+  const setting = D.data.template_setting || 'auto';
+  const current = m.template_choice || setting;
+  const options = [['auto', t('template.auto')], ...list.map((x) => [x.id, templateName(x.id, list)])];
+  const select = h('select', { id: 'notes-template', 'aria-label': t('template.label'), disabled: inProgress || D.summarizing || null },
+    options.map(([id, label]) => h('option', { value: id, selected: id === current || null }, label)));
+  select.addEventListener('change', () => rewriteNotes(select.value));
+  const used = m.template && templateName(m.template, list);
+  const how = !m.template ? t('template.basic')
+    : current === 'auto' ? t('template.picked', { name: used }) : t('template.used', { name: used });
+  return h('div', { class: 'template-row' },
+    h('label', { for: 'notes-template', class: 'muted small' }, t('template.label')), select,
+    h('span', { class: 'muted small grow' }, how));
+}
+
+/** The AI fields beside the tabs: each answer, "—" when the meeting didn't say; Edit corrects them. */
+function fieldsBlock(D) {
+  const { m, readOnly, inProgress } = detailState(D);
+  const names = Object.keys(m.fields || {});
+  if (!names.length) return null;
+  const editing = D.editing.has('fields');
+  const head = h('div', { class: 'facts-head' }, h('h2', { id: 'fields-h' }, t('fields.title')),
+    !editing && !readOnly && !inProgress && btn(t('item.edit'), { cls: 'small ghost', id: 'fields-edit', onclick: () => {
+      D.editing.add('fields'); drawDetail(); const first = $('field-0'); if (first) first.focus();
+    } }, 'edit'));
+  if (!editing) {
+    return h('section', { class: 'fields', 'aria-labelledby': 'fields-h' }, head,
+      h('dl', { class: 'kv' }, names.flatMap((name) => [h('dt', {}, name),
+        h('dd', {}, m.fields[name] ? m.fields[name] : h('span', { class: 'none', title: t('fields.none') }, '—'))])));
+  }
+  const inputs = names.map((name, i) => h('input', { type: 'text', id: 'field-' + i, value: m.fields[name] || '', maxlength: '300',
+    placeholder: t('fields.none'), autocomplete: 'off' }));
+  const close = () => { D.editing.delete('fields'); drawDetail(); };
+  const save = btn(t('common.save'), { cls: 'small primary', id: 'fields-save', onclick: (e) => act(e.currentTarget, async () => {
+    const values = {};
+    names.forEach((name, i) => { if (inputs[i].value.trim() !== (m.fields[name] || '')) values[name] = inputs[i].value.trim(); });
+    if (Object.keys(values).length) {
+      const res = await api('PATCH', `/api/meetings/${enc(D.folder)}/fields`, { values });
+      m.fields = res.fields;
+      toast(t('fields.saved'), 'ok');
+    }
+    close();
+    loadDetail();  // the notes list them: written again
+  }) });
+  return h('section', { class: 'fields editing', 'aria-labelledby': 'fields-h' }, head,
+    h('form', { class: 'fields-form', onsubmit: (e) => { e.preventDefault(); save.click(); } },
+      names.map((name, i) => h('label', { for: 'field-' + i }, h('span', {}, name), inputs[i])),
+      h('p', { class: 'muted small' }, t('fields.edit_help')),
+      h('div', { class: 'row' }, btn(t('common.cancel'), { cls: 'small ghost', onclick: close }), save)));
+}
+
+const LISTENING = new Set(['sales', 'interview']);
+/** In these meetings the others' words are the point: past these figures, the page says it gently. */
+const COACH = { share: 0.6, monologue: 150, questions_per_10min: 1 };
+
+/** How the meeting went as a conversation: your figures, then everyone's share of the talk. */
+function conversationPanel(D) {
+  const st = D.data.stats;
+  const m = D.data.meeting;
+  if (!st || !st.speakers.length) return h('div', { class: 'empty-state' }, icon('speaker', 'xl'), h('strong', {}, t('talk.none')));
+  const you = st.you;
+  const pct = (x) => intl(Intl.NumberFormat, locale(), { style: 'percent', maximumFractionDigits: 0 }).format(x || 0);
+  const tiles = [
+    ['share', you ? pct(you.share) : '—'],
+    ['longest', you ? fmtSpan(you.longest_s) : '—'],
+    ['questions', you ? fmtNum(you.questions) : '—'],
+    ['switches', st.switches_per_min != null ? fmtFixed(st.switches_per_min, 1) : '—'],
+  ];
+  const hints = [];
+  const listening = LISTENING.has(m.template);
+  if (you && listening && you.share > COACH.share) hints.push(t('talk.hint.share', { pct: pct(you.share) }));
+  if (you && listening && you.longest_s > COACH.monologue) hints.push(t('talk.hint.monologue', { time: fmtSpan(you.longest_s) }));
+  if (you && listening && st.duration_s >= 600 && you.questions < COACH.questions_per_10min * st.duration_s / 600) {
+    hints.push(t('talk.hint.questions', { n: fmtNum(you.questions) }));
+  }
+  const most = Math.max(...st.speakers.map((p) => p.share), 0.01);
+  const rows = st.speakers.map((p) => h('tr', { class: p.you ? 'you' : null },
+    h('th', { scope: 'row' }, p.you ? t('live.me') : p.name),
+    h('td', { class: 'bar-cell' }, h('div', { class: 'bar-wrap' }, shareBar(p.share / most), h('span', { class: 'num' }, pct(p.share)))),
+    h('td', { class: 'num' }, fmtSpan(p.talk_s)),
+    h('td', { class: 'num' }, fmtSpan(p.longest_s)),
+    h('td', { class: 'num' }, fmtNum(p.questions)),
+    h('td', { class: 'num' }, p.wpm != null ? fmtNum(p.wpm) : '—')));
+  return h('div', { class: 'talk' },
+    h('dl', { class: 'figures talk-figures' }, tiles.map(([key, v]) => h('div', {}, h('dt', {}, t('talk.' + key)), h('dd', { class: 'num' }, v)))),
+    hints.length ? h('ul', { class: 'talk-hints' }, hints.map((x) => h('li', {}, icon('info'), h('span', {}, x)))) : null,
+    h('table', { class: 'talk-table' },
+      h('caption', { class: 'sr-only' }, t('talk.table')),
+      h('thead', {}, h('tr', {}, ['who', 'share', 'time', 'longest', 'questions', 'pace'].map((k) => h('th', { scope: 'col', class: k === 'who' ? null : 'num' }, t('talk.col.' + k))))),
+      h('tbody', {}, rows)),
+    h('p', { class: 'muted small' }, t('talk.private')));
+}
+
+/** A bar as long as ``fraction`` of the longest (set through the CSSOM: the page's CSP allows no style attribute). */
+function shareBar(fraction) {
+  const bar = h('span', { class: 'share-bar', 'aria-hidden': 'true' });
+  bar.style.setProperty('--w', (Math.max(0, Math.min(1, fraction)) * 100).toFixed(1) + '%');
+  return bar;
+}
+
+/** A stretch of talk: "45 s", "2 min 35 s". */
+function fmtSpan(seconds) {
+  const s = Math.round(seconds || 0);
+  if (s < 60) return t('dur.seconds', { n: fmtNum(s) });
+  return t('dur.min_sec', { m: fmtNum(Math.floor(s / 60)), s: String(s % 60).padStart(2, '0') });
+}
+
+// ============================================================================= Ask
+
+const ASK_PERIODS = [[null, 'ask.days.auto'], [7, 'ask.days.7'], [31, 'ask.days.31'], [92, 'ask.days.92'], [0, 'ask.days.all']];
+const ASK_EXAMPLES = ['ask.example.promised', 'ask.example.pricing', 'ask.example.decided', 'ask.example.week'];
+const QA = {};
+
+/** Ask: a question answered by Claude from all your meetings, each claim with the line it rests on. */
+function renderAsk() {
+  const A = S.qa;
+  const root = $('screen-ask');
+  QA.input = h('textarea', { id: 'qa-input', rows: '2', maxlength: '500', placeholder: t('ask.placeholder'), 'aria-label': t('ask.label'), value: A.draft });
+  QA.input.addEventListener('input', () => { A.draft = QA.input.value; });
+  QA.input.addEventListener('keydown', (e) => {  // Return asks, Shift-Return is a new line
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); askQuestion(); }
+  });
+  QA.days = h('select', { id: 'qa-days', 'aria-label': t('ask.period') },
+    ASK_PERIODS.map(([days, key], i) => h('option', { value: String(i), selected: same(days, A.days) || null }, t(key))));
+  QA.days.addEventListener('change', () => { A.days = ASK_PERIODS[Number(QA.days.value)][0]; });
+  QA.go = btn(t('ask.go'), { cls: 'primary', id: 'qa-go', onclick: () => askQuestion() }, 'sparkle');
+  QA.out = h('div', { id: 'qa-out', 'aria-live': 'polite' });
+  fill(root,
+    h('div', { class: 'screen-head' }, h('div', {}, h('h1', {}, t('ask.title')), h('p', { class: 'sub' }, t('ask.sub')))),
+    h('form', { class: 'card qa-form', onsubmit: (e) => { e.preventDefault(); askQuestion(); } },
+      QA.input, h('div', { class: 'qa-bar' }, QA.days, h('span', { class: 'muted small grow' }, t('ask.hint')), QA.go)),
+    QA.out);
+  drawAnswer();
+}
+
+async function askQuestion(text) {
+  const A = S.qa;
+  const question = (text ?? A.draft).trim();
+  if (!question || A.busy) { if (!question && QA.input) QA.input.focus(); return; }
+  A.draft = question;
+  if (QA.input) QA.input.value = question;
+  A.busy = true;
+  A.error = null;
+  drawAnswer();
+  try {
+    A.result = await api('POST', '/api/ask', { question, days: A.days });
+  } catch (err) {
+    A.error = err.message;
+  } finally {
+    A.busy = false;
+  }
+  if (S.route.name === 'ask') drawAnswer();
+}
+
+function drawAnswer() {
+  const A = S.qa;
+  if (!QA.out || !QA.out.isConnected) return;
+  if (QA.go) {
+    QA.go.disabled = A.busy;
+    fill(QA.go, A.busy ? spinner() : icon('sparkle'), A.busy ? t('ask.going') : t('ask.go'));
+  }
+  if (A.busy) {
+    fill(QA.out, h('div', { class: 'card qa-answer qa-wait' }, spinner(), h('span', {}, t('ask.reading'))));
+    return;
+  }
+  if (A.error) {
+    fill(QA.out, notice('warn', 'alert', humanize(A.error),
+      btn(t('action.try_again'), { cls: 'small', onclick: () => askQuestion() }, 'refresh')));
+    return;
+  }
+  const r = A.result;
+  if (!r) {  // nothing asked yet: what you could ask
+    fill(QA.out, h('section', { class: 'qa-examples', 'aria-labelledby': 'qa-ex-h' },
+      h('h2', { id: 'qa-ex-h' }, t('ask.examples')),
+      h('div', { class: 'qa-chips' }, ASK_EXAMPLES.map((key) => h('button', {
+        type: 'button', class: 'btn small ghost', onclick: () => askQuestion(t(key)),
+      }, t(key))))));
+    return;
+  }
+  const parts = [];
+  if (r.answer) {
+    const body = h('div', { class: 'prose qa-text', id: 'qa-text' }, renderMarkdown(r.answer));
+    linkCitations(body, new Set((r.citations || []).map((c) => c.n)));
+    parts.push(h('section', { class: 'card qa-answer', 'aria-labelledby': 'qa-answer-h' },
+      h('h2', { class: 'sr-only', id: 'qa-answer-h' }, t('ask.answer')),
+      h('p', { class: 'qa-q' }, r.question), body,
+      (r.citations || []).length ? h('div', { class: 'qa-sources' },
+        h('h3', {}, t('ask.sources')), h('ol', {}, r.citations.map(sourceRow))) : null,
+      h('p', { class: 'muted small qa-foot' }, searchedText(r))));
+  } else {
+    parts.push(noAnswerNotice(r));
+    parts.push(matchesCard(r));
+  }
+  fill(QA.out, ...parts);
+}
+
+/** "[2]" in the answer becomes a link to its source below (only numbers that have one). */
+function linkCitations(root, known) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) if (/\[\d{1,3}\]/.test(walker.currentNode.nodeValue)) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    const text = node.nodeValue;
+    for (const m of text.matchAll(/\[(\d{1,3})\]/g)) {
+      const n = Number(m[1]);
+      if (!known.has(n)) continue;
+      frag.append(text.slice(last, m.index), h('a', { class: 'cite', href: '#qa-src-' + n, onclick: (e) => {
+        e.preventDefault();  // the address stays the screen's: a hash link would leave it
+        const target = $('qa-src-' + n);
+        if (target) { target.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); target.focus({ preventScroll: true }); }
+      } }, String(n)));
+      last = m.index + m[0].length;
+    }
+    if (last) { frag.append(text.slice(last)); node.replaceWith(frag); }
+  }
+}
+
+/** Where a meeting's line is: its page's transcript, scrolled to the line. */
+function lineHref(folder, line) {
+  return '#/meetings/' + enc(folder) + (line ? '/transcript/' + enc(line.seg_id) : '');
+}
+
+function sourceRow(c) {
+  const when = fmtDay(c.started_at, { weekday: 'short', day: 'numeric', month: 'short' });
+  const what = h('span', { class: 'qa-src-title' }, c.title || t('meetings.untitled'));
+  return h('li', { id: 'qa-src-' + c.n, tabindex: '-1', value: String(c.n) },
+    h('a', { href: lineHref(c.folder, c.line) },
+      h('span', { class: 'qa-src-head' }, what, h('span', { class: 'muted' }, ' · ' + when + (c.line ? ' · ' + fmtTs(c.line.t) : ''))),
+      c.line ? h('span', { class: 'qa-quote' }, h('span', { class: 'spk' }, c.line.you ? t('live.me') : c.line.speaker), c.line.text)
+        : h('span', { class: 'qa-quote muted' }, t('ask.from_notes'))));
+}
+
+function searchedText(r) {
+  const period = r.days ? t('ask.in_days', { n: fmtNum(r.days) }) : '';
+  return tp('ask.searched', r.searched || 0, { period });
+}
+
+/** Why there is no answer: no meeting has the words, or no Claude (its key, the setting, the budget, an error). */
+function noAnswerNotice(r) {
+  const why = r.error ? 'error' : r.offline_reason;
+  const fix = why === 'no_key' || why === 'offline'
+    ? btn(t('ask.fix_claude'), { cls: 'small', onclick: () => go('#/settings/claude') }, 'key')
+    : why === 'over_budget' ? btn(t('ask.fix_budget'), { cls: 'small', onclick: () => go('#/settings/claude') }, 'costs') : null;
+  if (!(r.meetings && r.meetings.length)) return notice('info', 'search', why ? t('ask.none_offline') : t('ask.none', { q: r.question }), fix);
+  return notice('info', 'info', t('ask.why.' + (why || 'offline'), { error: r.error ? humanize(r.error) : '' }), fix);
+}
+
+/** ``text`` with the words searched for marked: a word is one when, accents and case aside, it starts with a
+ *  searched stem (the search's own: "budgets" and "budgétaire" both start with "budget"). */
+function marked(text, stems) {
+  if (!stems.length) return text;
+  const fold = (w) => w.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const out = [];
+  let last = 0;
+  for (const m of text.matchAll(/[\p{L}\p{N}]+/gu)) {
+    const w = fold(m[0]);
+    if (!stems.some((st) => w.startsWith(st) && (st.length >= 3 || w === st))) continue;
+    out.push(text.slice(last, m.index), h('mark', { class: 'qa-hit' }, m[0]));
+    last = m.index + m[0].length;
+  }
+  out.push(text.slice(last));
+  return out;
+}
+
+/** Without Claude's answer: where the question's words are, meeting by meeting (a full-text search). */
+function matchesCard(r) {
+  const ms = r.meetings || [];
+  if (!ms.length) return null;
+  return h('section', { class: 'card qa-matches', 'aria-labelledby': 'qa-m-h' },
+    h('h2', { id: 'qa-m-h' }, tp('ask.matches', ms.length)),
+    ms.map((m) => h('article', { class: 'qa-match' },
+      h('a', { class: 'qa-src-head', href: lineHref(m.folder, null) }, h('strong', {}, m.title || t('meetings.untitled')),
+        h('span', { class: 'muted' }, ' · ' + fmtDay(m.started_at, { weekday: 'short', day: 'numeric', month: 'short' }))),
+      !m.excerpts.length && m.tldr ? h('p', { class: 'muted small' }, m.tldr) : null,
+      m.excerpts.length ? h('div', { class: 'tlines' }, m.excerpts.slice(0, 8).map((x) => h('a', {
+        class: 'tline ' + (x.you ? 'me' : 'others'), href: lineHref(m.folder, x),
+      }, h('span', { class: 'ts' }, fmtTs(x.t)), h('span', { class: 'body' }, h('span', { class: 'spk' }, x.you ? t('live.me') : x.speaker),
+        marked(x.text, r.words || []))))) : null)),
+    h('p', { class: 'muted small qa-foot' }, searchedText(r)));
 }
 
 // =========================================================================== Costs
@@ -4500,7 +4824,54 @@ function claudeSection() {
     card(t('claude.budget_title'), t('claude.budget_lead'),
       field('budget.daily_usd', t('claude.budget'), numberInput('budget.daily_usd', { min: 0, step: 0.5 }),
         { help: t('claude.budget_help'), extra: h('span', { class: 'suffix' }, t('claude.per_day')) }),
-      h('p', { class: 'small' }, h('a', { href: '#/costs' }, t('claude.see_costs')))));
+      h('p', { class: 'small' }, h('a', { href: '#/costs' }, t('claude.see_costs')))),
+    card(t('notes.title'), t('notes.lead'),
+      field('brain.notes_template', t('notes.template'), selectInput('brain.notes_template', templateOptions(), { onChange: () => redrawSection() }),
+        { help: templateHelp(val('brain.notes_template')) }),
+      field('brain.fields', t('notes.fields'), linesInput('brain.fields', { placeholder: t('notes.fields_ph'), rows: 4 }),
+        { help: t('notes.fields_help') })),
+    mcpCard());
+}
+
+/** Auto, then every template (the built-in ones in the app's words, yours by their name). */
+function templateOptions() {
+  const list = (S.settings && S.settings.templates) || [];
+  return [['auto', t('template.auto')], ...list.map((x) => [x.id, templateName(x.id, list)])];
+}
+
+/** What the chosen template's notes are made of: its sections and its fields. */
+function templateHelp(id) {
+  const x = ((S.settings && S.settings.templates) || []).find((tpl) => tpl.id === id);
+  if (!x) return t('notes.template_help');
+  const fields = x.fields.length ? ' ' + t('notes.template_fields', { fields: x.fields.join(', ') }) : '';
+  return t('notes.template_sections', { sections: x.sections.join(', ') }) + fields;
+}
+
+/** A list setting as lines of text, one entry per line (empty: back to the default). */
+function linesInput(path, { placeholder = '', rows = 3 } = {}) {
+  const cur = val(path) || [];
+  const el = h('textarea', { id: fid(path), rows: String(rows), placeholder, spellcheck: 'false', value: cur.join('\n') });
+  el.addEventListener('input', () => {
+    const lines = el.value.split('\n').map((x) => x.trim()).filter(Boolean);
+    setDraft(path, lines.length ? lines : null);
+  });
+  return el;
+}
+
+/** Your meetings in Claude Desktop and Claude Code: the lines to paste, with Copy. */
+function mcpCard() {
+  const mcp = S.settings && S.settings.mcp;
+  if (!mcp) return null;
+  const snippet = (id, label, text) => h('div', { class: 'snippet' },
+    h('div', { class: 'snippet-head' }, h('span', { class: 'small' }, label),
+      btn(t('common.copy'), { cls: 'small ghost', id: 'copy-' + id, onclick: (e) => act(e.currentTarget, async () => {
+        await copyText(text); toast(t('mcp.copied'), 'ok');
+      }) }, 'copy')),
+    h('pre', { id: 'mcp-' + id }, text));
+  return card(t('mcp.title'), [t('mcp.lead'), h('p', { class: 'lead small' }, t('mcp.safe'))],
+    snippet('desktop', t('mcp.desktop'), mcp.desktop),
+    snippet('code', t('mcp.code'), mcp.claude_code),
+    h('p', { class: 'help small' }, t('mcp.try')));
 }
 
 function audioSection() {
@@ -5726,6 +6097,93 @@ const STRINGS = {
     'meetings.interrupted_note': 'Voicestream was closed while it recorded this meeting (a crash, a forced quit or a power cut): it ends at the last words heard and has basic notes. Nothing was sent yet: rewrite the notes and send its to-dos when you are ready.',
     'meetings.sections': 'Meeting sections', 'meetings.tab.notes': 'Notes', 'meetings.tab.actions': 'To-dos & decisions',
     'meetings.tab.transcript': 'Transcript', 'meetings.tab.email': 'Follow-up email',
+    'nav.ask': 'Ask',
+    'meetings.tab.conversation': 'Conversation',
+    'common.copy': 'Copy',
+    'dur.seconds': '{n}\u00a0s',
+    'dur.min_sec': '{m}\u00a0min\u00a0{s}\u00a0s',
+    'ask.title': 'Ask your meetings',
+    'ask.sub': 'Claude answers from your meetings’ notes and transcripts, and shows the lines it read.',
+    'ask.label': 'Your question',
+    'ask.placeholder': 'What did Acme say about pricing? What did I promise this week?',
+    'ask.period': 'Which meetings',
+    'ask.days.auto': 'As the question says',
+    'ask.days.7': 'Last 7 days',
+    'ask.days.31': 'Last month',
+    'ask.days.92': 'Last 3 months',
+    'ask.days.all': 'All meetings',
+    'ask.hint': 'Return to ask, Shift-Return for a new line',
+    'ask.go': 'Ask',
+    'ask.going': 'Asking…',
+    'ask.reading': 'Claude is reading your meetings…',
+    'ask.examples': 'Try',
+    'ask.example.promised': 'What did I promise to do this week?',
+    'ask.example.pricing': 'What have clients said about our prices?',
+    'ask.example.decided': 'What did we decide in the last month?',
+    'ask.example.week': 'Summarize my meetings this week',
+    'ask.answer': 'Answer',
+    'ask.sources': 'Sources',
+    'ask.from_notes': 'From the meeting’s notes',
+    'ask.searched.one': '{n} meeting searched{period}.',
+    'ask.searched.other': '{n} meetings searched{period}.',
+    'ask.in_days': ' from the last {n} days',
+    'ask.none': 'No meeting mentions “{q}”. Try other words, or a longer period.',
+    'ask.none_offline': 'No meeting has your question’s words, and without Claude, Ask can only look for words.',
+    'ask.why.no_key': 'Add your Claude key to get answers. Meanwhile, here is where your question’s words come up.',
+    'ask.why.offline': 'Claude is turned off (Settings → Claude). Here is where your question’s words come up.',
+    'ask.why.over_budget': 'Today’s Claude budget is spent, so here is where your question’s words come up. Answers are back tomorrow, or raise the budget.',
+    'ask.why.error': 'Claude couldn’t answer ({error}). Here is where your question’s words come up.',
+    'ask.fix_claude': 'Claude settings',
+    'ask.fix_budget': 'Budget',
+    'ask.matches.one': 'Found in {n} meeting',
+    'ask.matches.other': 'Found in {n} meetings',
+    'template.label': 'Notes template',
+    'template.auto': 'Let Claude choose',
+    'template.general': 'General',
+    'template.sales': 'Sales call',
+    'template.interview': 'Customer interview',
+    'template.one_on_one': 'One-on-one',
+    'template.project': 'Team or project meeting',
+    'template.recruiting': 'Job interview',
+    'template.picked': 'Claude picked {name}',
+    'template.used': 'Notes follow {name}',
+    'template.basic': 'Basic notes, written without Claude',
+    'fields.title': 'At a glance',
+    'fields.none': 'Not discussed',
+    'fields.saved': 'Saved. Your tools get the new answers the next time you send the meeting.',
+    'fields.edit_help': 'Leave a field empty when the meeting didn’t discuss it. The notes are written again with your answers.',
+    'talk.none': 'Nothing was said in this meeting.',
+    'talk.share': 'You spoke',
+    'talk.longest': 'Your longest stretch',
+    'talk.questions': 'Questions you asked',
+    'talk.switches': 'Turns per minute',
+    'talk.hint.share': 'You did {pct} of the talking. In this kind of meeting, listening more than you talk usually tells you more.',
+    'talk.hint.monologue': 'Your longest stretch lasted {time}. A question every minute or two keeps the others with you.',
+    'talk.hint.questions': 'You asked {n} questions. Open questions bring out more of the other side’s view.',
+    'talk.table': 'Talk time by person',
+    'talk.col.who': 'Who',
+    'talk.col.share': 'Share',
+    'talk.col.time': 'Talk time',
+    'talk.col.longest': 'Longest',
+    'talk.col.questions': 'Questions',
+    'talk.col.pace': 'Words/min',
+    'talk.private': 'Worked out on this computer from the transcript. Only you see it: it is never in the notes or sent to your tools.',
+    'notes.title': 'Meeting notes',
+    'notes.lead': 'How Claude writes the notes when a meeting ends: their sections, and the fields it fills in.',
+    'notes.template': 'Notes template',
+    'notes.template_help': 'Let Claude choose: each meeting gets the template that fits it (a sales call gets pain points and budget, a one-on-one gets wins and blockers). A meeting’s page can pick another one.',
+    'notes.template_sections': 'Sections: {sections}.',
+    'notes.template_fields': 'Fields: {fields}.',
+    'notes.fields': 'Fields for every meeting',
+    'notes.fields_ph': 'Budget: what budget did they mention?\nNext step',
+    'notes.fields_help': 'One per line: a name, then what to look for after a colon. Claude answers each in a few words at the top of the notes (so in your Doc, Notion and HubSpot too), and leaves it empty when the meeting didn’t say.',
+    'mcp.title': 'Your meetings in Claude',
+    'mcp.lead': 'Claude Desktop and Claude Code can search your meetings, read their notes and transcripts and list your to-dos, through Voicestream’s MCP server.',
+    'mcp.safe': 'It runs on this computer when Claude starts it, and it only reads: it can’t change, send or delete anything. What Claude reads there goes to Anthropic, as anything you show Claude does.',
+    'mcp.desktop': 'Claude Desktop: Settings → Developer → Edit Config, then add',
+    'mcp.code': 'Claude Code: run in a terminal',
+    'mcp.try': 'Then restart Claude and ask: “What did I promise Acme last week?”',
+    'mcp.copied': 'Copied',
     'meetings.no_notes': 'No notes yet', 'meetings.no_notes_text': 'Click “Rewrite notes” to write them now.',
     'meetings.no_notes_live': 'They are written when the meeting ends.',
     'meetings.items_help': 'Correct anything that is wrong: the notes and your tools are updated too.',
@@ -6285,6 +6743,93 @@ const STRINGS = {
     'meetings.interrupted_note': 'Voicestream a été fermé pendant l’enregistrement de cette réunion (plantage, arrêt forcé ou coupure de courant) : elle s’arrête aux derniers mots entendus et ses notes sont sommaires. Rien n’a encore été envoyé : réécrivez les notes et envoyez ses tâches quand vous voulez.',
     'meetings.sections': 'Sections de la réunion', 'meetings.tab.notes': 'Notes', 'meetings.tab.actions': 'Tâches et décisions',
     'meetings.tab.transcript': 'Transcription', 'meetings.tab.email': 'E-mail de suivi',
+    'nav.ask': 'Demander',
+    'meetings.tab.conversation': 'Conversation',
+    'common.copy': 'Copier',
+    'dur.seconds': '{n}\u00a0s',
+    'dur.min_sec': '{m}\u00a0min\u00a0{s}\u00a0s',
+    'ask.title': 'Interrogez vos réunions',
+    'ask.sub': 'Claude répond à partir des notes et des transcriptions de vos réunions, et montre les lignes sur lesquelles il s’appuie.',
+    'ask.label': 'Votre question',
+    'ask.placeholder': 'Qu’a dit Acme sur les prix ? Qu’ai-je promis cette semaine ?',
+    'ask.period': 'Quelles réunions',
+    'ask.days.auto': 'Selon la question',
+    'ask.days.7': '7 derniers jours',
+    'ask.days.31': 'Le dernier mois',
+    'ask.days.92': '3 derniers mois',
+    'ask.days.all': 'Toutes les réunions',
+    'ask.hint': 'Entrée pour demander, Maj-Entrée pour aller à la ligne',
+    'ask.go': 'Demander',
+    'ask.going': 'Recherche…',
+    'ask.reading': 'Claude lit vos réunions…',
+    'ask.examples': 'Essayez',
+    'ask.example.promised': 'Qu’est-ce que j’ai promis de faire cette semaine ?',
+    'ask.example.pricing': 'Qu’ont dit les clients de nos prix ?',
+    'ask.example.decided': 'Qu’avons-nous décidé ce dernier mois ?',
+    'ask.example.week': 'Résume mes réunions de la semaine',
+    'ask.answer': 'Réponse',
+    'ask.sources': 'Sources',
+    'ask.from_notes': 'D’après les notes de la réunion',
+    'ask.searched.one': '{n} réunion parcourue{period}.',
+    'ask.searched.other': '{n} réunions parcourues{period}.',
+    'ask.in_days': ' sur les {n} derniers jours',
+    'ask.none': 'Aucune réunion ne parle de « {q} ». Essayez d’autres mots, ou une période plus longue.',
+    'ask.none_offline': 'Aucune réunion ne contient les mots de votre question, et sans Claude, la recherche ne trouve que des mots.',
+    'ask.why.no_key': 'Ajoutez votre clé Claude pour obtenir des réponses. En attendant, voici où apparaissent les mots de votre question.',
+    'ask.why.offline': 'Claude est désactivé (Réglages → Claude). Voici où apparaissent les mots de votre question.',
+    'ask.why.over_budget': 'Le budget Claude du jour est atteint : voici où apparaissent les mots de votre question. Les réponses reviennent demain, ou augmentez le budget.',
+    'ask.why.error': 'Claude n’a pas pu répondre ({error}). Voici où apparaissent les mots de votre question.',
+    'ask.fix_claude': 'Réglages Claude',
+    'ask.fix_budget': 'Budget',
+    'ask.matches.one': 'Trouvé dans {n} réunion',
+    'ask.matches.other': 'Trouvé dans {n} réunions',
+    'template.label': 'Modèle de notes',
+    'template.auto': 'Laisser Claude choisir',
+    'template.general': 'Général',
+    'template.sales': 'Appel commercial',
+    'template.interview': 'Entretien client',
+    'template.one_on_one': 'Point individuel',
+    'template.project': 'Réunion d’équipe ou de projet',
+    'template.recruiting': 'Entretien d’embauche',
+    'template.picked': 'Claude a choisi : {name}',
+    'template.used': 'Notes au format : {name}',
+    'template.basic': 'Notes simples, rédigées sans Claude',
+    'fields.title': 'En bref',
+    'fields.none': 'Pas abordé',
+    'fields.saved': 'Enregistré. Vos outils recevront les nouvelles réponses au prochain envoi de la réunion.',
+    'fields.edit_help': 'Laissez un champ vide quand la réunion ne l’a pas abordé. Les notes sont réécrites avec vos réponses.',
+    'talk.none': 'Rien n’a été dit pendant cette réunion.',
+    'talk.share': 'Vous avez parlé',
+    'talk.longest': 'Votre plus long monologue',
+    'talk.questions': 'Vos questions',
+    'talk.switches': 'Tours de parole par minute',
+    'talk.hint.share': 'Vous avez parlé {pct} du temps. Dans ce type de réunion, écouter plus que vous ne parlez vous en apprend souvent davantage.',
+    'talk.hint.monologue': 'Votre plus long monologue a duré {time}. Une question toutes les une ou deux minutes garde les autres avec vous.',
+    'talk.hint.questions': 'Vous avez posé {n} questions. Les questions ouvertes font davantage parler l’autre partie.',
+    'talk.table': 'Temps de parole par personne',
+    'talk.col.who': 'Qui',
+    'talk.col.share': 'Part',
+    'talk.col.time': 'Temps de parole',
+    'talk.col.longest': 'Plus long',
+    'talk.col.questions': 'Questions',
+    'talk.col.pace': 'Mots/min',
+    'talk.private': 'Calculé sur cet ordinateur à partir de la transcription. Vous seul le voyez : ce n’est jamais dans les notes ni envoyé à vos outils.',
+    'notes.title': 'Notes de réunion',
+    'notes.lead': 'Comment Claude rédige les notes à la fin d’une réunion : leurs sections, et les champs qu’il remplit.',
+    'notes.template': 'Modèle de notes',
+    'notes.template_help': 'Laisser Claude choisir : chaque réunion reçoit le modèle qui lui correspond (un appel commercial a ses points de douleur et son budget, un point individuel ses réussites et ses blocages). La page d’une réunion permet d’en choisir un autre.',
+    'notes.template_sections': 'Sections : {sections}.',
+    'notes.template_fields': 'Champs : {fields}.',
+    'notes.fields': 'Champs pour chaque réunion',
+    'notes.fields_ph': 'Budget : quel budget ont-ils évoqué ?\nProchaine étape',
+    'notes.fields_help': 'Un par ligne : un nom, puis ce qu’il faut chercher après deux-points. Claude répond à chacun en quelques mots en tête des notes (donc aussi dans votre Doc, Notion et HubSpot), et le laisse vide quand la réunion n’en a pas parlé.',
+    'mcp.title': 'Vos réunions dans Claude',
+    'mcp.lead': 'Claude Desktop et Claude Code peuvent chercher dans vos réunions, lire leurs notes et transcriptions et lister vos tâches, grâce au serveur MCP de Voicestream.',
+    'mcp.safe': 'Il tourne sur cet ordinateur quand Claude le lance, et il ne fait que lire : il ne peut rien modifier, envoyer ni supprimer. Ce que Claude y lit part chez Anthropic, comme tout ce que vous montrez à Claude.',
+    'mcp.desktop': 'Claude Desktop : Paramètres → Développeur → Modifier la configuration (Edit Config), puis ajoutez',
+    'mcp.code': 'Claude Code : lancez dans un terminal',
+    'mcp.try': 'Redémarrez ensuite Claude et demandez : « Qu’ai-je promis à Acme la semaine dernière ? »',
+    'mcp.copied': 'Copié',
     'meetings.no_notes': 'Pas encore de notes', 'meetings.no_notes_text': 'Cliquez sur « Réécrire les notes » pour les rédiger maintenant.',
     'meetings.no_notes_live': 'Elles sont rédigées à la fin de la réunion.',
     'meetings.items_help': 'Corrigez ce qui est faux : les notes et vos outils sont mis à jour aussi.',

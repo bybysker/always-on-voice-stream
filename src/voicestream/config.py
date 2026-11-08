@@ -9,12 +9,13 @@ Lookup order for the config file: ``--config`` flag, ``$VOICESTREAM_CONFIG``,
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 
 class _Section(BaseModel):
@@ -164,6 +165,18 @@ class EchoConfig(_Section):
     window_s: float = 6.0
 
 
+class NotesTemplateConfig(_Section):
+    """One of your own notes templates (``[brain.templates.<id>]``; see :mod:`voicestream.brain.templates`)."""
+
+    name: str = Field(min_length=1, max_length=60)
+    when: str = Field("", max_length=300)
+    """When it fits: what Claude reads to pick it (``notes_template = "auto"``)."""
+    sections: list[str] = Field(min_length=1, max_length=20)
+    """The notes' sections, in order, e.g. ``["Summary", "Metrics", "Asks"]``."""
+    fields: list[str] = Field(default_factory=list, max_length=20)
+    """Short answers it fills in, as ``brain.fields``."""
+
+
 class BrainConfig(_Section):
     provider: Literal["anthropic", "heuristic"] = "anthropic"
     """``heuristic`` = offline rule-based extraction (no API key, lower quality)."""
@@ -231,6 +244,41 @@ class BrainConfig(_Section):
     attendees: list[str] = Field(default_factory=list)
     vocabulary: list[str] = Field(default_factory=list)
     """Names/jargon that help both the transcriber and the extractor."""
+    notes_template: str = "auto"
+    """The shape of the notes (:mod:`voicestream.brain.templates`): ``auto`` = Claude picks, for each
+    meeting, the template that fits it (general, sales, interview, one_on_one, project, recruiting, or
+    one of ``templates``); or a template's id to always use that one. A meeting's page can pick another."""
+    templates: dict[str, NotesTemplateConfig] = Field(default_factory=dict)
+    """Your own notes templates, by id (one with a built-in's id replaces it)."""
+    fields: list[str] = Field(default_factory=list, max_length=20)
+    """AI fields every meeting answers in a few words, at the top of its notes: ``"Budget"``, or
+    ``"Budget: what budget, in which currency, did they mention?"`` (a name, then what to look for)."""
+
+    @field_validator("templates")
+    @classmethod
+    def _template_ids(cls, v: dict[str, NotesTemplateConfig]) -> dict[str, NotesTemplateConfig]:
+        for tid in v:
+            if not re.fullmatch(r"[a-z0-9_-]{1,40}", tid) or tid == "auto":
+                raise ValueError(f"template id {tid!r}: use lowercase letters, digits, - and _ (not 'auto')")
+        return v
+
+    @field_validator("fields")
+    @classmethod
+    def _field_lines(cls, v: list[str]) -> list[str]:
+        out = [" ".join(line.split()) for line in v if line.strip()]
+        for line in out:
+            if len(line) > 360:
+                raise ValueError(f"field {line[:30]!r}…: keep each field under 360 characters")
+        return out
+
+    @model_validator(mode="after")
+    def _known_template(self) -> BrainConfig:
+        from .brain.templates import AUTO, BUILTIN
+
+        known = {t.id for t in BUILTIN} | set(self.templates)
+        if self.notes_template != AUTO and self.notes_template not in known:
+            raise ValueError(f"notes_template {self.notes_template!r}: use 'auto' or one of {', '.join(sorted(known))}")
+        return self
 
 
 class ScreenConfig(_Section):

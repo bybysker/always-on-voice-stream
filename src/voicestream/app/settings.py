@@ -421,9 +421,12 @@ def settings_view(cfg: Config) -> dict[str, Any]:
     """``GET /api/settings``: every value, the sinks, which keys are set — never a key itself."""
     from . import secrets
 
+    from ..brain.templates import all_templates
+
     return {
         "values": cfg.model_dump(mode="json"),
         "sinks": sink_settings(cfg),
         "secrets": secrets.status(),
         "catalog": {"sinks": sink_catalog()},
+        "templates": [t.view() for t in all_templates(cfg.brain).values()],
     }
