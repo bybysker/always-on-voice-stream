@@ -115,9 +115,24 @@ on again), open Voicestream and allow it when asked. The Keychain may also ask o
 version may read your saved keys: click **Always Allow**.
 
 To build the app yourself on a Mac: `packaging/mac/build.sh` (the comments at its top list what to
-install first). To publish a release, push a `vX.Y.Z` tag that matches the version in
-`pyproject.toml`, or open **Actions → mac app → Run workflow** and type that tag: the build is
-tested, then attached to a new release with the notes in `packaging/mac/release-notes.md`.
+install first).
+
+**To ship a version to everyone's app**, merging to `main` isn't enough (that only builds a test DMG):
+a version reaches the apps as a release.
+
+```
+ 1. packaging/mac/release-notes.md: "New in this version" (what the update banner shows, 1500 characters)
+    and its first line, <!-- release notes for 0.4.1 -->; merge it to main
+ 2. Actions → release → Run workflow → version 0.4.1
+      checks it (newer than the current one, not released yet, notes written for it)
+      → writes it in pyproject.toml and __init__.py → commits and tags v0.4.1 on main
+      → the Mac build tests the app and publishes the release
+ 3. every installed Voicestream offers it within six hours (Settings → General → Updates → Check now: at once)
+```
+
+A version with a suffix (`0.5.0-beta.1`) is a pre-release: only apps with **pre-releases** turned on
+in Settings are offered it. `python packaging/release.py 0.4.1 --check` runs the checks on your own
+computer. Pushing a `vX.Y.Z` tag that matches the version in `pyproject.toml` by hand still works too.
 
 ### Installer l'application (Mac)
 
