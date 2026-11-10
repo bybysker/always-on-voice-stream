@@ -37,10 +37,10 @@ from voicestream.app.updater import NOTES_MAX, Version, parse_version, whats_new
 
 TAG = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$")
 """What mac-app.yml's release job accepts as a release tag (the same pattern)."""
-NOTES = Path("packaging/mac/release-notes.md")
+NOTES = "packaging/mac/release-notes.md"  # as the repository writes them, on any computer (messages too)
 NOTES_FOR = re.compile(r"\A<!--\s*release notes for v?(\S+)\s*-->")
-PYPROJECT = Path("pyproject.toml")
-INIT = Path("src/voicestream/__init__.py")
+PYPROJECT = "pyproject.toml"
+INIT = "src/voicestream/__init__.py"
 _PYPROJECT_VERSION = re.compile(r'^version\s*=\s*"([^"]+)"', re.MULTILINE)
 _INIT_VERSION = re.compile(r'^__version__\s*=\s*"([^"]+)"', re.MULTILINE)
 
