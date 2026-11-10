@@ -1,5 +1,7 @@
-<!-- The top of every GitHub release page (mac-app.yml adds the list of changes below it).
-     Keep it true for the version you tag. -->
+<!-- release notes for 0.4.0 -->
+<!-- The top of every GitHub release page (mac-app.yml adds the list of changes below it). The line above
+     names the version they are for: the release workflow refuses another (packaging/release.py), so update
+     both before you release. "New in this version" is what the app's update banner shows (1500 characters). -->
 **Voicestream for Mac** listens to your meetings (your microphone and the meeting's audio),
 writes the transcript on your Mac, and turns it into notes and to-dos with Claude: Google
 Calendar, Apple Reminders, Gmail, Google Docs, HubSpot and your own apps. French and English are
@@ -10,19 +12,17 @@ For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. You need a C
 
 ### New in this version
 
-- **Promethee.** Your meeting's to-do list can go to Promethee, through its MCP server. Turn it
-  on in *Settings → Your tools → Promethee* and click **Connect to Promethee**: you sign in to
-  Promethee in your browser, with no key to copy. Then **Test** says which Promethee action your
-  to-dos go through.
-- **You validate the to-do list at the end of each meeting.** Nothing goes to Promethee until you
-  say so. When a meeting ends, a banner says how many to-dos wait for your OK. The meeting's page
-  lists them: untick what shouldn't go, then **Send**, or **Don't send any**. A to-do you left
-  out never goes by itself. Any other tool can ask first too (`review = true` in its settings).
-- From the terminal: `voicestream push last --approve` validates the list and sends it.
-- **This is a beta (pre-release).** Only apps with *Settings → General → Updates → pre-releases*
-  turned on are offered it, and it installs from inside the app like any update after 0.3.0. The
-  Promethee connection follows the MCP standard but hasn't been tried against Promethee's own
-  server yet: if **Connect** or **Test** shows an error, it says why. Please send it to us.
+- **A summary to send.** A meeting's new **Summary** tab is a PDF for the people you met: what
+  was discussed, the decisions, the next steps and the to-dos, without your private notes. Edit
+  it, leave any to-do out, then **Download PDF**. The **Transcript** tab downloads as PDF or text.
+- **Who said what.** The people on the call are told apart by voice: click a speaker in the
+  transcript to name them, and every line of that voice takes the name.
+- **Mute** your microphone alone: what the others say is still recorded.
+- **Notes that fit the meeting.** A sales call, a one-on-one or a team sync each get their own
+  sections, led by the AI fields you choose ("Budget", "Next step").
+- **Ask your meetings** anything ("What did I promise Acme?"): the answer cites the lines it
+  read. Claude Desktop and Claude Code can read your meetings too (MCP).
+- **Promethee**, and you validate the to-do list at the end of each meeting before it goes there.
 
 ### Install
 
@@ -71,6 +71,8 @@ writing the to-dos and notes. A soft cap of $3 a day by default. The app itself 
 
 ### Known limits
 
+- The Promethee connection follows the MCP standard but hasn't been tried against Promethee's own
+  server yet: if **Connect** or **Test** shows an error, it says why. Please send it to us.
 - Not notarized by Apple, hence the Open Anyway step for a version you download yourself; updates
   installed from inside the app don't need it.
 - Built and tested on GitHub's virtual Mac (the packaged app's window and menu bar, French and

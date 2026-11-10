@@ -127,6 +127,7 @@ async def test_claude_names_the_voices_it_can_tell(cfg: Config) -> None:
     cfg.brain.provider = "anthropic"
     reply = WireSummary(title="Sync", tldr="", notes_markdown="", updates=[], missing_items=[],
                         participants=["Julie", "Paul"], language="en", followup_subject="", followup_body="", template="general", fields=[],
+                        recap_overview="", recap_discussed=[], recap_next_steps=[],
                         speakers=[WireSpeaker(speaker="Speaker 1", name="Julie"), WireSpeaker(speaker="speaker 2", name="Paul"),
                                   WireSpeaker(speaker="Speaker 3", name="Samuel"), WireSpeaker(speaker="Bob", name="Bob")])
     await summarize(cfg, m, ItemTracker(m, None, "Alex", today=WEDNESDAY), ScriptedLLM([reply]))

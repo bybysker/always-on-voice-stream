@@ -48,7 +48,8 @@ def _missing(title: str, **kw: object) -> WireNewItem:
 def _summary(**kw: object) -> WireSummary:
     base: dict[str, object] = dict(title="Q4 planning", tldr="We planned Q4.", notes_markdown="## Summary\n- Planned Q4",
                                    updates=[], missing_items=[], participants=[], speakers=[], language="en",
-                                   followup_subject="", followup_body="", template="general", fields=[])
+                                   followup_subject="", followup_body="", template="general", fields=[],
+                                   recap_overview="", recap_discussed=[], recap_next_steps=[])
     return WireSummary(**{**base, **kw})
 
 
@@ -201,3 +202,27 @@ def test_french_notes_get_french_section_headings() -> None:
 
 def test_summary_prompt_asks_for_headings_in_the_notes_language() -> None:
     assert "Points clés" in SUMMARY_SYSTEM
+
+
+async def test_the_summary_for_the_participants_is_kept_with_the_items_you_left_out() -> None:
+    from voicestream.models import Recap
+
+    cfg = Config()
+    cfg.brain.provider = "anthropic"
+    m, tracker = _meeting()
+    m.recap = Recap(overview="old", discussed=["old"], hidden=["A1"], edited=True)
+    wire = _summary(recap_overview="  We planned Q4\n and agreed on billing. ",
+                    recap_discussed=["- Q4 roadmap", "  ", "• Annual billing", "x" * 500],
+                    recap_next_steps=["Board review on 3 Dec"])
+    await summarize(cfg, m, tracker, ScriptedLLM([wire]))
+    assert m.recap is not None
+    assert m.recap.overview == "We planned Q4 and agreed on billing."
+    assert m.recap.discussed == ["Q4 roadmap", "Annual billing", "x" * 400]  # one plain line each, typed bullets off
+    assert m.recap.next_steps == ["Board review on 3 Dec"]
+    assert m.recap.hidden == ["A1"] and not m.recap.edited  # Claude's text replaces yours; what you left out stays out
+
+
+def test_the_summary_prompt_keeps_private_assessments_out_of_what_participants_get() -> None:
+    assert "recap_discussed" in SUMMARY_SYSTEM and "never addressed to the user" in SUMMARY_SYSTEM
+    for private in ("budget guesses", "competitors", "salary", "said only among the user's side"):
+        assert private in SUMMARY_SYSTEM

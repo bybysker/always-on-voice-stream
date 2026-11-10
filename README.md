@@ -40,6 +40,7 @@ settings. Agent work is extra and has its own budget.
 - [Sending items to your tools](#sending-items-to-your-tools)
 - [Agents that do the work mid-meeting](#agents-that-do-the-work-mid-meeting)
 - [Notes templates and AI fields](#notes-templates-and-ai-fields)
+- [A summary to send, and the transcript](#a-summary-to-send-and-the-transcript)
 - [Ask your meetings](#ask-your-meetings)
 - [Your meetings in Claude Desktop and Claude Code (MCP)](#your-meetings-in-claude-desktop-and-claude-code-mcp)
 - [How the conversation went](#how-the-conversation-went)
@@ -114,9 +115,24 @@ on again), open Voicestream and allow it when asked. The Keychain may also ask o
 version may read your saved keys: click **Always Allow**.
 
 To build the app yourself on a Mac: `packaging/mac/build.sh` (the comments at its top list what to
-install first). To publish a release, push a `vX.Y.Z` tag that matches the version in
-`pyproject.toml`, or open **Actions → mac app → Run workflow** and type that tag: the build is
-tested, then attached to a new release with the notes in `packaging/mac/release-notes.md`.
+install first).
+
+**To ship a version to everyone's app**, merging to `main` isn't enough (that only builds a test DMG):
+a version reaches the apps as a release.
+
+```
+ 1. packaging/mac/release-notes.md: "New in this version" (what the update banner shows, 1500 characters)
+    and its first line, <!-- release notes for 0.4.1 -->; merge it to main
+ 2. Actions → release → Run workflow → version 0.4.1
+      checks it (newer than the current one, not released yet, notes written for it)
+      → writes it in pyproject.toml and __init__.py → commits and tags v0.4.1 on main
+      → the Mac build tests the app and publishes the release
+ 3. every installed Voicestream offers it within six hours (Settings → General → Updates → Check now: at once)
+```
+
+A version with a suffix (`0.5.0-beta.1`) is a pre-release: only apps with **pre-releases** turned on
+in Settings are offered it. `python packaging/release.py 0.4.1 --check` runs the checks on your own
+computer. Pushing a `vX.Y.Z` tag that matches the version in `pyproject.toml` by hand still works too.
 
 ### Installer l'application (Mac)
 
@@ -652,6 +668,31 @@ A sales call and a one-on-one don't need the same notes. At the wrap-up, Claude 
   fields = ["Runway", "Next board date"]
   ```
 
+## A summary to send, and the transcript
+
+Your notes are for you: an "Objections" section or a "Budget" field isn't something to send a client.
+So at the wrap-up, in the same Claude call (no extra request), Claude also writes a **summary for the
+people you met**: an overview, what was discussed and the next steps agreed, written for them and
+without your own assessments. The meeting's to-dos, decisions and open questions complete it.
+
+```
+ wrap-up ──► recap: overview · what was discussed · next steps ─┐
+ the meeting's to-dos (owner, due date) · decisions · questions ─┼─► Summary tab ──► Download PDF
+ minus: the ones you leave out, the requests you made to Claude ─┘   (what you see is what they get)
+ the transcript (everyone by name, you by yours) ───────────────────► Transcript tab ──► PDF · Text
+```
+
+- A meeting's **Summary** tab shows it as the PDF prints it, in the meeting's language (a French
+  meeting gets a *Compte rendu*, whatever the app's language). **Edit** corrects its text; each
+  to-do, decision or question can be **left out** of it (it stays in your notes and your tools).
+- **Download PDF** saves it: the Mac app asks where in its Save panel (its window can't download),
+  a browser downloads it. The **Transcript** tab downloads the transcript as a PDF or a text file.
+- **Rewrite notes** writes the summary again too; when you edited it, the app asks first. A meeting
+  summarized before this existed gets one from its notes until you rewrite them.
+- The PDFs use the standard Helvetica every reader has (nothing to install, a few kilobytes): all of
+  French and English; a character beyond them prints as its plain letter (`ł` → `l`).
+- `voicestream export last` does the same from a terminal (`transcript`, `--format txt`, `-o` a file or folder).
+
 ## Ask your meetings
 
 The **Ask** screen (or `voicestream ask "…"`) answers a question from all your meetings: "What did I
@@ -769,6 +810,8 @@ voicestream import call.vtt --me "Alex Martin" --date 2026-10-12T14:00
 voicestream sessions                            # list recorded meetings
 voicestream summarize last                      # re-run the notes
 voicestream push last --sink notion             # push a saved meeting
+voicestream export last                         # its summary as a PDF, to send to the people you met
+voicestream export last transcript --format txt -o ~/Desktop   # its transcript (pdf or txt)
 voicestream ask "What did Acme say about pricing?"   # a question about all your meetings
 voicestream mcp                                 # your meetings for Claude Desktop / Claude Code (MCP, stdio)
 ```

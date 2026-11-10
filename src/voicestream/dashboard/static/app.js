@@ -2988,7 +2988,7 @@ function meetingRow(m, bucket) {
 
 // ------------------------------------------------------------------ meeting detail
 
-const TABS = ['notes', 'actions', 'transcript', 'email', 'conversation'];
+const TABS = ['notes', 'summary', 'actions', 'transcript', 'email', 'conversation'];
 
 async function renderDetail(folder, prev) {
   const same = S.detail && S.detail.folder === folder;
@@ -3235,6 +3235,7 @@ function detailPanel(D) {
     return h('div', {}, row, h('div', { class: 'prose', id: 'notes' }, renderMarkdown(notesBody(md, m))));
   }
   if (D.tab === 'conversation') return conversationPanel(D);
+  if (D.tab === 'summary') return summaryPanel(D);
   if (D.tab === 'actions') return actionsPanel(D);
   if (D.tab === 'transcript') return transcriptPanel(D);
   return emailPanel(D);
@@ -3305,8 +3306,12 @@ function transcriptPanel(D) {
   };
   filter.addEventListener('input', debounce(() => { D.filter = filter.value.trim(); draw(); }, 150));
   draw();
+  const download = (format) => btn(t('export.' + format), {
+    cls: 'small', id: 'transcript-' + format, 'aria-label': t('export.transcript_' + format),
+    onclick: (e) => downloadMeetingFile(D.folder, 'transcript', format, e.currentTarget),
+  }, 'download');
   return h('div', {}, h('div', { class: 'toolbar' }, h('div', { class: 'search' }, icon('search'), filter),
-    h('span', { class: 'muted small' }, tp('meetings.lines', segs.length))), list);
+    h('span', { class: 'muted small grow' }, tp('meetings.lines', segs.length)), download('pdf'), download('txt')), list);
 }
 
 function emailPanel(D) {
@@ -3331,6 +3336,131 @@ function emailPanel(D) {
       }) }, 'copy'),
       h('a', { class: 'btn', id: 'mail-link', href, target: '_blank', rel: 'noopener noreferrer' }, icon('mail'), t('email.open_mail')),
       h('span', { class: 'muted small' }, t('email.never_sent'))));
+}
+
+// ------------------------------------------------------------ summary and downloads
+
+/** A meeting's file (``what``: summary, transcript; ``format``: pdf, txt). The Mac app's window can't download
+ *  (WebKit there would show a PDF in place of the app): its own Save panel asks where. A browser downloads it. */
+async function downloadMeetingFile(folder, what, format, button) {
+  const res = await act(button, async () => {
+    if (S.app && S.app.capabilities && S.app.capabilities.save_dialog) {
+      return api('POST', `/api/meetings/${enc(folder)}/save`, { what, format });
+    }
+    let r;
+    try {
+      r = await fetch(`/api/meetings/${enc(folder)}/export?what=${enc(what)}&format=${enc(format)}`,
+        { headers: { 'X-Voicestream-Token': S.token }, cache: 'no-store' });
+    } catch (_) { throw new ApiError(0, t('err.unreachable')); }
+    if (!r.ok) await readJson(r);
+    const url = URL.createObjectURL(await r.blob());
+    const a = h('a', { href: url, download: attachmentName(r.headers.get('content-disposition')) || `${what}.${format}`, hidden: true });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    return null;  // the browser shows its download
+  });
+  if (res && res.saved) toast(t('export.saved', { name: res.name }), 'ok');
+}
+
+/** The file name a ``Content-Disposition`` header gives: its UTF-8 one, else its plain one. */
+function attachmentName(header) {
+  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(header || '');
+  if (utf8) { try { return decodeURIComponent(utf8[1]); } catch (_) { /* the plain one */ } }
+  const plain = /filename="([^"]*)"/i.exec(header || '');
+  return plain ? plain[1] : '';
+}
+
+/** The summary for the people you met, as its PDF will print it (in the meeting's language): Edit corrects
+ *  its text, and each to-do, decision or open question can be left out of it. */
+function summaryPanel(D) {
+  const { m, readOnly, inProgress } = detailState(D);
+  const v = D.data.recap;
+  if (!v) return h('div', { class: 'empty-state' }, h('strong', {}, t('meetings.error')));
+  const editable = !readOnly && !inProgress;
+  const editing = editable && D.editing.has('recap');
+  const bar = h('div', { class: 'row recap-bar' },
+    h('p', { class: 'muted small grow' }, inProgress ? t('recap.lead_live') : t('recap.lead')),
+    editable && !editing && btn(t('item.edit'), { cls: 'small', id: 'recap-edit', onclick: () => {
+      D.editing.add('recap'); drawDetail(); const first = $('recap-overview'); if (first) first.focus();
+    } }, 'edit'),
+    !editing && btn(t('recap.download'), { cls: 'small primary', id: 'recap-download',
+      onclick: (e) => downloadMeetingFile(D.folder, 'summary', 'pdf', e.currentTarget) }, 'download'));
+  const from = !v.written && m.ended_at && (m.segments || []).length && !D.summarizing
+    ? notice('info', 'sparkle', t('recap.from_notes'), btn(t('meetings.rewrite'), { cls: 'small', id: 'recap-rewrite', onclick: () => rewriteNotes() }, 'refresh'))
+    : null;
+  return h('div', {}, bar, from, editing ? recapForm(D, v) : recapSheet(D, v, editable));
+}
+
+function recapSheet(D, v, editable) {
+  const L = v.labels;
+  const toggle = (row) => editable && btn(row.hidden ? t('recap.put_back') : t('recap.leave_out'), {
+    cls: 'small ghost', id: 'recap-toggle-' + row.id,
+    'aria-label': t(row.hidden ? 'recap.put_back_named' : 'recap.leave_out_named', { title: row.title }),
+    onclick: (e) => recapToggle(D, row, e.currentTarget),
+  });
+  const leftOut = (row) => row.hidden && h('span', { class: 'pill' }, t('recap.left_out'));
+  const section = (key, ...body) => h('section', { class: 'recap-section', dataset: { section: key } }, h('h3', {}, L[key]), ...body);
+  const points = (list) => h('ul', {}, list.map((p) => h('li', {}, p)));
+  const items = (list) => h('ul', { class: 'recap-items' }, list.map((r) => h('li', { class: r.hidden ? 'left-out' : null, dataset: { item: r.id } },
+    h('span', { class: 'text' }, r.title), leftOut(r), toggle(r))));
+  const todos = h('div', { class: 'recap-todos', role: 'table', 'aria-label': L.todos },
+    h('div', { class: 'recap-todo head', role: 'row' }, h('span', { role: 'columnheader' }, h('span', { class: 'sr-only' }, t('recap.done'))),
+      ...[L.task, L.owner, L.due].map((c) => h('span', { role: 'columnheader' }, c))),
+    v.todos.map((r) => h('div', { class: 'recap-todo' + (r.hidden ? ' left-out' : '') + (r.done ? ' done' : ''), role: 'row', dataset: { item: r.id } },
+      h('span', { role: 'cell', class: 'box' }, r.done ? icon('check') : null, h('span', { class: 'sr-only' }, r.done ? t('recap.done') : '')),
+      h('span', { role: 'cell', class: 'title' }, h('span', { class: 'text' }, r.title), leftOut(r), toggle(r)),
+      h('span', { role: 'cell', class: 'muted' }, r.owner || '—'),
+      h('span', { role: 'cell', class: 'muted' }, r.due || '—'))));
+  const parts = [
+    v.overview && section('overview', h('p', {}, v.overview)),
+    v.discussed.length && section('discussed', points(v.discussed)),
+    v.decisions.length && section('decisions', items(v.decisions)),
+    v.next_steps.length && section('next_steps', points(v.next_steps)),
+    v.todos.length && section('todos', todos),
+    v.questions.length && section('questions', items(v.questions)),
+  ].filter(Boolean);
+  return h('article', { class: 'recap-sheet', id: 'recap-sheet', lang: v.lang },
+    h('p', { class: 'kicker' }, L.summary),
+    h('h2', {}, v.title),
+    h('p', { class: 'muted small' }, v.when, v.edited && h('span', { class: 'pill' }, t('recap.edited'))),
+    v.participants.length > 0 && h('p', { class: 'muted small' }, L.participants.replace('{names}', v.participants.join(', '))),
+    parts.length ? parts : h('p', { class: 'muted recap-empty' }, L.empty));
+}
+
+async function recapToggle(D, row, button) {
+  const res = await act(button, () => api('PATCH', `/api/meetings/${enc(D.folder)}/recap`, row.hidden ? { show: [row.id] } : { hide: [row.id] }));
+  if (!res || S.detail !== D) return;
+  D.data.recap = res.recap;
+  drawDetail();
+  const again = $('recap-toggle-' + row.id);  // the same item's button, now saying the opposite
+  if (again) again.focus();
+}
+
+function recapForm(D, v) {
+  const area = (id, value, rows) => h('textarea', { id, rows: String(rows), value, maxlength: '6000' });
+  const overview = area('recap-overview', v.overview, 3);
+  const discussed = area('recap-discussed', v.discussed.join('\n'), 6);
+  const next = area('recap-next', v.next_steps.join('\n'), 4);
+  const field = (el, label, help) => h('div', { class: 'field' }, h('label', { for: el.id }, label), help && h('p', { class: 'help' }, help), el);
+  const lines = (el) => el.value.split('\n').map((s) => s.trim()).filter(Boolean);
+  const close = () => { D.editing.delete('recap'); drawDetail(); };
+  const save = btn(t('common.save'), { cls: 'small primary', id: 'recap-save', onclick: (e) => act(e.currentTarget, async () => {
+    const res = await api('PATCH', `/api/meetings/${enc(D.folder)}/recap`,
+      { overview: overview.value, discussed: lines(discussed), next_steps: lines(next) });
+    D.data.recap = res.recap;
+    toast(t('recap.saved'), 'ok');
+    close();
+  }) });
+  const form = h('div', { class: 'recap-form', id: 'recap-form' },
+    field(overview, t('recap.f.overview')),
+    field(discussed, t('recap.f.discussed'), t('recap.f.per_line')),
+    field(next, t('recap.f.next_steps'), t('recap.f.next_help')),
+    h('p', { class: 'help small muted' }, t('recap.f.items_help')),
+    h('div', { class: 'row' }, btn(t('common.cancel'), { cls: 'small ghost', id: 'recap-cancel', onclick: close }), save));
+  form.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } });
+  return form;
 }
 
 async function pushMeeting(button) {
@@ -3360,6 +3490,12 @@ async function pushMeeting(button) {
 async function rewriteNotes(template) {
   const D = S.detail;
   if (typeof template !== 'string') template = null;  // the button's click event
+  // the summary for the people you met is written again too: your own text in it would be lost
+  if (D.data && D.data.recap && D.data.recap.edited
+      && !(await ask({ title: t('recap.replace_title'), body: t('recap.replace_body'), ok: t('meetings.rewrite') }))) {
+    if (S.detail === D) drawDetail();  // the template picker goes back to the one in use
+    return;
+  }
   // waiting before the request is sent: offline, the notes can be rewritten before it even answers
   D.summarizing = true;
   drawDetail();
@@ -6201,6 +6337,21 @@ const STRINGS = {
     'email.to': 'To', 'email.to_none': '(add the recipients in your mail app)', 'email.subject': 'Subject', 'email.body': 'Message',
     'email.copy': 'Copy', 'email.copied': 'The email is on the clipboard.', 'email.open_mail': 'Open in Mail',
     'email.never_sent': 'Nothing is sent until you send it yourself.',
+    'meetings.tab.summary': 'Summary',
+    'recap.lead': 'What you send to the people you met, as a PDF: what was discussed, the decisions, the next steps and the to-dos. Your notes’ fields and private sections are never in it.',
+    'recap.lead_live': 'Claude writes it when the meeting ends. Until then it shows the to-dos and decisions so far.',
+    'recap.download': 'Download PDF', 'recap.edited': 'Edited by you', 'recap.done': 'Done',
+    'recap.from_notes': 'Made from this meeting’s notes: it was summarized before these summaries existed. Rewrite the notes to have Claude write it for the people you met.',
+    'recap.leave_out': 'Leave out', 'recap.put_back': 'Put back', 'recap.left_out': 'Not in the PDF',
+    'recap.leave_out_named': 'Leave “{title}” out of the summary', 'recap.put_back_named': 'Put “{title}” back in the summary',
+    'recap.f.overview': 'Overview', 'recap.f.discussed': 'What was discussed', 'recap.f.next_steps': 'Next steps',
+    'recap.f.per_line': 'One point per line.', 'recap.f.next_help': 'One per line: what happens next, as agreed. The to-dos are listed on their own.',
+    'recap.f.items_help': 'The to-dos, decisions and open questions are the meeting’s own: correct them on To-dos & decisions, or leave one out here.',
+    'recap.saved': 'Saved. The PDF has your text.',
+    'recap.replace_title': 'Replace your summary?',
+    'recap.replace_body': 'You edited this meeting’s summary. Rewriting the notes writes a new summary in place of your text (what you left out stays out).',
+    'export.pdf': 'PDF', 'export.txt': 'Text', 'export.saved': 'Saved “{name}”.',
+    'export.transcript_pdf': 'Download the transcript as PDF', 'export.transcript_txt': 'Download the transcript as text',
 
     'costs.title': 'Costs', 'costs.sub': 'What Voicestream spends on online services, in US dollars.',
     'costs.error': "Couldn't load the costs", 'costs.today': 'Today', 'costs.of_budget': '{spent} of your {budget} daily budget',
@@ -6847,6 +6998,21 @@ const STRINGS = {
     'email.to': 'À', 'email.to_none': '(ajoutez les destinataires dans votre messagerie)', 'email.subject': 'Objet', 'email.body': 'Message',
     'email.copy': 'Copier', 'email.copied': 'L’e-mail est dans le presse-papiers.', 'email.open_mail': 'Ouvrir dans Mail',
     'email.never_sent': 'Rien n’est envoyé tant que vous ne l’envoyez pas vous-même.',
+    'meetings.tab.summary': 'Compte rendu',
+    'recap.lead': 'Ce que vous envoyez aux personnes rencontrées, en PDF : les points abordés, les décisions, les prochaines étapes et les actions. Les champs et les sections privées de vos notes n’y figurent jamais.',
+    'recap.lead_live': 'Claude le rédige à la fin de la réunion. D’ici là, il montre les actions et les décisions notées jusqu’ici.',
+    'recap.download': 'Télécharger le PDF', 'recap.edited': 'Modifié par vous', 'recap.done': 'Fait',
+    'recap.from_notes': 'Rédigé à partir des notes de cette réunion, résumée avant que ces comptes rendus existent. Réécrivez les notes pour que Claude le rédige pour les personnes rencontrées.',
+    'recap.leave_out': 'Retirer', 'recap.put_back': 'Remettre', 'recap.left_out': 'Absent du PDF',
+    'recap.leave_out_named': 'Retirer « {title} » du compte rendu', 'recap.put_back_named': 'Remettre « {title} » dans le compte rendu',
+    'recap.f.overview': 'En résumé', 'recap.f.discussed': 'Points abordés', 'recap.f.next_steps': 'Prochaines étapes',
+    'recap.f.per_line': 'Un point par ligne.', 'recap.f.next_help': 'Une par ligne : la suite, telle que convenue. Les actions sont listées à part.',
+    'recap.f.items_help': 'Les actions, décisions et questions ouvertes sont celles de la réunion : corrigez-les dans Tâches et décisions, ou retirez-en une ici.',
+    'recap.saved': 'Enregistré. Le PDF reprend votre texte.',
+    'recap.replace_title': 'Remplacer votre compte rendu ?',
+    'recap.replace_body': 'Vous avez modifié le compte rendu de cette réunion. Réécrire les notes rédige un nouveau compte rendu à la place de votre texte (ce que vous avez retiré le reste).',
+    'export.pdf': 'PDF', 'export.txt': 'Texte', 'export.saved': 'Enregistré : « {name} ».',
+    'export.transcript_pdf': 'Télécharger la transcription en PDF', 'export.transcript_txt': 'Télécharger la transcription en texte',
 
     'costs.title': 'Coûts', 'costs.sub': 'Ce que Voicestream dépense en services en ligne, en dollars américains.',
     'costs.error': 'Impossible de charger les coûts', 'costs.today': 'Aujourd’hui', 'costs.of_budget': '{spent} sur votre budget de {budget} par jour',

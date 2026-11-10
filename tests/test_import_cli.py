@@ -112,6 +112,23 @@ def test_cli_import_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, 
     assert cli.main(["-c", str(cfgp), "cost", "--hours", "8"]) == 0
     assert "estimate for 8 h" in capsys.readouterr().out
 
+    # the files to send: here by default, named after the meeting; never over a file without --force
+    assert cli.main(["-c", str(cfgp), "export", "last"]) == 0
+    summary = Path(capsys.readouterr().out.strip())
+    assert summary.parent == tmp_path and summary.name.endswith(" Pricing sync - Summary.pdf")
+    assert summary.read_bytes().startswith(b"%PDF")
+    with pytest.raises(SystemExit, match="already exists"):
+        cli.main(["-c", str(cfgp), "export", "last"])
+    assert cli.main(["-c", str(cfgp), "export", "last", "--force"]) == 0
+    capsys.readouterr()
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    assert cli.main(["-c", str(cfgp), "export", "last", "transcript", "--format", "txt", "-o", str(out_dir)]) == 0
+    text = Path(capsys.readouterr().out.strip()).read_text(encoding="utf-8")
+    assert text.startswith("Pricing sync\n") and "revised pricing" in text
+    with pytest.raises(SystemExit, match="no summary as txt"):
+        cli.main(["-c", str(cfgp), "export", "last", "summary", "--format", "txt"])
+
 
 def test_cli_replay_wav(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from helpers import bursts, write_wav

@@ -785,6 +785,108 @@ def test_meetings_list_detail_and_editing(make_app: Callable[..., UIApp], open_p
     expect(pg.locator("#notes")).to_contain_text("Send the final budget")
 
 
+def test_the_summary_to_send_and_the_files_to_download(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """The Summary tab shows the PDF the people you met get (in the meeting's language, whatever the app's), lets you
+    correct it and leave a to-do out; the PDF and the transcript download as a browser does."""
+    from playwright.sync_api import expect
+    from test_pdf import page_texts
+
+    from voicestream.storage import load_meeting
+
+    app = make_app(setup_done=True, meetings=True)
+    folder = app.folder_of("Lancement de la version 2")
+    meeting, _ = load_meeting(app.root / "data" / "sessions" / folder)
+    todos = sorted((i for i in meeting.items.values() if i.kind.value == "action" and not i.dismissed), key=lambda i: i.id)
+    assert len(todos) >= 2
+    p = open_page(app)
+    pg = p.page
+    pg.click("nav a[href='#/meetings']")
+    pg.locator(".mrow", has_text="Lancement de la version 2").click()
+    pg.click("#tab-summary")
+    sheet = pg.locator("#recap-sheet")
+    expect(sheet.locator(".kicker")).to_have_text("Compte rendu de réunion")
+    expect(sheet.locator(".recap-todo.head")).to_contain_text("Responsable")
+    expect(sheet.locator(".recap-todo:not(.head)")).to_have_count(len(todos))
+    expect(pg.locator(".notice", has_text="Made from this meeting’s notes")).to_be_visible()  # imported without Claude
+    p.shot("meeting-summary")
+
+    # a to-do left out: it says so, its button puts it back (and keeps the focus), the PDF won't have it
+    out, kept = todos[0], todos[1]
+    pg.click(f"#recap-toggle-{out.id}")
+    expect(sheet.locator(f".recap-todo[data-item={out.id}]")).to_contain_text("Not in the PDF")
+    expect(pg.locator(f"#recap-toggle-{out.id}")).to_have_text("Put back")
+    expect(pg.locator(f"#recap-toggle-{out.id}")).to_be_focused()
+
+    # its text corrected
+    pg.click("#recap-edit")
+    expect(pg.locator("#recap-overview")).to_be_focused()
+    pg.fill("#recap-overview", "Nous avons fait le point sur le lancement de la version 2.")
+    pg.fill("#recap-discussed", "Maquette terminée\n\n   Textes d’ici vendredi  ")
+    pg.click("#recap-save")
+    expect(pg.locator(".toast", has_text="The PDF has your text")).to_be_visible()
+    expect(sheet.locator("[data-section=discussed] li")).to_have_text(["Maquette terminée", "Textes d’ici vendredi"])
+    expect(sheet).to_contain_text("Edited by you")
+    expect(pg.locator(".notice", has_text="Made from this meeting’s notes")).to_be_visible()  # still not Claude's
+    saved, _ = load_meeting(app.root / "data" / "sessions" / folder)
+    assert saved.recap is not None and saved.recap.hidden == [out.id] and saved.recap.edited
+    p.shot("meeting-summary-edited")
+
+    with pg.expect_download() as dl:
+        pg.click("#recap-download")
+    assert dl.value.suggested_filename.endswith(" Lancement de la version 2 - Compte rendu.pdf")
+    text = " ".join(page_texts(Path(dl.value.path()).read_bytes()))
+    assert "Nous avons fait le point sur le lancement de la version 2." in text and "Textes d’ici vendredi" in text
+    assert kept.title in text and out.title not in text
+
+    # rewriting the notes would write a new summary over yours: asked first
+    pg.click("#rewrite-notes")
+    expect(pg.locator("#ask-title")).to_have_text("Replace your summary?")
+    pg.click("#ask-cancel")
+    expect(pg.locator("#rewrite-notes")).to_have_text("Rewrite notes")
+
+    # the transcript, as text, everyone by name
+    pg.click("#tab-transcript")
+    with pg.expect_download() as dl:
+        pg.click("#transcript-txt")
+    assert dl.value.suggested_filename.endswith(" Lancement de la version 2 - Transcription.txt")
+    content = Path(dl.value.path()).read_text(encoding="utf-8")
+    assert content.startswith("Lancement de la version 2\n") and "] Camille: Bonjour à tous" in content
+    with pg.expect_download() as dl:
+        pg.click("#transcript-pdf")
+    assert Path(dl.value.path()).read_bytes().startswith(b"%PDF")
+
+
+def test_in_the_mac_app_a_file_goes_through_its_save_panel(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """The Mac app's window can't download: the app's Save panel asks where, and the page says where it went."""
+    from playwright.sync_api import expect
+
+    app = make_app(setup_done=True, meetings=True)
+    chosen = app.root / "Desktop"
+    chosen.mkdir()
+    asked: list[str] = []
+    app.host.capabilities["save_dialog"] = True
+    app.host.save_dialog = lambda name: asked.append(name) or str(chosen / "Acme summary.pdf")
+    p = open_page(app, locale="fr-FR")
+    pg = p.page
+    pg.click("nav a[href='#/meetings']")
+    pg.locator(".mrow", has_text="Budget review").click()
+    pg.click("#tab-summary")
+    expect(pg.locator("#recap-sheet .kicker")).to_have_text("Meeting summary")  # an English meeting in a French app
+    pg.click("#recap-download")
+    expect(pg.locator(".toast", has_text="Enregistré : « Acme summary.pdf »")).to_be_visible()
+    assert asked[0].endswith(" Budget review - Summary.pdf") and (chosen / "Acme summary.pdf").read_bytes().startswith(b"%PDF")
+    pg.locator(".toast .x").click()
+    expect(pg.locator(".toast")).to_have_count(0)
+    cancelled: list[str] = []
+    app.host.save_dialog = lambda name: cancelled.append(name) and None  # Cancel: nothing to say
+    pg.click("#tab-transcript")
+    pg.click("#transcript-pdf")
+    _wait(lambda: bool(cancelled))
+    expect(pg.locator("#transcript-pdf")).not_to_have_attribute("aria-busy", "true")
+    assert cancelled[0].endswith(" Budget review - Transcript.pdf") and pg.locator(".toast").count() == 0
+    p.shot("meeting-transcript-fr")
+
+
 def test_settings_save_validation_and_model_download(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
     from playwright.sync_api import expect
 

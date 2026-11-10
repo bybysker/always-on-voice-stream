@@ -306,6 +306,26 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_export(args: argparse.Namespace) -> int:
+    from .exports import export
+    from .storage import load_meeting
+
+    cfg = load_config(args.config)
+    meeting, _ = load_meeting(_resolve_session(cfg, args.session))
+    try:
+        e = export(meeting, args.what, args.format, user_name=cfg.user_name, others_label=cfg.capture.system.label)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+    out = Path(args.output).expanduser() if args.output else Path.cwd()
+    if out.is_dir():
+        out = out / e.filename
+    if out.exists() and not args.force:
+        raise SystemExit(f"{out} already exists (--force replaces it)")
+    out.write_bytes(e.data)
+    print(out)
+    return 0
+
+
 def cmd_push(args: argparse.Namespace) -> int:
     from .app.meetings import push_meeting, save_meeting
     from .dispatch import Dispatcher, pending_review
@@ -561,6 +581,14 @@ def build_parser() -> argparse.ArgumentParser:
     sm = sub.add_parser("summarize", help="re-run the summary for a saved meeting")
     sm.add_argument("session", help="folder, name prefix, or 'last'")
     sm.set_defaults(func=cmd_summarize)
+
+    ex = sub.add_parser("export", help="save a meeting's summary (PDF, for the people you met) or its transcript")
+    ex.add_argument("session", help="folder, name prefix, or 'last'")
+    ex.add_argument("what", nargs="?", choices=["summary", "transcript"], default="summary")
+    ex.add_argument("--format", choices=["pdf", "txt"], default="pdf", help="txt: the transcript as plain text")
+    ex.add_argument("-o", "--output", help="file or folder to write to (default: here, named after the meeting)")
+    ex.add_argument("--force", action="store_true", help="replace a file of that name")
+    ex.set_defaults(func=cmd_export)
 
     ps = sub.add_parser("push", help="push a saved meeting's items/notes to your sinks")
     ps.add_argument("session", help="folder, name prefix, or 'last'")
