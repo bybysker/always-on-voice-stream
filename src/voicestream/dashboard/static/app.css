@@ -135,6 +135,12 @@ html:has(body.raise-toasts) { scroll-padding-bottom: 80px; }
 /* no overscroll-behavior on the page itself: WebKit (the Mac window) then takes the wheel as handled
    and the page stays where it is. The page bounces at its ends, as any Mac window does */
 a, button, input, select, textarea, label, summary { touch-action: manipulation; }
+/* the scroll bars are drawn here, so they show all the time: macOS hides its own until the page
+   moves, and then nothing says there is more below. The thumb also takes a drag */
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--control); border-radius: 6px; border: 3px solid transparent; background-clip: content-box; min-height: 40px; }
+::-webkit-scrollbar-thumb:hover { background-color: var(--faint); }
 html, body { margin: 0; }
 body {
   min-height: 100vh;
