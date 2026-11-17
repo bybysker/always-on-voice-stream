@@ -132,8 +132,8 @@
 /* the focused control is never left under the phone's top bar or the settings' save bar */
 html { background: var(--ground); scroll-padding-top: 16px; -webkit-tap-highlight-color: transparent; }
 html:has(body.raise-toasts) { scroll-padding-bottom: 80px; }
-/* a window, not a page: the whole of it doesn't bounce under a mouse or a trackpad */
-@media (pointer: fine) { html { overscroll-behavior: none; } }
+/* no overscroll-behavior on the page itself: WebKit (the Mac window) then takes the wheel as handled
+   and the page stays where it is. The page bounces at its ends, as any Mac window does */
 a, button, input, select, textarea, label, summary { touch-action: manipulation; }
 html, body { margin: 0; }
 body {

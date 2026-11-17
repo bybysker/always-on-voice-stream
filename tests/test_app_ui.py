@@ -2392,6 +2392,28 @@ def test_space_scrolls_live_and_never_starts_a_meeting(make_app: Callable[..., U
     assert host.in_meeting()
 
 
+def test_the_wheel_scrolls_every_screen(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """The mouse wheel scrolls the page from the sidebar and from the screen, at the Mac window's sizes.
+    The page itself has no ``overscroll-behavior``: with ``none`` there, WebKit (the Mac window) takes
+    the wheel as handled and the page does not move (Chromium, which runs this test, scrolls anyway)."""
+    from voicestream.app.native import MIN_SIZE, WINDOW_SIZE
+
+    app = make_app(setup_done=True, meeting_start="manual", meetings=True)
+    _mac_features(app)
+    for size in (WINDOW_SIZE, MIN_SIZE):
+        pg = open_page(app, size=size).page
+        for el in ("documentElement", "body"):
+            assert pg.evaluate(f"getComputedStyle(document.{el}).overscrollBehaviorY") == "auto", el
+        for route in ("#/", "#/settings", "#/costs"):
+            pg.goto(app.url.split("#")[0] + route)
+            _wait(lambda: pg.evaluate("document.documentElement.scrollHeight > innerHeight + 200"))
+            for x in (100, size[0] // 2):
+                pg.evaluate("scrollTo(0, 0)")
+                pg.mouse.move(x, size[1] // 2)
+                pg.mouse.wheel(0, 200)
+                _wait(lambda: pg.evaluate("scrollY") > 100)
+
+
 def test_banners_in_a_meeting_never_move_its_controls(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
     """In a meeting, what comes and goes by itself ("Still in a meeting?", which speech takes away; a
     warning; new settings waiting) shows under the meeting's title and controls: Pause and Stop stay
