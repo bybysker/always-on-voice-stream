@@ -511,7 +511,8 @@ class TwentySink(HttpSinkMixin, Sink):
         done = task.get("status") == "DONE"
         if item.dismissed or item.status == ItemStatus.CANCELLED:
             if not done:
-                await self._api("DELETE", f"/rest/tasks/{task_id}")  # to the trash, restorable
+                # soft_delete: to the trash, restorable (without it Twenty destroys the record for good)
+                await self._api("DELETE", f"/rest/tasks/{task_id}", params={"soft_delete": "true"})
             return
         data: dict[str, Any] = {"title": " ".join(item.title.split())[:250],
                                 "bodyV2": {"markdown": item_markdown(item, meeting)}}

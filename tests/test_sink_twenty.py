@@ -145,6 +145,8 @@ class FakeTwenty:
             rec.update(json.loads(request.content), updatedAt=f"2026-11-01T00:01:{self.clock:02d}Z")
             return httpx.Response(200, json={"data": {f"update{singular[0].upper()}{singular[1:]}": rec}})
         if request.method == "DELETE":
+            # Twenty destroys a record for good unless asked for its trash: the sink must always ask
+            assert query.get("soft_delete") == "true", "a DELETE without soft_delete=true destroys the record"
             del table[parts[1]]
             return httpx.Response(200, json={"data": {f"delete{singular[0].upper()}{singular[1:]}": rec}})
         raise AssertionError(f"unexpected {request.method} {url.path}")
