@@ -107,8 +107,13 @@ def _clean_argv(argv: list[str]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
     argv = _clean_argv(sys.argv[1:] if argv is None else list(argv))
+    if argv[:1] == ["mcp"]:  # `Voicestream.app/Contents/MacOS/Voicestream mcp`: the meetings for Claude (MCP over stdio)
+        from ..mcp_server import main as mcp_main
+
+        config = argv[argv.index("--config") + 1] if "--config" in argv[:-1] else None
+        return mcp_main(config)
+    parser = build_parser()
     if getattr(sys, "frozen", False):
         # Finder, Xcode or a login launch can add flags of their own (-NSDocumentRevisionsDebugMode …):
         # the app must open anyway rather than exit with a usage error nobody sees

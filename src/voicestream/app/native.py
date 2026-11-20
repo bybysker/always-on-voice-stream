@@ -812,6 +812,12 @@ class MacShell:
         )
         self.window.events.before_show += self._restore_frame
         self.window.events.closing += self._on_closing
+        # the window can't download (WebKit shows a PDF in place of the page): files go through a Save panel
+        if hasattr(self.host, "save_dialog"):
+            self.host.save_dialog = self._save_dialog
+            caps = getattr(self.host, "capabilities", None)
+            if isinstance(caps, dict):
+                caps["save_dialog"] = True
         self._login = self._login_status(refresh=True)
         from PyObjCTools import AppHelper
 
@@ -912,6 +918,23 @@ class MacShell:
             return "unsupported"
 
     # -------------------------------------------------------------- window
+
+    def _save_dialog(self, name: str) -> str | None:
+        """The Save panel for a file you download (a meeting's summary or transcript), in your Downloads
+        folder with ``name`` filled in: the path you chose, ``None`` if you cancelled. Called from a worker
+        thread: pywebview shows the panel on the main thread and waits for it (it says Replace? itself)."""
+        import webview
+
+        if self.window is None:
+            return None
+        downloads = Path.home() / "Downloads"
+        chosen = self.window.create_file_dialog(
+            webview.FileDialog.SAVE, directory=str(downloads) if downloads.is_dir() else "", save_filename=name
+        )
+        if not chosen:
+            return None
+        # pywebview's Cocoa panel answers a path; its other backends a list of them
+        return str(chosen) if isinstance(chosen, str) else str(next(iter(chosen), "")) or None
 
     def _restore_frame(self) -> None:
         """Runs on the main thread just before the window first shows."""

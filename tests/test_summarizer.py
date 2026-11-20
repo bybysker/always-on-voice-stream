@@ -48,7 +48,8 @@ def _missing(title: str, **kw: object) -> WireNewItem:
 def _summary(**kw: object) -> WireSummary:
     base: dict[str, object] = dict(title="Q4 planning", tldr="We planned Q4.", notes_markdown="## Summary\n- Planned Q4",
                                    updates=[], missing_items=[], participants=[], speakers=[], language="en",
-                                   followup_subject="", followup_body="", classification=OTHER_MEETING)
+                                   followup_subject="", followup_body="", template="general", fields=[],
+                                   recap_overview="", recap_discussed=[], recap_next_steps=[], classification=OTHER_MEETING)
     return WireSummary(**{**base, **kw})
 
 
@@ -209,36 +210,39 @@ def _classified(**kw: object) -> WireClassification:
 
 async def test_the_wrap_up_classifies_a_prospect_meeting(cfg: Config) -> None:
     cfg.brain.business = "Social Creative Agency: video creation for French SMBs"
-    cfg.brain.offers = ["Visibilité", "Formation", "Identité"]
-    m, tracker = _meeting()
+    m, tracker = _meeting()  # A1 update the roadmap (Sam), A2 send the deck (you)
     llm = ScriptedLLM([_summary(language="fr", classification=_classified(
-        kind="prospect", confidence=0.92, company=" GAIA ", step="discovery", offer="identite", budget="5 000 €",
-        objection="Et si aucune piste ne me plaît ?", lost_reason="not lost", next_step="Proposition le 6/11",
+        kind="prospect", confidence=0.92, company=" GAIA ", step="discovery", proposal_item="A2",
+        followup_items=["A1", "A2", "Z9", "A1"],
         contacts=[WireContact(name="Julie  Martin", email="julie@gaia.fr", role="directrice"), WireContact(name=" ", email="", role="")],
         reason="Julie découvre l'offre Identité."))])
     notes = await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
 
     c = m.classification
     assert c is not None and (c.kind, c.confidence, c.company, c.step) == ("prospect", 0.92, "GAIA", "discovery")
-    assert c.offer == "Identité"  # as brain.offers spells it, for the CRM's select
-    assert c.lost_reason == ""  # only when lost
+    assert c.proposal_item == "A2" and c.followup_items == ["A1"]  # real to-dos only, the proposal never a follow-up
     assert [(x.name, x.email, x.role) for x in c.contacts] == [("Julie Martin", "julie@gaia.fr", "directrice")]
     assert not c.by_you
     (call,) = llm.calls
     assert "The user's business: Social Creative Agency: video creation for French SMBs" in call["content"][1]["text"]
-    assert "The user's offers: Visibilité, Formation, Identité" in call["content"][1]["text"]
     lines = notes.splitlines()
-    assert lines[4] == "**Prospect** · GAIA · découverte · Identité"  # under the date line
-    assert "classification" in SUMMARY_SYSTEM and '"prospect"' in SUMMARY_SYSTEM
+    assert lines[4] == "**Prospect** · GAIA · découverte"  # under the date line
+    assert "classification" in SUMMARY_SYSTEM and '"prospect"' in SUMMARY_SYSTEM and "proposal_item" in SUMMARY_SYSTEM
+
+    llm = ScriptedLLM([_summary(classification=_classified(kind="prospect", confidence=0.9, proposal_item="D1"))])
+    await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
+    assert m.classification is not None and m.classification.proposal_item == ""  # a decision is no to-do
 
 
 async def test_other_kinds_carry_no_company_and_no_notes_line(cfg: Config) -> None:
     m, tracker = _meeting()
     llm = ScriptedLLM([_summary(classification=_classified(kind="partner", confidence=0.8, company="Studio Lumen",
-                                                           step="proposal", offer="x", contacts=[WireContact(name="Léo", email="", role="")]))])
+                                                           step="proposal", proposal_item="A2", followup_items=["A1"],
+                                                           contacts=[WireContact(name="Léo", email="", role="")]))])
     notes = await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
     c = m.classification
-    assert c is not None and (c.kind, c.company, c.step, c.offer, c.contacts) == ("partner", "", "none", "", [])
+    assert c is not None and (c.kind, c.company, c.step, c.contacts) == ("partner", "", "none", [])
+    assert (c.proposal_item, c.followup_items) == ("", [])
     assert "**Partner**" not in notes and "Studio Lumen" not in notes
 
 
@@ -267,3 +271,25 @@ def test_keep_yours_keeps_your_contacts_when_claude_names_another_company() -> N
     assert (kept.company, [c.name for c in kept.contacts], kept.step) == ("Gaïa", ["Julie"], "proposal")
     assert keep_yours(None, new) is new
     assert keep_yours(new, yours) is yours  # Claude's own earlier reading is replaced
+async def test_the_summary_for_the_participants_is_kept_with_the_items_you_left_out() -> None:
+    from voicestream.models import Recap
+
+    cfg = Config()
+    cfg.brain.provider = "anthropic"
+    m, tracker = _meeting()
+    m.recap = Recap(overview="old", discussed=["old"], hidden=["A1"], edited=True)
+    wire = _summary(recap_overview="  We planned Q4\n and agreed on billing. ",
+                    recap_discussed=["- Q4 roadmap", "  ", "• Annual billing", "x" * 500],
+                    recap_next_steps=["Board review on 3 Dec"])
+    await summarize(cfg, m, tracker, ScriptedLLM([wire]))
+    assert m.recap is not None
+    assert m.recap.overview == "We planned Q4 and agreed on billing."
+    assert m.recap.discussed == ["Q4 roadmap", "Annual billing", "x" * 400]  # one plain line each, typed bullets off
+    assert m.recap.next_steps == ["Board review on 3 Dec"]
+    assert m.recap.hidden == ["A1"] and not m.recap.edited  # Claude's text replaces yours; what you left out stays out
+
+
+def test_the_summary_prompt_keeps_private_assessments_out_of_what_participants_get() -> None:
+    assert "recap_discussed" in SUMMARY_SYSTEM and "never addressed to the user" in SUMMARY_SYSTEM
+    for private in ("budget guesses", "competitors", "salary", "said only among the user's side"):
+        assert private in SUMMARY_SYSTEM

@@ -2463,3 +2463,22 @@ def test_listening_at_launch_waits_to_know_whether_a_link_launched_the_app(host:
     assert _wait(lambda: ("open_url", "voicestream://meeting/start") in host.calls)
     time.sleep(0.1)
     assert ("listen_on_launch", None) not in host.calls
+
+
+def test_files_you_download_go_through_a_save_panel_in_your_downloads(host: FakeHost, monkeypatch: pytest.MonkeyPatch,
+                                                                      tmp_path: Path) -> None:
+    """The window is WebKit's, which shows a PDF in place of the page rather than downloading it: the app's
+    own Save panel (pywebview's) asks where, starting in Downloads with the file's name filled in."""
+    monkeypatch.setitem(sys.modules, "webview", types.SimpleNamespace(FileDialog=types.SimpleNamespace(SAVE=30)))
+    monkeypatch.setattr(native.Path, "home", staticmethod(lambda: tmp_path))
+    (tmp_path / "Downloads").mkdir()
+    calls: list[tuple[Any, ...]] = []
+    answers: list[Any] = ["/Users/alex/Desktop/Acme - Summary.pdf", ("/tmp/a.txt",), None, ""]
+    shell = _shell(host)
+    shell.window.create_file_dialog = lambda *a, **k: calls.append((a, k)) or answers.pop(0)
+    assert shell._save_dialog("Acme - Summary.pdf") == "/Users/alex/Desktop/Acme - Summary.pdf"
+    assert calls[0] == ((30,), {"directory": str(tmp_path / "Downloads"), "save_filename": "Acme - Summary.pdf"})
+    assert shell._save_dialog("a.txt") == "/tmp/a.txt"  # pywebview's other backends answer a list
+    assert shell._save_dialog("a.txt") is None and shell._save_dialog("a.txt") is None  # cancelled
+    shell.window = None
+    assert shell._save_dialog("a.txt") is None

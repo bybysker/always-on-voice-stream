@@ -1,0 +1,78 @@
+name: release
+
+# One click to ship a version to every installed Voicestream: Actions → release → Run workflow, type the
+# version (0.4.0). It checks it first (packaging/release.py: newer than this one as the app compares, not
+# released yet, release notes written for it), writes it in pyproject.toml and voicestream/__init__.py,
+# commits that to main and tags it, then starts the Mac build on the tag (mac-app.yml), which tests the
+# app and publishes the release. The apps offer it within six hours (Settings → General → Updates →
+# Check now: at once), and install it once you say so, never during a meeting.
+# A version with a suffix (0.5.0-beta.1) is a pre-release: only apps with pre-releases on are offered it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The new version, e.g. 0.4.0 (0.5.0-beta.1: a pre-release, offered only to apps that ask for those)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: version, tag, and the Mac build that publishes it
+    if: github.ref == 'refs/heads/main'  # a release is what is on main
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write  # the version commit and the tag
+      actions: write  # starting mac-app.yml: a tag pushed with this job's token starts no workflow by itself
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # the tags, to refuse one that exists
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Check the version and write it
+        id: version
+        env:
+          VERSION: ${{ inputs.version }}  # an input: through the environment, never pasted into the script
+        run: python packaging/release.py "$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and tag it on main
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Version $VERSION"
+          git tag -a "$TAG" -m "Voicestream $VERSION"
+          # both or neither: main moved meanwhile, nothing is pushed and the run says so
+          git push --atomic origin HEAD:refs/heads/main "refs/tags/$TAG"
+
+      - name: Build, test and publish it on a Mac
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.version.outputs.tag }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          gh workflow run mac-app.yml --ref "$TAG" -f release="$TAG"
+          {
+            echo "### Voicestream $TAG"
+            echo "Tagged on main. The Mac build now tests it and publishes the release:"
+            echo "https://github.com/$GH_REPO/actions/workflows/mac-app.yml"
+            if [ "$PRERELEASE" = true ]; then
+              echo "A pre-release: only apps with *Settings → General → Updates → pre-releases* on are offered it."
+            else
+              echo "Every installed Voicestream offers it within six hours."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

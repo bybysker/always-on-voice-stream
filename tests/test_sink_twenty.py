@@ -32,16 +32,27 @@ def stage_options(*values: tuple[str, str]) -> list[dict[str, Any]]:
 
 
 FRENCH_STAGES = stage_options(("NEW", "Nouveau"), ("SCREENING", "Rappel"), ("MEETING", "Rendez-vous"),
-                              ("PROPOSAL", "Proposition"), ("CUSTOMER", "Client"), ("PERDU", "Perdu"))
-OPPORTUNITY_FIELDS = [
-    {"name": "name", "type": "TEXT"},
-    {"name": "stage", "type": "SELECT", "options": FRENCH_STAGES},
+                              ("PROPOSAL", "Proposition"), ("CUSTOMER", "Client"), ("LOST", "Perdu"))
+OPPORTUNITY_FIELDS = [  # crm.socreagency.com's deal fields, as its data model listed them on 2026-11-20
+    {"name": "name", "type": "TEXT", "label": "Name"},
+    {"name": "stage", "type": "SELECT", "label": "Stage", "options": FRENCH_STAGES},
     {"name": "formule", "type": "SELECT", "label": "Formule",
      "options": stage_options(("VISIBILITE", "Visibilité"), ("FORMATION", "Formation"), ("IDENTITE", "Identité"))},
-    {"name": "doutePrincipal", "type": "TEXT", "label": "Doute principal"},
-    {"name": "raisonDeLaPerte", "type": "TEXT", "label": "Raison de la perte"},
-    {"name": "budget", "type": "CURRENCY"},
+    {"name": "versionProposee", "type": "SELECT", "label": "Version proposée",
+     "options": stage_options(("COMPLETE", "Complète"), ("ALLEGEE", "Allégée"), ("MINIMUM", "Le minimum"))},
+    {"name": "doutePrincipal", "type": "SELECT", "label": "Doute principal",
+     "options": stage_options(("PAS_LE_TEMPS", "Pas le temps"), ("QUOI_PUBLIER", "Quoi publier ensuite"),
+                              ("EQUIPES", "Équipes ne regarderont pas"), ("AUCUNE_PISTE", "Aucune piste ne plaira"),
+                              ("TROP_CHER", "Trop cher"), ("AUTRE", "Autre"))},
+    {"name": "raisonPerte", "type": "SELECT", "label": "Raison de la perte",
+     "options": stage_options(("PRIX", "Prix"), ("PAS_LE_MOMENT", "Pas le bon moment"), ("SANS_REPONSE", "Sans réponse"),
+                              ("AUTRE_PRESTATAIRE", "Autre prestataire"), ("PAS_DE_BESOIN", "Pas de besoin"),
+                              ("AUTRE", "Autre"))},
+    {"name": "notes", "type": "TEXT", "label": "Notes"},
+    {"name": "amount", "type": "CURRENCY", "label": "Amount"},
 ]
+MAPPING = {"formule": "Formule", "versionProposee": "Version proposée", "doutePrincipal": "Doute principal",
+           "raisonPerte": "Raison de la perte"}
 
 
 def _ilike(pattern: str, text: str) -> bool:
@@ -148,21 +159,28 @@ def make_sink(**overrides: Any) -> TwentySink:
     app = Config(user_name="Alex Martin", timezone="Europe/Paris")
     settings: dict[str, Any] = {
         "enabled": True, "base_url": BASE, "owner_email": "alex@example.com",
-        "fields": {"formule": "offer", "doutePrincipal": "objection", "raisonDeLaPerte": "lost_reason"},
+        "fields": MAPPING,
     }
     cfg = TwentyConfig(**(settings | overrides))
     return TwentySink(cfg, app)
 
 
-def gaia_meeting(**classification: Any) -> Meeting:
-    c = {"kind": "prospect", "confidence": 0.9, "company": "Gaïa", "step": "discovery", "offer": "Identité",
-         "budget": "5 000 €", "objection": "Et si aucune piste ne me plaît ?", "next_step": "Proposition le 6 novembre",
+FIELDS = {"Formule": "Identité", "Version proposée": "", "Doute principal": "Aucune piste ne plaira",
+          "Raison de la perte": "", "Budget": "5 000 €", "Prochaine étape": "Proposition le 6 novembre"}
+
+
+def gaia_meeting(fields: dict[str, str] | None = None, **classification: Any) -> Meeting:
+    """A discovery meeting with Julie of Gaïa: the proposal to send (A1), a follow-up (A2), the AI fields answered."""
+    c = {"kind": "prospect", "confidence": 0.9, "company": "Gaïa", "step": "discovery", "proposal_item": "A1",
+         "followup_items": ["A2"],
          "contacts": [ClientContact(name="Julie Martin", email="Julie@Gaia.fr", role="directrice")]} | classification
     m = Meeting(id="20261103-140000-000000", title="Rendez-vous découverte GAIA", language="fr",
                 started_at=datetime(2026, 11, 3, 13, 0, tzinfo=UTC), participants=["Julie Martin"],
-                classification=Classification(**c))
+                classification=Classification(**c), fields=FIELDS if fields is None else fields)
     m.items["A1"] = Item(id="A1", kind=ItemKind.ACTION, title="Envoyer la proposition à Julie", owner="Alex Martin",
                          due_date="2026-11-06", confidence=0.9)
+    m.items["A2"] = Item(id="A2", kind=ItemKind.ACTION, title="Relancer Julie si pas de réponse", owner="Alex Martin",
+                         due_date="2026-11-13", confidence=0.9)
     return m
 
 
@@ -184,10 +202,10 @@ async def test_a_new_prospect_files_company_person_deal_note_and_task() -> None:
     assert person["emails"] == {"primaryEmail": "julie@gaia.fr"} and person["jobTitle"] == "directrice"
     assert person["companyId"] == company["id"]
     assert "phones" not in person  # misheard numbers never go on a record
-    assert deal["name"] == "Gaïa · Identité" and deal["stage"] == "MEETING"
+    assert deal["name"] == "Gaïa" and deal["stage"] == "MEETING"
     assert deal["companyId"] == company["id"] and deal["pointOfContactId"] == person["id"] and deal["ownerId"] == ME["id"]
-    assert deal["formule"] == "IDENTITE" and deal["doutePrincipal"] == "Et si aucune piste ne me plaît ?"
-    assert "raisonDeLaPerte" not in deal  # a fact the meeting didn't give
+    assert deal["formule"] == "IDENTITE" and deal["doutePrincipal"] == "AUCUNE_PISTE"
+    assert "versionProposee" not in deal and "raisonPerte" not in deal  # what the meeting didn't answer
 
     [task] = fake.db["tasks"].values()
     assert ref == f"twenty:tasks/{task['id']}"
@@ -201,11 +219,9 @@ async def test_a_new_prospect_files_company_person_deal_note_and_task() -> None:
     assert note == f"twenty:notes/{n['id']}"
     assert n["title"] == "Rendez-vous découverte GAIA"
     body = n["bodyV2"]["markdown"]
-    assert body.startswith("**Budget :** 5 000 €")
-    assert "**Doute principal :** Et si aucune piste ne me plaît ?" in body
-    assert "**Contacts :** Julie Martin (directrice, Julie@Gaia.fr)" in body
+    assert body.startswith("**Contacts :** Julie Martin (directrice, Julie@Gaia.fr)\n\n")
     assert "# Rendez-vous" not in body and "## Résumé" in body
-    assert body.endswith("_Classée par Voicestream sur Gaïa · Julie Martin · opportunité « Gaïa · Identité » (Rendez-vous)._")
+    assert body.endswith("_Classée par Voicestream sur Gaïa · Julie Martin · opportunité « Gaïa » (Rendez-vous)._")
     targets = list(fake.db["noteTargets"].values())
     assert {(k, v) for t in targets for k, v in t.items() if k.startswith("target")} == {
         ("targetOpportunityId", deal["id"]), ("targetCompanyId", company["id"]), ("targetPersonId", person["id"])}
@@ -217,7 +233,7 @@ async def test_existing_records_are_found_despite_accents_case_and_legal_form() 
     company = fake.add("companies", {"name": "GAÏA SAS"})
     julie = fake.add("people", {"name": {"firstName": "Julie", "lastName": "Martin"}, "companyId": None,
                                 "emails": {"primaryEmail": None}})
-    fake.add("opportunities", {"name": "old lost", "companyId": company["id"], "stage": "PERDU"})
+    fake.add("opportunities", {"name": "old lost", "companyId": company["id"], "stage": "LOST"})
     deal = fake.add("opportunities", {"name": "GAIA", "companyId": company["id"], "stage": "SCREENING"})
     m = gaia_meeting(company="Gaia", contacts=[ClientContact(name="julie martin")])
     await sink.push_notes(m, NOTES)
@@ -233,7 +249,7 @@ async def test_the_deal_never_moves_backward_and_closed_deals_stay_closed() -> N
     fake = FakeTwenty(sink)
     company = fake.add("companies", {"name": "Gaïa"})
     deal = fake.add("opportunities", {"name": "Gaïa", "companyId": company["id"], "stage": "PROPOSAL"})
-    await sink.push_notes(gaia_meeting(step="first_call", offer="", objection=""), NOTES)
+    await sink.push_notes(gaia_meeting(step="first_call", fields={}), NOTES)
     assert deal["stage"] == "PROPOSAL"
     assert not [w for w in fake.writes("PATCH") if w[1].startswith("/rest/opportunities")]
 
@@ -241,7 +257,7 @@ async def test_the_deal_never_moves_backward_and_closed_deals_stay_closed() -> N
     fake = FakeTwenty(sink)
     company = fake.add("companies", {"name": "Gaïa"})
     won = fake.add("opportunities", {"name": "Gaïa", "companyId": company["id"], "stage": "CUSTOMER"})
-    await sink.push_notes(gaia_meeting(kind="client", step="lost", offer="", objection=""), NOTES)
+    await sink.push_notes(gaia_meeting(kind="client", step="lost", fields={}), NOTES)
     assert won["stage"] == "CUSTOMER"  # a client meeting files on the won deal and never reopens or loses it
     assert len(fake.db["opportunities"]) == 1 and len(fake.db["notes"]) == 1
 
@@ -251,18 +267,18 @@ async def test_lost_moves_an_open_deal_to_the_lost_stage_with_its_reason() -> No
     fake = FakeTwenty(sink)
     company = fake.add("companies", {"name": "Gaïa"})
     deal = fake.add("opportunities", {"name": "Gaïa", "companyId": company["id"], "stage": "PROPOSAL"})
-    await sink.push_notes(gaia_meeting(step="lost", lost_reason="Trop cher pour cette année", objection=""), NOTES)
-    assert deal["stage"] == "PERDU" and deal["raisonDeLaPerte"] == "Trop cher pour cette année"
+    await sink.push_notes(gaia_meeting(step="lost", fields={"Raison de la perte": "Prix (trop cher pour cette année)"}), NOTES)
+    assert deal["stage"] == "LOST" and deal["raisonPerte"] == "PRIX"  # the option the answer names
 
 
 async def test_a_won_prospect_with_a_won_deal_gets_a_new_deal() -> None:
     sink = make_sink()
     fake = FakeTwenty(sink)
     company = fake.add("companies", {"name": "Gaïa"})
-    fake.add("opportunities", {"name": "Gaïa · Visibilité", "companyId": company["id"], "stage": "CUSTOMER"})
+    old = fake.add("opportunities", {"name": "Gaïa · Visibilité", "companyId": company["id"], "stage": "CUSTOMER"})
     await sink.push_notes(gaia_meeting(step="proposal"), NOTES)
-    new = [d for d in fake.db["opportunities"].values() if d["name"] == "Gaïa · Identité"]
-    assert len(new) == 1 and new[0]["stage"] == "PROPOSAL"
+    new = [d for d in fake.db["opportunities"].values() if d["id"] != old["id"]]
+    assert len(new) == 1 and new[0]["stage"] == "PROPOSAL" and new[0]["name"] == "Gaïa" and old["stage"] == "CUSTOMER"
 
 
 async def test_no_records_are_created_when_create_records_is_off_or_the_name_is_ambiguous() -> None:
@@ -360,7 +376,7 @@ async def test_the_dispatcher_holds_items_and_notes_of_other_meetings() -> None:
     assert (await d.push_now("A1"))["twenty"].startswith("skipped (not a client meeting")
 
     m.classification = gaia_meeting().classification
-    assert pending_review(m, [sink], 0.6) == ["A1"]
+    assert pending_review(m, [sink], 0.6) == ["A1", "A2"]
     await d.review(["A1"])
     assert len(fake.db["tasks"]) == 1
     await d.push_notes(NOTES)
@@ -382,19 +398,21 @@ async def test_metadata_formats_and_a_key_without_the_data_model_permission() ->
 
 
 async def test_check_says_what_it_will_do() -> None:
-    sink = make_sink(stages={"lost": "PERDU"})
+    sink = make_sink()
+    sink.app.brain.fields = list(MAPPING.values())  # the AI fields the mapping reads, asked of every meeting
     FakeTwenty(sink)
     status = await sink.check()
     assert "Twenty at crm.example.com" in status
     assert "your tasks assigned to alex@example.com" in status
-    assert "discovery → Rendez-vous" in status and "lost → Perdu" in status
-    assert "fields: 3 found" in status
+    assert "discovery → Rendez-vous" in status and "lost → Perdu" in status  # LOST found by itself
+    assert "fields: 4 found" in status and "asks for" not in status
 
-    sink = make_sink(fields={"versionProposee": "offer"})
+    sink = make_sink(fields={"versionProposee": "Version proposée", "budgetEstime": "Budget"})
     FakeTwenty(sink, members=[ME, {**ME, "id": str(uuid.uuid4()), "userEmail": "sam@example.com"}])
     sink.cfg.owner_email = None
     status = await sink.check()
-    assert "tasks unassigned" in status and "missing: versionProposee" in status
+    assert "tasks unassigned" in status and "missing: budgetEstime" in status
+    assert "no template or setting asks for the AI field(s) Version proposée" in status  # Budget: the sales template's
 
 
 async def test_errors_name_the_fix() -> None:
@@ -425,3 +443,61 @@ def test_note_body_in_english_without_facts() -> None:
     m = Meeting(language="en", classification=Classification(kind="client", confidence=1, company="Acme"))
     body = note_body(m, "# Title\n\nSome notes.", Filed(company={"id": str(uuid.uuid4()), "name": "Acme"}))
     assert body == "Some notes.\n\n_Filed by Voicestream on Acme._"
+
+
+async def test_ticking_the_proposal_to_do_moves_the_deal_to_proposition() -> None:
+    sink = make_sink()
+    fake = FakeTwenty(sink)
+    m = gaia_meeting()
+    proposal = m.items["A1"]
+    ref = await sink.push_item(proposal, m)
+    await sink.push_item(m.items["A2"], m)
+    [deal] = fake.db["opportunities"].values()
+    assert deal["stage"] == "MEETING"
+
+    m.items["A2"].status = ItemStatus.DONE  # another to-do done: nothing moves
+    await sink.update_item(m.items["A2"], m, ref.replace(record_id(ref, "tasks"), next(
+        t["id"] for t in fake.db["tasks"].values() if t["title"].startswith("Relancer"))))
+    assert deal["stage"] == "MEETING"
+
+    proposal.status = ItemStatus.DONE
+    again = make_sink()  # a later process: the meeting is filed again from the records, nothing created
+    again._client = sink._client
+    await again.update_item(proposal, m, ref)
+    assert deal["stage"] == "PROPOSAL" and len(fake.db["opportunities"]) == 1
+    assert fake.db["tasks"][record_id(ref, "tasks")]["status"] == "DONE"
+
+    deal["stage"] = "CUSTOMER"  # already won: ticking it again never moves it back
+    await again.update_item(proposal, m, ref)
+    assert deal["stage"] == "CUSTOMER"
+
+
+async def test_a_proposal_to_do_sent_already_done_moves_the_deal_unless_stages_stay() -> None:
+    sink = make_sink()
+    fake = FakeTwenty(sink)
+    m = gaia_meeting()
+    m.items["A1"].status = ItemStatus.DONE
+    await sink.push_item(m.items["A1"], m)
+    assert next(iter(fake.db["opportunities"].values()))["stage"] == "PROPOSAL"
+
+    sink = make_sink(move_stage=False)
+    fake = FakeTwenty(sink)
+    await sink.push_item(m.items["A1"], m)
+    assert next(iter(fake.db["opportunities"].values()))["stage"] == "NEW"
+
+
+async def test_proposal_follow_ups_stay_out_when_the_crm_sends_its_own() -> None:
+    cfg = Config(user_name="Alex Martin", sinks={"twenty": {"enabled": True, "base_url": BASE, "skip_proposal_followups": True}})
+    [sink] = build_sinks(cfg, only=["twenty"])
+    fake = FakeTwenty(sink)  # type: ignore[arg-type]
+    m = gaia_meeting()
+    await Dispatcher(cfg, m, [sink]).finalize(None)
+    assert [t["title"] for t in fake.db["tasks"].values()] == ["Envoyer la proposition à Julie"]
+    assert "twenty" not in m.items["A2"].pushed
+
+    cfg.sinks["twenty"]["skip_proposal_followups"] = False  # the default: every to-do of yours goes
+    [sink] = build_sinks(cfg, only=["twenty"])
+    fake = FakeTwenty(sink)  # type: ignore[arg-type]
+    m = gaia_meeting()
+    await Dispatcher(cfg, m, [sink]).finalize(None)
+    assert len(fake.db["tasks"]) == 2

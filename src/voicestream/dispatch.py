@@ -69,7 +69,8 @@ class Dispatcher:
             if sink.supports_update and item.pushed_revision.get(sink.name, 0) < item.revision:
                 return "update"
             return None
-        if not sink.accepts(item, self.dc.min_confidence) or not sink.accepts_meeting(self.meeting):
+        if not (sink.accepts(item, self.dc.min_confidence) and sink.accepts_meeting(self.meeting)
+                and sink.accepts_in(item, self.meeting)):
             return None
         if sink.cfg.review and not _decided(self.meeting, sink.name, item.id, approved=True):
             return None  # waits for the end-of-meeting review
@@ -315,7 +316,7 @@ def pending_review(meeting: Meeting, sinks: Collection[Sink], min_confidence: fl
                 continue
             if _decided(meeting, sink.name, item.id, approved=True) or _decided(meeting, sink.name, item.id, approved=False):
                 continue
-            if sink.accepts(item, min_confidence):
+            if sink.accepts(item, min_confidence) and sink.accepts_in(item, meeting):
                 ids.append(item.id)
                 break
     return ids

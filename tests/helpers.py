@@ -13,8 +13,8 @@ from voicestream.brain.schema import WireClassification
 from voicestream.models import SAMPLE_RATE, TranscriptSegment
 
 WEDNESDAY = date(2026, 10, 14)
-OTHER_MEETING = WireClassification(kind="other", confidence=0.0, company="", contacts=[], step="none", offer="",
-                                   budget="", objection="", lost_reason="", next_step="", reason="")
+OTHER_MEETING = WireClassification(kind="other", confidence=0.0, company="", contacts=[], step="none", proposal_item="",
+                                   followup_items=[], reason="")
 """The wrap-up's classification of a meeting that is no client's (what scripted summaries answer)."""
 
 

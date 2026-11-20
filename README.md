@@ -11,6 +11,10 @@ English, and has Claude turn it into action items, decisions and notes.
   scheme or a command.
 - When someone says "il nous faut une analyse concurrentielle d'ici vendredi", a Claude agent
   can start on it while you're still in the meeting.
+- The notes take the shape of the meeting (a sales call gets pain points, budget and competitors; a
+  one-on-one gets wins and blockers), led by the **AI fields** you choose ("Budget", "Next step").
+- **Ask your meetings** anything ("Qu'a dit Acme sur nos prix ?"): Claude answers from all of them and
+  shows the exact lines it read. **Claude Desktop and Claude Code** can read them too, over MCP.
 
 ```
  your mic ──┐                                        ┌─ live extraction (Claude Haiku) ─┬─ Google Calendar · Apple Reminders · HubSpot · Shortcuts/apps
@@ -35,6 +39,11 @@ settings. Agent work is extra and has its own budget.
 - [Speech-to-text backends](#speech-to-text-backends)
 - [Sending items to your tools](#sending-items-to-your-tools)
 - [Agents that do the work mid-meeting](#agents-that-do-the-work-mid-meeting)
+- [Notes templates and AI fields](#notes-templates-and-ai-fields)
+- [A summary to send, and the transcript](#a-summary-to-send-and-the-transcript)
+- [Ask your meetings](#ask-your-meetings)
+- [Your meetings in Claude Desktop and Claude Code (MCP)](#your-meetings-in-claude-desktop-and-claude-code-mcp)
+- [How the conversation went](#how-the-conversation-went)
 - [Dashboard and terminal commands](#dashboard-and-terminal-commands)
 - [Recordings and existing transcripts](#recordings-and-existing-transcripts)
 - [Costs and budget](#costs-and-budget)
@@ -106,9 +115,24 @@ on again), open Voicestream and allow it when asked. The Keychain may also ask o
 version may read your saved keys: click **Always Allow**.
 
 To build the app yourself on a Mac: `packaging/mac/build.sh` (the comments at its top list what to
-install first). To publish a release, push a `vX.Y.Z` tag that matches the version in
-`pyproject.toml`, or open **Actions → mac app → Run workflow** and type that tag: the build is
-tested, then attached to a new release with the notes in `packaging/mac/release-notes.md`.
+install first).
+
+**To ship a version to everyone's app**, merging to `main` isn't enough (that only builds a test DMG):
+a version reaches the apps as a release.
+
+```
+ 1. packaging/mac/release-notes.md: "New in this version" (what the update banner shows, 1500 characters)
+    and its first line, <!-- release notes for 0.4.1 -->; merge it to main
+ 2. Actions → release → Run workflow → version 0.4.1
+      checks it (newer than the current one, not released yet, notes written for it)
+      → writes it in pyproject.toml and __init__.py → commits and tags v0.4.1 on main
+      → the Mac build tests the app and publishes the release
+ 3. every installed Voicestream offers it within six hours (Settings → General → Updates → Check now: at once)
+```
+
+A version with a suffix (`0.5.0-beta.1`) is a pre-release: only apps with **pre-releases** turned on
+in Settings are offered it. `python packaging/release.py 0.4.1 --check` runs the checks on your own
+computer. Pushing a `vX.Y.Z` tag that matches the version in `pyproject.toml` by hand still works too.
 
 ### Installer l'application (Mac)
 
@@ -257,10 +281,11 @@ The next time someone speaks, a new meeting starts. Pass `--once` for a single m
    - The transcript is sent as append-only blocks with prompt caching, so each call re-reads the
      earlier meeting at about a tenth of the price.
 7. **Wrap-up.** When the meeting ends, Claude Sonnet 5.5 reads the whole transcript once. It
-   merges duplicates, fixes owners and deadlines, catches anything missed, and writes the notes.
-   It also **classifies the meeting**: with a client, a prospect, a partner, your own team, or
-   something else, and for a client or prospect the company, the people, where the deal stands and
-   what was discussed. Items and notes are then pushed to your sinks.
+   merges duplicates, fixes owners and deadlines, catches anything missed, and writes the notes in
+   the [template](#notes-templates-and-ai-fields) that fits the meeting, with your AI fields
+   answered at the top. It also **classifies the meeting**: with a client, a prospect, a partner,
+   your own team, or something else, and for a client or prospect the company, the people and where
+   the deal stands. Items and notes are then pushed to your sinks.
 
 Each meeting gets a folder in `~/.voicestream/sessions/2026-10-14_153000-weekly-sync/` with these
 files:
@@ -438,16 +463,16 @@ Internal, partner and personal meetings never reach it, because voicestream reco
 
 ```
  meeting ends ─► Claude classifies it ─► client or prospect, and sure? ─┬─ yes ─► company · contacts · deal · note · tasks in Twenty
-                 (kind, company, step,                                  └─ no ──► "Claude isn't sure" on the meeting's page:
-                  offer, objection…)                                              you fix it in two clicks, then Send to my tools
+                 (kind, company, step)                                  └─ no ──► "Claude isn't sure" on the meeting's page:
+                 + the notes' AI fields ─► the deal's fields                      you fix it in two clicks, then Send to my tools
 ```
 
 1. In Twenty, open **Settings** → **APIs & Webhooks** → **Create key**. Its role needs to read and
    write companies, people, opportunities, notes and tasks. With the **Data model** permission too,
    voicestream learns your pipeline's stages and custom fields.
-2. In **Settings → Your tools → Twenty CRM**, give your Twenty's address, the key and your Twenty
-   e-mail, plus what you sell and your offers (they help Claude tell your client meetings apart).
-   Click **Test**: it says which stage each step moves a deal to, and which fields it found.
+2. In **Settings → Your tools → Twenty CRM**, give your Twenty's address, the key, your Twenty
+   e-mail and what you sell (it helps Claude tell your client meetings apart). Click **Test**: it says
+   which stage each step moves a deal to, which fields it found, and any AI field nothing asks for.
 
 Each meeting page shows its kind under "With" (**Prospect · GAIA · discovery**), and the
 Meetings list puts a chip on client meetings; search finds them by company. **Change** corrects
@@ -460,28 +485,45 @@ What reaches Twenty for a client or prospect meeting:
 |---|---|
 | Company | Found by name, ignoring case, accents and legal forms (SAS, SARL, Inc…). Not found: created. Two that match: neither is used, nothing is created. |
 | People | Each person from the client's side: by e-mail, else by full name (a first name alone only among the company's people). Not found: created under the company. Phone numbers heard in a meeting stay in the note, never on a record. |
-| Deal | The company's latest open opportunity, or a new one for a prospect ("GAIA · Identité"). It **only moves forward**: first call → Screening, discovery → Meeting, proposal → Proposal, won → Customer, lost → your lost stage. A won or lost deal never moves. |
-| Fields | `fields` writes the meeting's facts into the deal's custom fields: a text field takes the words, a select the option they name. |
-| Note | The notes, headed by the facts (budget, main objection, next step, contacts) and where it was filed, on the deal, the company and the people. |
-| Tasks | Your to-dos, assigned to you, due at 09:00 on their date, linked to the deal and the company. |
+| Deal | The company's latest open opportunity, or a new one for a prospect, named after the company. It **only moves forward**: first call → Screening, discovery → Meeting, proposal → Proposal, won → Customer, lost → your lost stage. A won or lost deal never moves. The to-do in which you send the proposal (Claude marks it), once you tick it in Voicestream, moves the deal to the proposal stage too. |
+| Fields | `fields` maps a deal field to one of the notes' [AI fields](#notes-templates-and-ai-fields): a text field takes the answer, a select the option the answer names. An unanswered field leaves the deal's alone. |
+| Note | The notes (their **At a glance** holds the fields), the contacts and where it was filed, on the deal, the company and the people. |
+| Tasks | Your to-dos, assigned to you, due at 09:00 on their date, linked to the deal and the company. With `skip_proposal_followups`, the to-dos that only chase an answer on the proposal stay out: for a CRM whose own workflow creates those reminders. |
 
 Tasks wait for the wrap-up, where the meeting is classified, even with `dispatch.mode = "immediate"`
-(unless you classify the meeting yourself while it is recorded).
-`create_records = false` only uses records that exist; `move_stage = false` never moves a deal. The
-lost stage is `stages.lost`, or a stage called Lost or Perdu. A self-hosted pipeline with French
-stages and custom fields:
+(unless you classify the meeting yourself while it is recorded). `create_records = false` only uses
+records that exist; `move_stage = false` never moves a deal. The lost stage is `stages.lost`, or a
+stage called Lost or Perdu.
+
+For select fields, ask the AI field to choose among the select's options, in its question. A
+self-hosted pipeline with French stages and four select fields, whose sales template becomes the
+agency's own meeting sheet:
 
 ```toml
 [brain]
 business = "Studio de création vidéo pour les PME en France"
-offers = ["Visibilité", "Formation", "Identité"]
+
+[brain.templates.sales]       # replaces the built-in sales template
+name = "Rendez-vous client"
+when = "un appel ou un rendez-vous avec un client ou un prospect de l'agence"
+sections = ["Résumé", "Situation", "Douleur", "Résultat voulu", "Cadre", "Objections", "Prochaine étape"]
+fields = [
+  "Formule: laquelle parmi Visibilité, Formation, Identité",
+  "Version proposée: laquelle parmi Complète, Allégée, Le minimum",
+  "Doute principal: lequel parmi Pas le temps, Quoi publier ensuite, Équipes ne regarderont pas, Aucune piste ne plaira, Trop cher, Autre",
+  "Raison de la perte: s'ils ont dit non, laquelle parmi Prix, Pas le bon moment, Sans réponse, Autre prestataire, Pas de besoin, Autre",
+  "Budget: le budget ou le prix évoqué, avec la devise",
+  "Prochaine étape: la prochaine étape convenue, avec sa date",
+]
 
 [sinks.twenty]
 enabled = true
 base_url = "https://crm.example.com"
 owner_email = "you@example.com"
-stages = { lost = "PERDU" }   # the stage's value, not its label
-fields = { formule = "offer", doutePrincipal = "objection", raisonDeLaPerte = "lost_reason" }
+create_records = false        # at first: only file on records that exist
+skip_proposal_followups = true
+fields = { formule = "Formule", versionProposee = "Version proposée", doutePrincipal = "Doute principal", raisonPerte = "Raison de la perte" }
+# stages = { lost = "LOST" }  # the stage's value, not its label (found by itself when named Lost or Perdu)
 # min_classification_confidence = 0.7   # below this, the meeting waits for you
 ```
 
@@ -659,6 +701,147 @@ safeguards:
 - Agents cannot email, schedule or message anyone. They prepare drafts and say what's left for
   you to do.
 
+## Notes templates and AI fields
+
+A sales call and a one-on-one don't need the same notes. At the wrap-up, Claude writes them in a
+**template**: a list of sections, plus **fields**, short answers that lead the notes.
+
+| Template | When it fits | Sections | Fields |
+|---|---|---|---|
+| `general` | anything else | Summary, Key points, Decisions, Open questions | — |
+| `sales` | a prospect or customer call about buying, renewing, expanding | Summary, Customer context, Pain points, Current solution, Decision process and timeline, Objections and concerns, Competitors | Budget, Decision maker, Timeline, Competitors, Next step |
+| `interview` | user research, discovery to learn rather than sell | Summary, Who they are, Goals, Pain points, Current workarounds, Requests, Notable quotes, Insights | Main pain point, Top request |
+| `one_on_one` | a manager and a team member, mentoring | Summary, Wins, Challenges and blockers, Feedback, Goals and growth, Open questions | — |
+| `project` | stand-up, sprint or project review, team sync | Summary, Progress, Blockers, Risks, Decisions, Open questions | Status |
+| `recruiting` | interviewing a candidate | Summary, Background and experience, Strengths, Concerns, Motivation, Practical details | Role, Salary expectations, Availability |
+
+```
+ brain.notes_template = "auto" ──► Claude reads the meeting, picks the template that fits ─┐
+ brain.notes_template = "sales" ─► always that one                                         ├─► notes.md
+ the meeting's page: Notes template ▾ ─► that one for this meeting, notes written again ──┘     ## At a glance  ← fields
+                                                                                                 - **Budget:** 40 k€/an
+                                                                                                 ## Pain points …
+```
+
+- `auto` (the default) costs nothing extra: the choice is made in the same wrap-up call.
+- **Fields for every meeting** (`brain.fields`, Settings → Claude → Meeting notes) are asked of every
+  meeting, on top of the template's: one per line, a name and, after a colon, what to look for
+  (`"Budget: what budget, and in which currency, did they mention?"`). Claude answers in a few
+  words, or leaves it empty when the meeting didn't say; it never guesses.
+- The answered fields lead the notes under **At a glance** (**En bref** in French), so they reach
+  everything the notes go to: the Google Doc, Notion, the HubSpot meeting log. On the meeting's
+  page they are beside the notes; **Edit** corrects them, and the next **Send to my tools** updates
+  your tools.
+- Your own templates go in the settings file. One with a built-in's id replaces it:
+
+  ```toml
+  [brain.templates.board]
+  name = "Board meeting"
+  when = "a board or investor meeting"   # what Claude reads to pick it
+  sections = ["Summary", "Metrics", "Asks", "Decisions"]
+  fields = ["Runway", "Next board date"]
+  ```
+
+## A summary to send, and the transcript
+
+Your notes are for you: an "Objections" section or a "Budget" field isn't something to send a client.
+So at the wrap-up, in the same Claude call (no extra request), Claude also writes a **summary for the
+people you met**: an overview, what was discussed and the next steps agreed, written for them and
+without your own assessments. The meeting's to-dos, decisions and open questions complete it.
+
+```
+ wrap-up ──► recap: overview · what was discussed · next steps ─┐
+ the meeting's to-dos (owner, due date) · decisions · questions ─┼─► Summary tab ──► Download PDF
+ minus: the ones you leave out, the requests you made to Claude ─┘   (what you see is what they get)
+ the transcript (everyone by name, you by yours) ───────────────────► Transcript tab ──► PDF · Text
+```
+
+- A meeting's **Summary** tab shows it as the PDF prints it, in the meeting's language (a French
+  meeting gets a *Compte rendu*, whatever the app's language). **Edit** corrects its text; each
+  to-do, decision or question can be **left out** of it (it stays in your notes and your tools).
+- **Download PDF** saves it: the Mac app asks where in its Save panel (its window can't download),
+  a browser downloads it. The **Transcript** tab downloads the transcript as a PDF or a text file.
+- **Rewrite notes** writes the summary again too; when you edited it, the app asks first. A meeting
+  summarized before this existed gets one from its notes until you rewrite them.
+- The PDFs use the standard Helvetica every reader has (nothing to install, a few kilobytes): all of
+  French and English; a character beyond them prints as its plain letter (`ł` → `l`).
+- `voicestream export last` does the same from a terminal (`transcript`, `--format txt`, `-o` a file or folder).
+
+## Ask your meetings
+
+The **Ask** screen (or `voicestream ask "…"`) answers a question from all your meetings: "What did I
+promise this week?", "Qu'ont dit les clients de nos prix ?", "Compare the budgets of my last three
+prospects". Every claim carries a number; each number is a line of a transcript you can click, which
+opens that meeting's transcript on that line.
+
+```
+ question ──► Claude Haiku: search words in French and English, synonyms, the period ("this week" = 7 days)
+          ──► on your Mac: every meeting's title, summary, fields, to-dos, notes and transcript scored;
+              the best 8, with the matching lines and a line of context around each
+          ──► Claude Sonnet reads only those, answers with [1] [2]… ──► each [n] checked against a real line
+```
+
+- A citation that points at a meeting or a line Claude wasn't shown is dropped, and what is quoted
+  under the answer is the line as it was transcribed, never Claude's wording of it.
+- **Which meetings** narrows it to the last 7 days, month or 3 months, or all of them; "as the
+  question says" lets "this week" or "ce mois-ci" decide.
+- Without a Claude key, over the daily budget, or with Claude turned off, Ask still searches: it shows
+  the lines your words are in, with the words marked.
+- A question costs about $0.02–0.06 (it counts against `budget.daily_usd`).
+
+```bash
+voicestream ask "Qu'est-ce que j'ai promis à Acme ?"
+voicestream ask "pricing objections" --days 90
+voicestream ask "Globex" --offline        # only the search, no Claude
+```
+
+## Your meetings in Claude Desktop and Claude Code (MCP)
+
+`voicestream mcp` is an MCP server: Claude Desktop, Claude Code or any MCP client can search your
+meetings, read a meeting's notes, fields, to-dos and transcript, and list your open to-dos across
+meetings. Then ask Claude things like "Draft the follow-up to Acme from what we said on Tuesday" or
+"Which of my to-dos are late?".
+
+**Settings → Claude → Your meetings in Claude** shows the exact lines to paste, with **Copy**. With
+the Mac app they look like this:
+
+```json
+{"mcpServers": {"voicestream": {"command": "/Applications/Voicestream.app/Contents/MacOS/Voicestream", "args": ["mcp"]}}}
+```
+
+(Claude Desktop: **Settings → Developer → Edit Config**; with the command-line install
+`"command": "voicestream"`.) For Claude Code: `claude mcp add voicestream -- voicestream mcp`.
+
+| Tool | What it gives |
+|---|---|
+| `search_meetings` | the meetings that best match some words, with the matching lines |
+| `list_meetings` | the latest meetings: date, length, people, summary, fields |
+| `get_meeting` | one meeting: notes, fields, to-dos, decisions, open questions, follow-up draft, talk time |
+| `get_transcript` | a meeting's transcript, a page of lines at a time |
+| `list_action_items` | to-dos across meetings: yours or everyone's, open, done or all |
+
+It only reads. It can't change, send or delete anything, makes no model call of its own, and runs
+only while Claude runs it (over stdin/stdout: nothing listens on the network). What Claude reads
+through it goes to Anthropic, as anything you show Claude does. Its descriptions tell the client that
+a transcript is what people said, to report, never instructions to follow.
+
+## How the conversation went
+
+A meeting's **Conversation** tab shows who talked how much, worked out on your computer from the
+transcript's times (no model call):
+
+| Figure | What it is |
+|---|---|
+| You spoke | your share of the talk time |
+| Your longest stretch | the longest you held the floor: your lines with no one else in between and pauses of at most 5 s |
+| Questions you asked | question marks in your lines (speech-to-text punctuates the questions it hears) |
+| Turns per minute | how often the speaker changed: a dialogue rather than a talk |
+
+Then everyone's share, talk time, longest stretch, questions and words per minute. In a sales call or
+a customer interview it adds a gentle note when you talked more than 60 % of the time, held the floor
+for more than 2½ minutes, or asked under one question every ten minutes. These figures are for you:
+they are never in the notes, the follow-up e-mail or anything sent to your tools.
+
 ## Dashboard and terminal commands
 
 The dashboard (`dashboard.enabled`, bound to 127.0.0.1 and protected by a per-run token) shows:
@@ -701,6 +884,10 @@ voicestream import call.vtt --me "Alex Martin" --date 2026-10-12T14:00
 voicestream sessions                            # list recorded meetings
 voicestream summarize last                      # re-run the notes
 voicestream push last --sink notion             # push a saved meeting
+voicestream export last                         # its summary as a PDF, to send to the people you met
+voicestream export last transcript --format txt -o ~/Desktop   # its transcript (pdf or txt)
+voicestream ask "What did Acme say about pricing?"   # a question about all your meetings
+voicestream mcp                                 # your meetings for Claude Desktop / Claude Code (MCP, stdio)
 ```
 
 `replay` runs as fast as possible by default. Use `--speed 1` for real time, which also shows it
@@ -730,6 +917,7 @@ of meetings, with about 60% speech:
 | Wrap-up and notes | `claude-sonnet-5-5`, once per meeting | ≈ $0.05–0.15 per meeting |
 | Screen descriptions (optional) | `claude-haiku-5-5` | ≈ $0.05 |
 | Agents (optional) | `claude-opus-5-5` | ≈ $0.02–0.30 per task, capped |
+| Ask (optional) | `claude-haiku-5-5` + `claude-sonnet-5-5` | ≈ $0.02–0.06 per question |
 
 That is about $0.76 a day (≈ $15 a month over 20 working days) with speech-to-text on your Mac,
 and about $2.20 with OpenAI's. `budget.daily_usd` (default $3) is a soft cap on transcription plus Claude. When it's reached,
@@ -777,8 +965,10 @@ mistake in the config file is reported with the file and the setting, e.g.
 | `brain.extract_interval_s` | `90` | Seconds between extraction calls |
 | `brain.wake_phrases` | `["hey claude", …]` | Phrases that address the assistant directly |
 | `brain.vocabulary` | `[]` | Names and jargon for the transcriber and Claude |
+| `brain.notes_template` | `auto` | The notes' [template](#notes-templates-and-ai-fields), or `auto`: Claude picks per meeting |
+| `brain.fields` | `[]` | AI fields every meeting answers at the top of its notes |
+| `brain.templates` | `{}` | Your own notes templates |
 | `brain.business` | `""` | What you sell: only this business's clients and prospects count as client meetings |
-| `brain.offers` | `[]` | Your offers: a client meeting names the one discussed, as written here |
 | `dispatch.mode` | `end` | When items are pushed |
 | `agents.mode` | `suggest` | See [Agents](#agents-that-do-the-work-mid-meeting) |
 | `agents.engine` | `agent-sdk` | Full agent, or `api` for a single call |
@@ -807,7 +997,10 @@ Package layout under `src/voicestream/`:
 |---|---|
 | `audio/` | Capture sources, the streaming resampler, VAD and the speech gate |
 | `transcribe/` | Speech-to-text backends and the echo filter |
-| `brain/` | Prompts, strict wire schemas, extractor, tracker, summarizer, offline heuristic |
+| `brain/` | Prompts, strict wire schemas, extractor, tracker, summarizer, notes templates, offline heuristic |
+| `library.py` | Ask: searching every meeting, and Claude's cited answers |
+| `mcp_server.py` | `voicestream mcp`: the meetings over MCP, read-only |
+| `stats.py` | How the conversation went (talk time, monologues, questions) |
 | `sinks/` | Integrations |
 | `agents/` | Agent runner |
 | `dashboard/` | Web UI |

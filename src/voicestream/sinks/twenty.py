@@ -23,20 +23,24 @@ What it does with a client or prospect meeting:
   numbers heard in a meeting are too often misheard to go on a record: they stay in the note.
 * **Deal** (an opportunity). The company's most recently updated open deal (not won, not lost); a
   client meeting with none uses its latest won deal. A prospect with no open deal gets a new one, named
-  "<company> · <offer>". The deal **only moves forward**: a meeting's step (first call, discovery,
+  after the company. The deal **only moves forward**: a meeting's step (first call, discovery,
   proposal, won) moves it to the mapped stage when that stage comes later in the pipeline; "lost" moves
   an open deal to your lost stage (``stages.lost``, else a stage called Lost or Perdu). A won or lost
-  deal never moves. ``fields`` writes the meeting's facts (offer, budget, objection, lost reason, next
-  step) into the deal's fields: a text field takes the words, a select the option whose label they
-  name (one match only), a multi-select gains it. A fact the meeting didn't give leaves its field alone.
-* **Note.** The meeting notes, headed by the deal facts and where it was filed, on the company, the
-  people and the deal. Pushing the notes again rewrites the same note (one deleted in Twenty stays
-  deleted). A meeting with nothing to file it on sends nothing.
+  deal never moves. The to-do in which you send the proposal (Claude marks it), once done in
+  Voicestream, moves the deal to the proposal stage too: that is when a CRM's proposal follow-ups start.
+* **Fields.** ``fields`` maps a deal field to one of the meeting's AI fields (``brain.fields`` or a notes
+  template's, e.g. ``{ doutePrincipal = "Doute principal" }``): a text field takes the answer, a select
+  the option the answer names (its label exactly, else the only label that is a word of it), a
+  multi-select gains it. A field the meeting didn't answer leaves the deal's alone.
+* **Note.** The meeting notes (their "At a glance" carries the fields), with the contacts and where it
+  was filed, on the company, the people and the deal. Pushing the notes again rewrites the same note
+  (one deleted in Twenty stays deleted). A meeting with nothing to file it on sends nothing.
 * **Tasks** (``owners = "mine"``: your follow-ups), assigned to you (the member with ``owner_email``,
   else the workspace's only member), due on the item's date at ``due_time``, linked to the deal, the
   company and the contact who owns it. Updates change the title, body and (when the item's date moves)
   the due date; done completes it, a task is never reopened. Cancelled or dismissed deletes it (to
-  Twenty's trash, restorable), unless it is done.
+  Twenty's trash, restorable), unless it is done. ``skip_proposal_followups``: the to-dos that only chase
+  an answer on the proposal aren't sent, for a CRM whose own workflow creates those reminders.
 
 Creates aren't retried after a 5xx or no answer (they may have been applied); searching first makes
 pushing again safe for companies, people and deals. Ref formats: ``twenty:notes/<uuid>``,
@@ -74,7 +78,6 @@ STANDARD_ORDER = ("NEW", "SCREENING", "MEETING", "PROPOSAL", "CUSTOMER")
 LOST_NAMES = {"lost", "perdu", "perdue", "closed lost", "closedlost", "closed_lost"}
 LEGAL_FORMS = {"sas", "sasu", "sarl", "eurl", "sa", "sci", "scop", "snc", "ei", "eirl", "selarl", "inc", "llc",
                "ltd", "plc", "gmbh", "bv", "srl", "spa", "corp", "co"}  # fmt: skip
-Fact = Literal["offer", "budget", "objection", "lost_reason", "next_step"]
 PAGE = 200
 """Twenty answers at most this many records a request."""
 _ERRORS = (400, 401, 403, 404, 409, 422)
@@ -99,8 +102,10 @@ class TwentyConfig(SinkConfig):
     """Move the deal forward to the stage the meeting reached (never backward)."""
     stages: dict[Literal["first_call", "discovery", "proposal", "won", "lost"], str] = {}
     """The stage value (not its label) each step moves the deal to; unset ones use Twenty's standard stages."""
-    fields: dict[str, Fact] = {}
-    """A deal field's API name → the meeting fact it takes, e.g. ``{ formule = "offer", doutePrincipal = "objection" }``."""
+    fields: dict[str, str] = {}
+    """A deal field's API name → the AI field whose answer it takes, e.g. ``{ formule = "Formule" }``."""
+    skip_proposal_followups: bool = False
+    """Don't send the to-dos that only chase an answer on the proposal: your CRM's own workflow creates them."""
 
     @field_validator("base_url")
     @classmethod
@@ -375,16 +380,15 @@ class TwentySink(HttpSinkMixin, Sink):
             if c.kind != "prospect" or not self.cfg.create_records:
                 return
             name = str(filed.company.get("name") or c.company)
-            data: dict[str, Any] = {"name": f"{name} · {c.offer}" if c.offer else name, "companyId": filed.company["id"],
-                                    "stage": wanted or pipe.order[0]}
+            data: dict[str, Any] = {"name": name, "companyId": filed.company["id"], "stage": wanted or pipe.order[0]}
             if filed.people:
                 data["pointOfContactId"] = next(iter(filed.people.values()))["id"]
             if member := await self._owner():
                 data["ownerId"] = member["id"]
-            deal = await self._create("opportunities", "opportunity", data | await self._facts(c, {}))
+            deal = await self._create("opportunities", "opportunity", data | await self._facts(meeting, {}))
             log.info("twenty: created the deal %s at %s", data["name"], data["stage"])
         else:
-            changes = await self._facts(c, deal)
+            changes = await self._facts(meeting, deal)
             stage = deal.get("stage")
             if wanted and stage not in (pipe.won, pipe.lost) and (wanted == pipe.lost or pipe.rank(wanted) > pipe.rank(stage)):
                 changes["stage"] = wanted
@@ -395,16 +399,17 @@ class TwentySink(HttpSinkMixin, Sink):
         filed.deal = deal
         filed.stage_label = pipe.labels.get(str(deal.get("stage")), str(deal.get("stage") or ""))
 
-    async def _facts(self, c: Classification, deal: dict[str, Any]) -> dict[str, Any]:
-        """The ``fields`` the meeting gives a value to, as Twenty takes them (only those that change)."""
+    async def _facts(self, meeting: Meeting, deal: dict[str, Any]) -> dict[str, Any]:
+        """The ``fields`` the meeting's AI fields answer, as Twenty takes them (only those that change)."""
         if not self.cfg.fields:
             return {}
         schema = await self._opportunity_fields()
         if schema is None:
             return {}
+        answers = {fold(k): v for k, v in meeting.fields.items()}
         out: dict[str, Any] = {}
-        for name, fact in self.cfg.fields.items():
-            text = getattr(c, fact, "")
+        for name, ai_field in self.cfg.fields.items():
+            text = " ".join(answers.get(fold(ai_field), "").split())
             meta = schema.get(name)
             if not text:
                 continue
@@ -427,7 +432,7 @@ class TwentySink(HttpSinkMixin, Sink):
                     continue
                 value = {"markdown": text}
             else:
-                log.warning("twenty: fields.%s is a %s field; only text, select and multi-select take a fact", name, kind)
+                log.warning("twenty: fields.%s is a %s field; only text, select and multi-select take an answer", name, kind)
                 continue
             if value is not None and value != deal.get(name):
                 out[name] = value
@@ -451,6 +456,30 @@ class TwentySink(HttpSinkMixin, Sink):
     def accepts(self, item: Item, default_min_conf: float) -> bool:
         return super().accepts(item, default_min_conf) and item.status != ItemStatus.CANCELLED
 
+    def accepts_in(self, item: Item, meeting: Meeting) -> bool:
+        c = meeting.classification
+        return not (self.cfg.skip_proposal_followups and c is not None and item.id in c.followup_items)
+
+    def _is_proposal(self, item: Item, meeting: Meeting) -> bool:
+        c = meeting.classification
+        return c is not None and bool(c.proposal_item) and item.id == c.proposal_item and self.accepts_meeting(meeting)
+
+    async def _proposal_sent(self, meeting: Meeting) -> None:
+        """The to-do that sends the proposal is done: the deal moves on to the proposal stage (forward only),
+        where a CRM's proposal follow-ups start."""
+        if not self.cfg.move_stage:
+            return
+        filed = await self._file(meeting)
+        pipe = await self._pipeline()
+        stage, deal = self._wanted("proposal", pipe), filed.deal
+        if deal is None or stage is None or deal.get("stage") in (pipe.won, pipe.lost):
+            return
+        if pipe.rank(stage) > pipe.rank(deal.get("stage")):
+            await self._update("opportunities", deal["id"], {"stage": stage})
+            deal["stage"] = stage
+            filed.stage_label = pipe.labels.get(stage, stage)
+            log.info("twenty: the proposal was sent; deal %s moved to %s", deal.get("name"), stage)
+
     async def push_item(self, item: Item, meeting: Meeting) -> str:
         filed = await self._file(meeting)
         data: dict[str, Any] = {
@@ -465,6 +494,8 @@ class TwentySink(HttpSinkMixin, Sink):
         task = await self._create("tasks", "task", data)
         owner = filed.people.get(fold(item.owner or ""))
         await self._link("taskTargets", "taskId", task["id"], filed, [owner] if owner else [])
+        if item.status == ItemStatus.DONE and self._is_proposal(item, meeting):
+            await self._proposal_sent(meeting)
         return f"{REF_PREFIX}tasks/{task['id']}"
 
     async def update_item(self, item: Item, meeting: Meeting, ref: str) -> None:
@@ -489,6 +520,8 @@ class TwentySink(HttpSinkMixin, Sink):
         if item.status == ItemStatus.DONE and not done:
             data["status"] = "DONE"
         await self._update("tasks", task_id, data)
+        if item.status == ItemStatus.DONE and self._is_proposal(item, meeting):
+            await self._proposal_sent(meeting)  # ticked in Voicestream: ticking it in Twenty can't reach here
 
     async def push_notes(self, meeting: Meeting, notes_markdown: str) -> str | None:
         # a note already in Twenty is rewritten even if you have since said it wasn't a client meeting
@@ -541,9 +574,15 @@ class TwentySink(HttpSinkMixin, Sink):
         if schema is None:
             parts.append("can't read the data model (give the key the Data model permission), so standard stages assumed")
         if self.cfg.fields:
+            from ..brain.templates import all_templates, global_fields
+
             missing = [n for n in self.cfg.fields if schema is not None and n not in schema]
+            asked = {fold(f.name) for t in all_templates(self.app.brain).values() for f in t.fields}
+            asked |= {fold(f.name) for f in global_fields(self.app.brain)}
+            unasked = sorted({a for a in self.cfg.fields.values() if fold(a) not in asked})
             parts.append(f"fields: {len(self.cfg.fields) - len(missing)} found"
-                         + (f", missing: {', '.join(missing)}" if missing else ""))
+                         + (f", missing: {', '.join(missing)}" if missing else "")
+                         + (f", no template or setting asks for the AI field(s) {', '.join(unasked)}" if unasked else ""))
         kinds = " and ".join(self.cfg.meeting_kinds)
         parts.append(f"files {kinds} meetings Claude is {self.cfg.min_classification_confidence:.0%} sure of")
         return " · ".join(parts)
@@ -569,11 +608,8 @@ class TwentySink(HttpSinkMixin, Sink):
 # ------------------------------------------------------------------ notes
 
 NOTE_LABELS = {
-    "en": {"budget": "Budget", "objection": "Main objection", "lost_reason": "Lost because", "next_step": "Next step",
-           "contacts": "Contacts", "filed": "Filed by Voicestream on", "deal": "deal", "meeting": "Meeting"},
-    "fr": {"budget": "Budget", "objection": "Doute principal", "lost_reason": "Raison de la perte",
-           "next_step": "Prochaine étape", "contacts": "Contacts", "filed": "Classée par Voicestream sur",
-           "deal": "opportunité", "meeting": "Réunion"},
+    "en": {"contacts": "Contacts:", "filed": "Filed by Voicestream on", "deal": "deal", "meeting": "Meeting"},
+    "fr": {"contacts": "Contacts :", "filed": "Classée par Voicestream sur", "deal": "opportunité", "meeting": "Réunion"},
 }  # fmt: skip
 
 
@@ -587,22 +623,14 @@ def _note_title(meeting: Meeting) -> str:
 
 
 def note_body(meeting: Meeting, notes_markdown: str, filed: Filed) -> str:
-    """The meeting's notes for Twenty: the deal facts first (the "fiche"), then the notes without their
-    title (the note has its own), then where it was filed."""
+    """The meeting's notes for Twenty: who took part from the client's side, then the notes without their
+    title (the note has its own; their "At a glance" carries the fields), then where it was filed."""
     t = NOTE_LABELS[_lang(meeting)]
     c = meeting.classification or Classification()
-    facts = [f"**{t[k]} :** {v}" if _lang(meeting) == "fr" else f"**{t[k]}:** {v}"
-             for k in ("budget", "objection", "lost_reason", "next_step") if (v := getattr(c, k))]
     people = [", ".join(filter(None, [x.role, x.email])) for x in c.contacts]
     contacts = "; ".join(f"{x.name} ({p})" if p else x.name for x, p in zip(c.contacts, people, strict=True))
-    lines = []
-    if facts:
-        lines += ["  \n".join(facts), ""]
-    if contacts:
-        lines += [f"**{t['contacts']}{' :' if _lang(meeting) == 'fr' else ':'}** {contacts}", ""]
+    lines = [f"**{t['contacts']}** {contacts}", ""] if contacts else []
     body = re.sub(r"\A\s*# [^\n]*\n", "", notes_markdown or "").strip()
-    if lines and body:
-        lines += ["---", ""]
     lines += [body, ""] if body else []
     where = [str(filed.company.get("name") or "") if filed.company else ""]
     where += [_full_name(p) for p in filed.people.values()]

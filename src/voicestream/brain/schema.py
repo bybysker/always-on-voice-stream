@@ -8,12 +8,12 @@ them into the richer internal models in :mod:`voicestream.brain.tracker`.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from ..models import Classification, ClientContact, ItemKind, ItemStatus
-from ..models import _name_key as name_key
 from .tracker import ExtractedItem, ExtractionResult, ItemUpdate
 
 
@@ -74,21 +74,23 @@ class WireClassification(BaseModel):
     company: str = Field(description="The client's or prospect's organization as named in the meeting; '' if not named or not a client/prospect meeting.")
     contacts: list[WireContact] = Field(description="People from that organization who took part; [] if none or not a client/prospect meeting.")
     step: Literal["none", "first_call", "discovery", "proposal", "won", "lost"]
-    offer: str = Field(description="The offer discussed, written exactly as one of the user's offers when one fits; '' if none.")
-    budget: str = Field(description="Budget or price discussed, as said; '' if none.")
-    objection: str = Field(description="The prospect's main doubt or objection, in their words; '' if none.")
-    lost_reason: str = Field(description="Why they said no, only when step is 'lost'; else ''.")
-    next_step: str = Field(description="The agreed next step with its date; '' if none.")
+    proposal_item: str = Field(description="Id of the to-do (e.g. 'A2') that sends the proposal or quote to them; '' if none.")
+    followup_items: list[str] = Field(description="Ids of to-dos that only chase them for an answer on a proposal (a reminder, a follow-up call); [] if none.")
     reason: str = Field(description="One short sentence saying why this kind, in the notes' language.")
+class WireField(BaseModel):
+    name: str = Field(description="A field's name exactly as listed in the context, e.g. 'Budget'.")
+    value: str = Field(description="The meeting's answer in a few words (<= 30), names and numbers as said; '' if not discussed.")
 
 
 class WireSummary(BaseModel):
     title: str = Field(description="Short descriptive meeting title.")
     tldr: str = Field(description="2-3 sentence summary.")
+    template: str = Field(description="Id of the notes template the notes follow (the one given, or the one picked).")
     notes_markdown: str = Field(
-        description="Meeting notes in Markdown: ## Summary, ## Key points, ## Decisions, ## Open questions. "
-        "Do NOT include the action-item list (it is rendered separately)."
+        description="Meeting notes in Markdown, one ## section per section of the notes template (omit empty ones). "
+        "Do NOT include the action-item list (it is rendered separately), nor the fields."
     )
+    fields: list[WireField] = Field(description="One entry per field listed in the context for the template used; [] if none are listed.")
     updates: list[WireUpdate] = Field(description="Corrections to existing items after reading the whole meeting.")
     missing_items: list[WireNewItem] = Field(description="Important items the live pass missed; [] if none.")
     participants: list[str] = Field(
@@ -106,6 +108,18 @@ class WireSummary(BaseModel):
         "thanks, 2-4 key points/decisions, each person's next steps with dates, a sign-off with the user's name; '' if no subject."
     )
     classification: WireClassification = Field(description="What kind of meeting this was, for the user's CRM.")
+    recap_overview: str = Field(
+        description="For the summary sent to the participants: 2-3 sentences on what the meeting was for and where "
+        "things stand, written for them; '' if nothing was discussed."
+    )
+    recap_discussed: list[str] = Field(
+        description="For that summary: the topics discussed, one plain-text point each (<= 25 words), in the order "
+        "they came up; [] if none."
+    )
+    recap_next_steps: list[str] = Field(
+        description="For that summary: what happens next as agreed (milestones, meetings, decisions to come, with dates "
+        "as said), not the individual to-dos; [] if none."
+    )
 
 
 def _opt(s: str) -> str | None:
@@ -147,35 +161,25 @@ def wire_update_to_update(w: WireUpdate) -> ItemUpdate:
     )
 
 
-def wire_to_classification(w: WireClassification, offers: list[str]) -> Classification:
-    """Claude's answer, held to its rules: only a client or prospect meeting has a company and deal facts,
-    a reason for a loss only when lost, and an offer written as in ``brain.offers`` when it is one of them."""
+def wire_to_classification(w: WireClassification, action_ids: Collection[str]) -> Classification:
+    """Claude's answer, held to its rules: only a client or prospect meeting has a company, contacts, a sales
+    step and to-dos of the deal, and those to-dos are action items the meeting has (``action_ids``)."""
     business = w.kind in ("client", "prospect")
-    step = w.step if business else "none"
-
-    def clean(s: str, limit: int = 300) -> str:
-        return " ".join((s or "").split())[:limit] if business else ""
-
-    offer = clean(w.offer, 120)
-    for known in offers:  # "identite" → "Identité", as your CRM's field spells it
-        if offer and name_key(known) == name_key(offer):
-            offer = known
+    ids = set(action_ids) if business else set()
     contacts = [
         ClientContact(name=" ".join(c.name.split())[:120], email=c.email.strip()[:160], role=" ".join(c.role.split())[:120])
         for c in (w.contacts if business else [])
         if c.name.strip()
     ]
+    proposal = w.proposal_item.strip()
     return Classification(
         kind=w.kind,
         confidence=min(1.0, max(0.0, w.confidence)),
-        company=clean(w.company, 160),
+        company=" ".join(w.company.split())[:160] if business else "",
         contacts=contacts,
-        step=step,
-        offer=offer,
-        budget=clean(w.budget),
-        objection=clean(w.objection),
-        lost_reason=clean(w.lost_reason) if step == "lost" else "",
-        next_step=clean(w.next_step),
+        step=w.step if business else "none",
+        proposal_item=proposal if proposal in ids else "",
+        followup_items=[i for i in dict.fromkeys(x.strip() for x in w.followup_items) if i in ids and i != proposal],
         reason=" ".join((w.reason or "").split())[:300],
     )
 

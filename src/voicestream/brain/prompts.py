@@ -93,11 +93,17 @@ the shared screen) and the items captured live during the meeting.
 Produce:
 1. title — short and descriptive.
 2. tldr — 2–3 sentences: what the meeting was about and what was decided.
-3. notes_markdown — crisp Markdown notes with sections "## Summary", "## Key points", \
-"## Decisions" and "## Open questions" (omit empty sections), the headings translated into the notes' \
-language (French: "## Résumé", "## Points clés", "## Décisions", "## Questions ouvertes"). Bullet \
-points, concrete facts, names and numbers. Do NOT include an action-items section; it is rendered \
-separately from the item list.
+3. template — the id of the notes template the notes follow. The context gives either one template \
+(use it) or a list of them (pick the one that fits this meeting best: what it was for, not the words \
+used; "general" when none clearly fits).
+3b. notes_markdown — crisp Markdown notes with one "## " section per section of that template, in its \
+order (omit sections the meeting gave nothing for), the headings translated into the notes' language \
+(French for the general template: "## Résumé", "## Points clés", "## Décisions", "## Questions \
+ouvertes"). Bullet points, concrete facts, names and numbers. Do NOT include an action-items section; \
+it is rendered separately from the item list. Do NOT repeat the fields either.
+3c. fields — one entry per field the context lists for that template (and for every meeting), with \
+its name exactly as listed: the answer in a few words, as the meeting said it (amounts with their \
+currency, dates as said); '' when the meeting didn't say. Never a guess.
 4. updates — corrections to the live items now that you have the full context: merge duplicates \
 (dismiss the redundant one), fix owners and deadlines, mark items completed during the meeting as \
 done, dismiss items that were hypothetical or misheard. Use '' / "unchanged" for fields you keep.
@@ -115,7 +121,17 @@ names in the notes too: a `Speaker N` nobody identified is "a participant", neve
 other participants, written in the meeting's language in the user's voice (first person, signed with \
 the user's name): thanks, the key points/decisions, each person's next steps with dates. Leave both \
 '' when there were no other participants or nothing worth following up.
-9. classification — what kind of meeting this was, for the user's CRM:
+9. recap_overview / recap_discussed / recap_next_steps — a summary the user will send as a PDF to the \
+people they met (clients, collaborators), next to the to-dos, decisions and open questions (rendered from \
+the items). Write it for them: neutral and factual, in the meeting's language, about the meeting ("we \
+agreed…", "Acme will…"), never addressed to the user. recap_overview: 2–3 sentences on what the meeting \
+was for and where things stand. recap_discussed: the topics discussed, one plain-text point each (no \
+Markdown), concrete (names, numbers, dates as said), in the order they came up. recap_next_steps: what \
+happens next as agreed — milestones, the next meeting, decisions still to make, with their dates — not \
+the individual to-dos. Leave out anything the user would not show them: the user's own assessments (how \
+interested they seem, objections or risks the user is noting, budget guesses, competitors, salary or \
+negotiation positions) and anything said only among the user's side. Empty when the meeting gave nothing.
+10. classification — what kind of meeting this was, for the user's CRM:
    - kind: "client" (an existing client of the user's business: their project, a delivery, a review, \
 a renewal), "prospect" (a sales conversation with someone who may buy: a call-back to qualify, a \
 discovery meeting, a proposal, a negotiation), "partner" (an outside organization that buys nothing: \
@@ -133,26 +149,22 @@ with an e-mail only if it was said or shown in full, and their role if said.
 a meeting), "discovery" (a meeting to understand the need), "proposal" (an offer and price presented \
 or negotiated), "won" (they said yes or signed), "lost" (they said no), "none" (no sales step: a \
 client's project meeting, a follow-up).
-   - offer — the offer discussed, written exactly as one of the user's offers when one fits; '' if none.
-   - budget, objection (their main doubt, in their words), lost_reason (only when lost), \
-next_step (with its date) — '' when not said.
+   - proposal_item — the id of the to-do captured live (e.g. "A2") in which the user sends them the \
+proposal or quote; '' if there is none.
+   - followup_items — the ids of to-dos that only chase them for an answer on a proposal (a reminder \
+to write or call them back about it); [] if none.
    - reason — one short sentence on why this kind.
-   For "partner", "internal" and "other", company, contacts and the deal facts stay empty and step \
-is "none".
+   For "partner", "internal" and "other", company, contacts and the to-dos stay empty and step is \
+"none". What was said about the deal (budget, doubts…) goes in the fields, not here.
 
-Write everything (title, tldr, notes, item titles, email) in the language requested in the context. \
+Write everything (title, tldr, notes, item titles, email, summary) in the language requested in the context. \
 Never invent facts that are not in the transcript.
 """
 
 
-def business_context(business: str, offers: list[str]) -> str:
-    """What the classification needs to know about the user's business (``brain.business``/``offers``)."""
-    lines = []
-    if business.strip():
-        lines.append(f"The user's business: {' '.join(business.split())}")
-    if offers:
-        lines.append(f"The user's offers: {', '.join(o.strip() for o in offers if o.strip())}")
-    return "\n".join(lines)
+def business_context(business: str) -> str:
+    """What the classification needs to know about the user's business (``brain.business``)."""
+    return f"The user's business: {' '.join(business.split())}" if business.strip() else ""
 
 
 SCREEN_SYSTEM = """\

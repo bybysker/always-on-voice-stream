@@ -32,14 +32,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 from zoneinfo import ZoneInfo
 
-from .. import known_people
+from .. import known_people, library
 from ..brain.people import name_voice, other_side, people_event, speaker_label, voice_labels
-from ..brain.summarizer import rerender, summarize
+from ..brain.summarizer import recap_points, rerender, summarize
+from ..brain.templates import AUTO, all_templates
 from ..brain.tracker import ItemTracker
 from ..config import Config
 from ..dispatch import Dispatcher, pending_review
 from ..events import EventBus
-from ..models import Classification, Event, ItemKind, Meeting
+from ..exports import Export, export, recap_view
+from ..models import Classification, Event, ItemKind, Meeting, Recap
+from ..stats import conversation_stats
 from ..storage import (
     RECORDING_LOCK,
     atomic_write,
@@ -136,6 +139,8 @@ def summary(meeting: Meeting, folder: Path, user_name: str, *, live: bool = Fals
             meeting.classification.model_dump(mode="json", include={"kind", "company", "step", "confidence", "by_you"})
             if meeting.classification else None
         ),
+        "template": meeting.template,
+        "fields": {k: v for k, v in meeting.fields.items() if v},
     }
 
 
@@ -144,6 +149,7 @@ def _search_text(meeting: Meeting, folder: Path) -> str:
     if (c := meeting.classification) is not None and c.is_business:
         parts += [c.kind, c.company]  # "prospect", "GAIA"
     parts += [i.title for i in meeting.items.values() if not i.dismissed]
+    parts += [v for v in meeting.fields.values() if v]
     return fold(" ".join(parts)).casefold()  # "gaia" finds GAÏA, "reunion" a "Réunion"
 
 
@@ -311,6 +317,8 @@ class Meetings:
         (each holds its whole transcript) on every list would be slow after a few months."""
         self._held: dict[str, _Held] = {}
         """folder name -> the copy of a past meeting that has work in flight."""
+        self.library = library.Library()
+        """Every meeting as Ask reads it, each parsed once until its files change."""
 
     @property
     def cfg(self) -> Config:
@@ -412,7 +420,9 @@ class Meetings:
                 done.append(d.name)
         return done
 
-    def detail(self, folder: str) -> dict[str, Any]:
+    def _current(self, folder: str) -> tuple[Meeting, Path, MeetingSession | None]:
+        """The meeting as it is now: in memory, or on disk (ended here if its recording was cut off; with the
+        lines heard so far when another voicestream is recording it)."""
         d = resolve_folder(self.cfg, folder)
         s = self.live_session(folder)
         meeting = s.meeting if s is not None else self._load(folder)[0]
@@ -422,6 +432,10 @@ class Meetings:
                 heard = read_transcript(d)
                 if len(heard) > len(meeting.segments):
                     meeting = meeting.model_copy(update={"segments": heard})
+        return meeting, d, s
+
+    def detail(self, folder: str) -> dict[str, Any]:
+        meeting, d, s = self._current(folder)
         return {
             "meeting": meeting.model_dump(mode="json"),
             "notes_markdown": notes_markdown(d, meeting),
@@ -429,7 +443,16 @@ class Meetings:
             "in_memory": s is not None,
             "review": self._review_state(meeting, s),
             "crm": self._crm_state(meeting, s),
+            "stats": conversation_stats(meeting, self._speaker(meeting)),
+            "templates": [t.view() for t in all_templates(self.cfg.brain).values()],
+            "template_setting": self.cfg.brain.notes_template,
+            "recap": recap_view(meeting, self.cfg.user_name),
         }
+
+    def _speaker(self, meeting: Meeting) -> Callable[[Any], str]:
+        """Each line's speaker as the transcript names it: the voices' names, the one other person."""
+        label, other, voices = self.cfg.capture.system.label, other_side(meeting), voice_labels(meeting)
+        return lambda seg: speaker_label(seg, other, label, voices)
 
     def _review_state(self, meeting: Meeting, s: MeetingSession | None) -> dict[str, Any]:
         """The tools that wait for your go-ahead (``review = true``), the to-dos waiting for it, and the
@@ -560,6 +583,74 @@ class Meetings:
                               folder=where)
         return {**people_event(meeting), "voices": dict(meeting.voices), "labels": labels, "folder": where}
 
+    def edit_fields(self, folder: str, values: dict[str, str]) -> dict[str, Any]:
+        """Correct the AI fields' answers (``{"Budget": "40 k€"}``; ``""``: not discussed). Only the
+        meeting's own fields; the notes are written again with them, your tools get them with the next push."""
+        s = self.live_session(folder)
+        if s is not None and not s.finished:
+            raise MeetingBusy("the meeting is still in progress: its fields are filled in when it ends")
+        meeting, d = (s.meeting, s.store.dir) if s is not None else self._editable(folder)
+        unknown = [name for name in values if name not in meeting.fields]
+        if unknown:
+            raise KeyError(unknown[0])
+        for name, value in values.items():
+            meeting.fields[name] = " ".join(str(value).split())[:300]
+        if s is not None:
+            s.store.save_notes(rerender(meeting, self.cfg.user_name))
+            s.save_soon()
+            self.host.bus.publish("meeting.saved", meeting_id=meeting.id, folder=d.name)
+        else:
+            self._write(d, meeting)
+        return {"fields": dict(meeting.fields), "folder": d.name}
+
+    def edit_recap(
+        self,
+        folder: str,
+        *,
+        overview: str | None = None,
+        discussed: list[str] | None = None,
+        next_steps: list[str] | None = None,
+        hide: Collection[str] = (),
+        show: Collection[str] = (),
+    ) -> dict[str, Any]:
+        """The summary for the people you met, corrected on the Summary tab: its text (``None``: as it is;
+        changed text is marked as yours) and the items left out of it (``hide``) or put back (``show``)."""
+        s = self.live_session(folder)
+        if s is not None and not s.finished:
+            raise MeetingBusy("the meeting is still in progress: its summary is written when it ends")
+        meeting, d = (s.meeting, s.store.dir) if s is not None else self._editable(folder)
+        unknown = [i for i in (*hide, *show) if i not in meeting.items]
+        if unknown:
+            raise KeyError(unknown[0])
+        recap = meeting.recap
+        if recap is None:  # the one made from its notes (exports.recap_view), kept from now on
+            view = recap_view(meeting, self.cfg.user_name)
+            recap = meeting.recap = Recap(overview=view["overview"], discussed=view["discussed"],
+                                          next_steps=view["next_steps"], from_notes=True)
+        if overview is not None:
+            recap.overview = " ".join(overview.split())[:1200]
+        if discussed is not None:
+            recap.discussed = recap_points(discussed)
+        if next_steps is not None:
+            recap.next_steps = recap_points(next_steps)
+        if (overview, discussed, next_steps) != (None, None, None):
+            recap.edited = True
+        recap.hidden = [i for i in recap.hidden if i not in show] + [i for i in dict.fromkeys(hide) if i not in recap.hidden]
+        if s is not None:
+            s.save_soon()
+        else:
+            save_meeting(d, meeting)  # the notes don't hold the summary: nothing else to write
+        self.host.bus.publish("meeting.saved", meeting_id=meeting.id, folder=d.name)
+        return {"recap": recap_view(meeting, self.cfg.user_name), "folder": d.name}
+
+    async def export(self, folder: str, what: str, fmt: str) -> Export:
+        """A meeting's summary or transcript as a file (:mod:`voicestream.exports`), as its page shows it now.
+        Made in a thread (a long transcript is many pages) from a copy taken here, on the loop: a meeting in
+        progress keeps changing meanwhile. ``ValueError``: no such file."""
+        meeting = self._current(folder)[0].model_copy(deep=True)
+        cfg = self.cfg
+        return await asyncio.to_thread(export, meeting, what, fmt, user_name=cfg.user_name, others_label=cfg.capture.system.label)
+
     def _write_transcript(self, d: Path, meeting: Meeting) -> None:
         label, other, voices = self.cfg.capture.system.label, other_side(meeting), voice_labels(meeting)
         write_transcript_md(d, meeting, lambda seg: speaker_label(seg, other, label, voices))
@@ -681,20 +772,23 @@ class Meetings:
 
     # --------------------------------------------------------------- summarize
 
-    def start_summarize(self, folder: str) -> None:
+    def start_summarize(self, folder: str, template: str | None = None) -> None:
         """Rewrite the notes in the background (a model call can take a minute); publishes
-        ``meeting.notes_updated {meeting_id, folder, notes, error?}`` when done."""
+        ``meeting.notes_updated {meeting_id, folder, notes, error?}`` when done. ``template``: write them
+        with this notes template from now on (``auto``: Claude picks; see :mod:`..brain.templates`)."""
         resolve_folder(self.cfg, folder)
+        if template is not None and template != AUTO and template not in all_templates(self.cfg.brain):
+            raise KeyError(template)
         s = self.live_session(folder)
         if s is not None and not s.finished:
             raise MeetingBusy("the meeting is still in progress: its notes are written when it ends")
         if s is None:
             self._editable(folder)  # refuse a meeting another process is recording, now
-        task = asyncio.ensure_future(self.summarize(folder))
+        task = asyncio.ensure_future(self.summarize(folder, template))
         task.add_done_callback(_log_failure)
         self.host.track(task)
 
-    async def summarize(self, folder: str) -> str:
+    async def summarize(self, folder: str, template: str | None = None) -> str:
         bus = self.host.bus
         s = self.live_session(folder)
         llm, temporary = self._llm()
@@ -702,6 +796,8 @@ class Meetings:
             budget_ok = not self.host.costs.over_budget()
             if s is not None:
                 meeting, d = s.meeting, s.store.dir
+                if template is not None:
+                    meeting.template_choice = template
                 notes = await summarize_meeting(self.cfg, meeting, llm, tracker=s.tracker, budget_ok=budget_ok)
                 s.store.save_notes(notes)
                 s.store.save()
@@ -710,6 +806,8 @@ class Meetings:
                 held = self._hold(folder, meeting, d)
                 try:
                     async with held.lock:
+                        if template is not None:
+                            meeting.template_choice = template
                         notes = await summarize_meeting(self.cfg, meeting, llm, budget_ok=budget_ok)
                         save_meeting(d, meeting, notes)
                         known_people.remember_meeting(self.cfg.data_path, meeting, self.cfg.user_name)
@@ -724,6 +822,26 @@ class Meetings:
         bus.publish("meeting.notes_updated", meeting_id=meeting.id, folder=d.name, notes=str(d / "notes.md"))
         bus.publish("meeting.saved", meeting_id=meeting.id, folder=d.name)
         return notes
+
+    # --------------------------------------------------------------------- ask
+
+    async def ask(self, question: str, days: int | None = None) -> dict[str, Any]:
+        """Answer a question from all your meetings (:func:`voicestream.library.ask`): Claude's answer
+        with its sources, or — without Claude, or over the day's budget — the search results alone."""
+        llm, temporary = self._llm()
+        reason = None
+        if llm is None:
+            reason = "offline" if self.cfg.brain.provider != "anthropic" else "no_key"
+        elif self.host.costs.over_budget():
+            if temporary:
+                await llm.aclose()
+            llm, temporary, reason = None, False, "over_budget"
+        try:
+            return await library.ask(self.cfg, self.library, question, llm, days=days, run=asyncio.to_thread,
+                                     offline_reason=reason)
+        finally:
+            if temporary and llm is not None:
+                await llm.aclose()
 
     def _llm(self) -> tuple[LLM | None, bool]:
         """The running assistant's Claude client, else a fresh one billed to the shared meter."""

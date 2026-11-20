@@ -423,7 +423,11 @@ class AppHost:
             "call_detection": False,
             "login_item": _login_item_supported(self.native_hooks),
             "keychain": keys.store_name() == "keychain",
+            "save_dialog": False,  # the native shell: files you download are saved through its Save panel
         }
+        self.save_dialog: Callable[[str], str | None] | None = None
+        """The native shell's Save panel: called (from a worker thread) with the file's suggested name, it
+        answers the path you chose, or ``None`` if you cancelled. The Mac app's window can't download."""
         self.hotkey: dict[str, Any] = {"status": "pending", "error": None}
         """What the native shell says of the shortcut: ``ok`` (works from any app), ``taken`` (by another
         app), ``failed`` (``error``: macOS's code), ``off``, ``paused`` (Settings is recording a new one)

@@ -209,6 +209,25 @@ class FollowUpEmail(BaseModel):
     """Recipient e-mail addresses when known (otherwise left for you to fill in)."""
 
 
+class Recap(BaseModel):
+    """The summary you can send to the people you met (the meeting page's Summary tab, and its PDF): written
+    for them, so without your notes' fields and private sections (objections, budget, competitors…).
+    The to-dos, decisions and open questions in it are the meeting's items (:mod:`voicestream.exports`)."""
+
+    overview: str = ""
+    """Two or three sentences: what the meeting was for and where things stand."""
+    discussed: list[str] = Field(default_factory=list)
+    """What was discussed, a point each."""
+    next_steps: list[str] = Field(default_factory=list)
+    """What happens next, as agreed: milestones, meetings, decisions to come (the to-dos are the items)."""
+    hidden: list[str] = Field(default_factory=list)
+    """The items you left out of it (ids): kept when the notes are written again."""
+    edited: bool = False
+    """You changed its text (writing the notes again replaces it, so the page asks first)."""
+    from_notes: bool = False
+    """Made from the meeting's notes (it was summarized before these summaries existed), not by Claude."""
+
+
 class ReviewDecision(BaseModel):
     """What you decided, at the end of the meeting, about the to-dos waiting for a tool that asks first
     (``review = true``): the approved ones are sent, the rejected ones never are."""
@@ -259,9 +278,10 @@ class ClientContact(BaseModel):
 class Classification(BaseModel):
     """Who a meeting was with, for your CRM: written by Claude at the wrap-up, correctable by you.
 
-    Only ``client`` and ``prospect`` meetings carry a company and the deal facts; the others leave
-    them empty. A CRM sink acts only on the kinds it is set for, and only when Claude is sure enough
-    (``confidence``) or you said so (``by_you``)."""
+    Only ``client`` and ``prospect`` meetings carry a company, contacts and a sales step; the others
+    leave them empty. What was said about the deal (budget, main doubt…) is in the meeting's AI fields
+    (``Meeting.fields``). A CRM sink acts only on the kinds it is set for, and only when Claude is sure
+    enough (``confidence``) or you said so (``by_you``)."""
 
     kind: MeetingKind = "other"
     confidence: float = 0.0
@@ -269,13 +289,10 @@ class Classification(BaseModel):
     """The client's or prospect's organization as named in the meeting ('' if it wasn't)."""
     contacts: list[ClientContact] = Field(default_factory=list)
     step: SalesStep = "none"
-    offer: str = ""
-    """The offer discussed: one of ``brain.offers`` when one fits."""
-    budget: str = ""
-    objection: str = ""
-    """The prospect's main doubt or objection, in their words."""
-    lost_reason: str = ""
-    next_step: str = ""
+    proposal_item: str = ""
+    """The to-do that sends the proposal or quote (``"A2"``): done, it moves the deal to the proposal stage."""
+    followup_items: list[str] = Field(default_factory=list)
+    """To-dos that only chase the prospect for an answer on a proposal (a CRM's own follow-ups may cover them)."""
     reason: str = ""
     """Why Claude chose this kind, in a sentence."""
     by_you: bool = False
@@ -291,7 +308,7 @@ class Classification(BaseModel):
         facts); any other kind than client or prospect has no company, contacts or deal facts."""
         if kind not in ("client", "prospect"):
             return Classification(kind=kind, confidence=1.0, reason=self.reason, by_you=True)  # type: ignore[arg-type]
-        facts = self.model_dump() if self.is_business else {}
+        facts = self.model_dump() if self.is_business else {}  # its contacts, step and to-dos
         return Classification(**{**facts, "kind": kind, "company": " ".join(company.split())[:160],
                                  "confidence": 1.0, "by_you": True})
 
@@ -327,6 +344,14 @@ class Meeting(BaseModel):
     """Ready-to-send recap for the other participants (sinks may create it as a draft)."""
     classification: Classification | None = None
     """Who the meeting was with, for your CRM (client, prospect…): set at the wrap-up, or by you."""
+    recap: Recap | None = None
+    """The summary to send them as a PDF; ``None``: written before it existed (or without Claude)."""
+    template: str | None = None
+    """The notes template the notes were written with (:mod:`.brain.templates`); ``None``: basic notes."""
+    template_choice: str | None = None
+    """The template you picked on the meeting's page (``auto``: Claude picks); ``None``: the setting's."""
+    fields: dict[str, str] = Field(default_factory=dict)
+    """AI fields: name -> the meeting's answer in a few words (``""``: the meeting didn't say), in order."""
     summary_markdown: str | None = None
     notes_ref: dict[str, str] = Field(default_factory=dict)
     review: dict[str, ReviewDecision] = Field(default_factory=dict)

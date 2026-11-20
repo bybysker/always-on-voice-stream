@@ -73,6 +73,10 @@ class Sink(ABC):
         already sent stay in sync either way."""
         return True
 
+    def accepts_in(self, item: Item, meeting: Meeting) -> bool:
+        """Whether this item, given what its meeting says about it, is created here (on top of :meth:`accepts`)."""
+        return True
+
     def skip_reason(self, meeting: Meeting) -> str:
         """Why :meth:`accepts_meeting` said no, for the dashboard's push result."""
         return "not for this tool"
