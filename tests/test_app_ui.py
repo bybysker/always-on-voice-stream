@@ -759,6 +759,8 @@ def test_meetings_list_detail_and_editing(make_app: Callable[..., UIApp], open_p
     # the keyboard moves between tabs
     pg.focus("#tab-actions")
     pg.keyboard.press("ArrowRight")
+    expect(pg.locator("#tab-ai")).to_be_focused()
+    pg.keyboard.press("ArrowRight")
     expect(pg.locator("#tab-transcript")).to_be_focused()
     expect(pg.locator("#tab-transcript")).to_have_attribute("aria-selected", "true")
     expect(pg.locator(".tline").first).to_be_visible()
@@ -876,6 +878,53 @@ def test_a_client_meeting_is_shown_corrected_and_waits_for_the_crm(make_app: Cal
     pg.get_by_role("button", name="Save").last.click()
     _wait(lambda: app.host.cfg.brain.business == "Studio de création vidéo pour les PME"
           and app.host.cfg.sinks["twenty"].get("skip_proposal_followups") is True)
+
+
+def test_your_to_dos_with_ai_and_their_prompts(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:
+    """The With AI tab: your to-dos split into what an AI can do, what it prepares for you, what is yours; each
+    prompt copied on its own, or all at once."""
+    from playwright.sync_api import expect
+
+    from voicestream.models import AiPlan
+    from voicestream.storage import atomic_write, load_meeting
+
+    app = make_app(setup_done=True, meetings=True)
+    folder = app.root / "data" / "sessions" / app.folder_of("Budget review")
+    meeting, _ = load_meeting(folder)
+    todos = sorted((i for i in meeting.items.values() if i.kind.value == "action" and not i.dismissed and i.status.value == "open"),
+                   key=lambda i: i.id)
+    assert todos, "the imported meeting has an open to-do"
+    first = todos[0]
+    first.ai_plan = AiPlan(who="both", prompt="Rédige le budget <b>2027</b> à partir de [à compléter].", you_do="Relire et l’envoyer à Sam")
+    extra = first.model_copy(update={"id": "A9", "title": "Compare three venues", "ai_plan": AiPlan(who="ai", prompt="Compare three venues.")})
+    meeting.items["A9"] = extra
+    atomic_write(folder / "meeting.json", meeting.model_dump_json(indent=1))
+
+    p = open_page(app)
+    pg = p.page
+    pg.click("nav a[href='#/meetings']")
+    pg.locator(".mrow", has_text="Budget review").click()
+    expect(pg.locator("#tab-ai")).to_have_text("With AI2")  # both have an AI part
+    pg.click("#tab-ai")
+    expect(pg.locator(".ai-group h3")).to_have_text(["An AI can do it1", "AI prepares, you finish1"])
+    card = pg.locator(f"#ai-{first.id}")
+    expect(card.locator(".ai-you")).to_have_text("You: Relire et l’envoyer à Sam")
+    expect(card.locator(".ai-prompt")).to_have_text("Rédige le budget <b>2027</b> à partir de [à compléter].")  # text, never markup
+    assert card.locator(".ai-prompt b").count() == 0
+    pg.click(f"#ai-copy-{first.id}")
+    expect(pg.locator(".toast", has_text="The prompt is on the clipboard.")).to_be_visible()
+    assert pg.evaluate("navigator.clipboard.readText()") == "Rédige le budget <b>2027</b> à partir de [à compléter]."
+    pg.click("#ai-copy-all")
+    expect(pg.locator(".toast", has_text="The 2 prompts are on the clipboard.")).to_be_visible()
+    copied = pg.evaluate("navigator.clipboard.readText()")
+    assert copied.startswith(f"## {first.title}\n\nRédige le budget") and copied.endswith("## Compare three venues\n\nCompare three venues.")
+    p.shot("meeting-with-ai")
+
+    # a meeting with nothing planned says what the tab is for
+    pg.click(".detail-head a.back")
+    pg.locator(".mrow", has_text="Hiring plan").click()
+    pg.click("#tab-ai")
+    expect(pg.locator("#detail-panel")).to_contain_text("No to-do of yours to plan")
 
 
 def test_a_client_meeting_in_french(make_app: Callable[..., UIApp], open_page: Callable[..., Page]) -> None:

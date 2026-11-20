@@ -44,7 +44,7 @@ def _summary(**kw: Any) -> dict[str, Any]:
             "updates": [], "missing_items": [], "participants": ["Léa"], "speakers": [], "language": "en",
             "followup_subject": "", "followup_body": "", "template": "general", "fields": [],
             "recap_overview": "", "recap_discussed": [], "recap_next_steps": [],
-            "classification": OTHER_MEETING.model_dump(), **kw}
+            "classification": OTHER_MEETING.model_dump(), "todo_plans": [], **kw}
 
 
 # ------------------------------------------------------------------ templates

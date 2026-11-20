@@ -1020,7 +1020,7 @@ async def test_s3_summary_participants_replace_the_live_list(cfg: Config) -> Non
     llm = ScriptedLLM([WireSummary(title="Internal sync", tldr="", notes_markdown="", updates=[], missing_items=[],
                                    participants=["Sam", "Alex"], speakers=[], language="en", followup_subject="", followup_body="",
                                    template="general", fields=[], recap_overview="", recap_discussed=[], recap_next_steps=[],
-                                   classification=OTHER_MEETING)])
+                                   classification=OTHER_MEETING, todo_plans=[])])
     await summarize(cfg, m, tracker, llm)
     assert m.participants == ["Sam"]
 

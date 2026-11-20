@@ -138,6 +138,19 @@ class AgentRun(BaseModel):
     error: str | None = None
 
 
+class AiPlan(BaseModel):
+    """How one of your to-dos gets done with AI, written at the wrap-up: what an AI assistant can do, with a
+    prompt ready to paste into it, and what only you can do (decide, send, call, sign…)."""
+
+    who: Literal["ai", "both", "you"] = "you"
+    """``ai``: an AI can do all of it from the prompt (you only review); ``both``: it prepares, you finish;
+    ``you``: only you can."""
+    prompt: str = ""
+    """A self-contained prompt for the AI's part (it never saw the meeting); ``""`` when it is all yours."""
+    you_do: str = ""
+    """What only you can do, in a sentence; ``""`` when the AI can do all of it."""
+
+
 class Item(BaseModel):
     """Anything worth remembering from a meeting: an action item, decision, open
     question or key note. Action items are what get pushed to task tools."""
@@ -160,6 +173,8 @@ class Item(BaseModel):
     revision: int = 1
     dismissed: bool = False
     agent: AgentRun | None = None
+    ai_plan: AiPlan | None = None
+    """For a to-do of yours: what an AI can do of it (with a prompt) and what you do, from the wrap-up."""
     pushed: dict[str, str] = Field(default_factory=dict)
     """Sink name -> external reference (URL or id) once pushed."""
     pushed_revision: dict[str, int] = Field(default_factory=dict)

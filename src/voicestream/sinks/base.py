@@ -165,9 +165,13 @@ def build_sinks(app: Config, only: list[str] | None = None) -> list[Sink]:
 
 ITEM_LABELS = {
     "en": {"owner": "Owner", "due": "Due", "priority": "Priority", "agent": "Agent result",
-           "captured": "Captured by voicestream from {title}.", "meeting_on": "meeting on {when}"},
+           "captured": "Captured by voicestream from {title}.", "meeting_on": "meeting on {when}",
+           "plan.ai": "With AI: an AI can do it, you review", "plan.both": "With AI: it prepares, you finish",
+           "plan.you": "With AI: yours to do", "you_do": "You", "prompt": "Prompt for your AI assistant"},
     "fr": {"owner": "Responsable", "due": "Échéance", "priority": "Priorité", "agent": "Résultat de l'agent",
-           "captured": "Capturé par voicestream depuis {title}.", "meeting_on": "la réunion du {when}"},
+           "captured": "Capturé par voicestream depuis {title}.", "meeting_on": "la réunion du {when}",
+           "plan.ai": "Avec l'IA : l'IA peut le faire, vous relisez", "plan.both": "Avec l'IA : elle prépare, vous finalisez",
+           "plan.you": "Avec l'IA : à vous de le faire", "you_do": "Vous", "prompt": "Prompt pour votre assistant IA"},
 }  # fmt: skip
 
 
@@ -198,6 +202,13 @@ def item_markdown(item: Item, meeting: Meeting) -> str:
         lines += [f"> {item.evidence}", ""]
     if item.agent and item.agent.result_summary:
         lines += [f"**{t['agent']}:**", "", item.agent.result_summary, ""]
+    if (plan := item.ai_plan) is not None:
+        lines += [f"**{t['plan.' + plan.who]}**", ""]
+        if plan.you_do:
+            lines += [f"**{t['you_do']}:** {plan.you_do}", ""]
+        if plan.prompt:  # fenced: a task tool shows it as is, ready to copy
+            fence = "~~~~" if "```" in plan.prompt else "```"
+            lines += [f"**{t['prompt']}:**", "", fence + "text", plan.prompt, fence, ""]
     title = meeting.title or t["meeting_on"].format(when=f"{meeting.started_at.astimezone():%Y-%m-%d %H:%M}")
     lines.append(f"_{t['captured'].format(title=title)}_")
     return "\n".join(lines).strip()

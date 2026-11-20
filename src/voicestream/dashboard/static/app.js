@@ -3099,7 +3099,7 @@ function meetingRow(m, bucket) {
 
 // ------------------------------------------------------------------ meeting detail
 
-const TABS = ['notes', 'summary', 'actions', 'transcript', 'email', 'conversation'];
+const TABS = ['notes', 'summary', 'actions', 'ai', 'transcript', 'email', 'conversation'];
 
 async function renderDetail(folder, prev) {
   const same = S.detail && S.detail.folder === folder;
@@ -3188,13 +3188,15 @@ function drawDetail() {
   const tabs = h('div', { class: 'tabs', role: 'tablist', 'aria-label': t('meetings.sections') });
   const panel = h('div', { class: 'tabpanel', role: 'tabpanel', id: 'detail-panel', tabindex: '0' });
   const counts = Object.values(m.items || {}).filter((i) => !i.dismissed).length;
+  const withAi = planned(m).filter((i) => i.ai_plan.who !== 'you').length;
   for (const name of TABS) {
     const selected = D.tab === name;
     const tabEl = h('button', {
       type: 'button', class: 'tab', role: 'tab', id: 'tab-' + name, 'aria-selected': selected ? 'true' : 'false',
       'aria-controls': 'detail-panel', tabindex: selected ? '0' : '-1',
       onclick: () => selectTab(name),
-    }, t('meetings.tab.' + name), name === 'actions' && counts ? h('span', { class: 'count' }, fmtNum(counts)) : null);
+    }, t('meetings.tab.' + name), name === 'actions' && counts ? h('span', { class: 'count' }, fmtNum(counts))
+      : name === 'ai' && withAi ? h('span', { class: 'count' }, fmtNum(withAi)) : null);
     tabs.append(tabEl);
   }
   tabs.addEventListener('keydown', (e) => {
@@ -3349,6 +3351,7 @@ function detailPanel(D) {
   if (D.tab === 'conversation') return conversationPanel(D);
   if (D.tab === 'summary') return summaryPanel(D);
   if (D.tab === 'actions') return actionsPanel(D);
+  if (D.tab === 'ai') return aiPanel(D);
   if (D.tab === 'transcript') return transcriptPanel(D);
   return emailPanel(D);
 }
@@ -3424,6 +3427,51 @@ function transcriptPanel(D) {
   }, 'download');
   return h('div', {}, h('div', { class: 'toolbar' }, h('div', { class: 'search' }, icon('search'), filter),
     h('span', { class: 'muted small grow' }, tp('meetings.lines', segs.length)), download('pdf'), download('txt')), list);
+}
+
+// ------------------------------------------------------------------ your to-dos with AI
+
+const PLAN_GROUPS = ['ai', 'both', 'you'];
+
+/** The open to-dos the wrap-up planned (what an AI can do of them, what is yours), in the meeting's order. */
+function planned(m) {
+  return Object.values(m.items || {}).filter((i) => i.kind === 'action' && !i.dismissed && i.status === 'open' && i.ai_plan);
+}
+
+/** Your to-dos, split: what an AI assistant can do (a prompt to paste into it), what it prepares for you to
+ *  finish, and what only you can do. Written at the wrap-up; nothing runs or is paid for until you use one. */
+function aiPanel(D) {
+  const { m } = detailState(D);
+  const todos = planned(m);
+  if (!todos.length) {
+    return h('div', { class: 'empty-state' }, icon('sparkle', 'xl'), h('strong', {}, t('ai.none')),
+      m.ended_at ? t('ai.none_text') : t('meetings.no_notes_live'));
+  }
+  const prompts = todos.filter((i) => i.ai_plan.prompt);
+  const copyAll = prompts.length > 1 && btn(t('ai.copy_all'), { cls: 'small', id: 'ai-copy-all', onclick: (ev) => act(ev.currentTarget, async () => {
+    await copyText(prompts.map((i) => `## ${i.title}\n\n${i.ai_plan.prompt}`).join('\n\n'));
+    toast(tp('ai.copied_all', prompts.length), 'ok');
+  }) }, 'copy');
+  const card = (i) => {
+    const p = i.ai_plan;
+    const due = i.due_date || i.due_text;
+    return h('article', { class: 'ai-todo', id: 'ai-' + i.id, dataset: { item: i.id, who: p.who } },
+      h('div', { class: 'ai-head' }, h('strong', {}, i.title), due && h('span', { class: 'muted small' }, t('ai.due', { due }))),
+      p.you_do && h('p', { class: 'ai-you' }, h('span', { class: 'k' }, t('ai.you_do')), ' ', p.you_do),
+      p.prompt && h('pre', { class: 'ai-prompt', id: 'ai-prompt-' + i.id, tabindex: '0', 'aria-label': t('ai.prompt_label', { title: i.title }) }, p.prompt),
+      p.prompt && h('div', { class: 'row' }, btn(t('ai.copy'), { cls: 'small', id: 'ai-copy-' + i.id, onclick: (ev) => act(ev.currentTarget, async () => {
+        await copyText(p.prompt);
+        toast(t('ai.copied'), 'ok');
+      }) }, 'copy')));
+  };
+  return h('div', { class: 'ai-plan' },
+    h('div', { class: 'toolbar' }, h('p', { class: 'muted small grow' }, t('ai.lead')), copyAll || null),
+    ...PLAN_GROUPS.map((who) => {
+      const group = todos.filter((i) => i.ai_plan.who === who);
+      return group.length ? h('section', { class: 'ai-group', dataset: { who }, 'aria-labelledby': 'ai-h-' + who },
+        h('h3', { id: 'ai-h-' + who }, t('ai.group.' + who), h('span', { class: 'count' }, fmtNum(group.length))),
+        ...group.map(card)) : null;
+    }));
 }
 
 function emailPanel(D) {
@@ -6459,6 +6507,13 @@ const STRINGS = {
     'email.none': 'No follow-up email', 'email.none_text': 'Claude drafts one when a meeting ends (with a Claude key).',
     'email.to': 'To', 'email.to_none': '(add the recipients in your mail app)', 'email.subject': 'Subject', 'email.body': 'Message',
     'email.copy': 'Copy', 'email.copied': 'The email is on the clipboard.', 'email.open_mail': 'Open in Mail',
+    'meetings.tab.ai': 'With AI', 'ai.none': 'No to-do of yours to plan',
+    'ai.none_text': 'When a meeting ends, each of your to-dos says what an AI can do of it, with a prompt to paste into your AI assistant, and what stays yours.',
+    'ai.lead': 'What an AI assistant (Claude, ChatGPT…) can do of your to-dos, with a prompt to paste into it, and what stays yours. Nothing runs until you use a prompt.',
+    'ai.group.ai': 'An AI can do it', 'ai.group.both': 'AI prepares, you finish', 'ai.group.you': 'Yours to do',
+    'ai.you_do': 'You:', 'ai.due': 'due {due}', 'ai.copy': 'Copy the prompt', 'ai.copy_all': 'Copy all the prompts',
+    'ai.copied': 'The prompt is on the clipboard.', 'ai.copied_all.one': 'The prompt is on the clipboard.',
+    'ai.copied_all.other': 'The {n} prompts are on the clipboard.', 'ai.prompt_label': 'Prompt for: {title}',
     'email.never_sent': 'Nothing is sent until you send it yourself.',
     'meetings.tab.summary': 'Summary',
     'recap.lead': 'What you send to the people you met, as a PDF: what was discussed, the decisions, the next steps and the to-dos. Your notes’ fields and private sections are never in it.',
@@ -7142,6 +7197,13 @@ const STRINGS = {
     'email.none': 'Pas d’e-mail de suivi', 'email.none_text': 'Claude en rédige un à la fin de chaque réunion (avec une clé Claude).',
     'email.to': 'À', 'email.to_none': '(ajoutez les destinataires dans votre messagerie)', 'email.subject': 'Objet', 'email.body': 'Message',
     'email.copy': 'Copier', 'email.copied': 'L’e-mail est dans le presse-papiers.', 'email.open_mail': 'Ouvrir dans Mail',
+    'meetings.tab.ai': 'Avec l’IA', 'ai.none': 'Aucune tâche à vous à planifier',
+    'ai.none_text': 'À la fin d’une réunion, chacune de vos tâches dit ce qu’une IA peut en faire, avec un prompt à coller dans votre assistant IA, et ce qui reste à vous.',
+    'ai.lead': 'Ce qu’un assistant IA (Claude, ChatGPT…) peut faire de vos tâches, avec un prompt à lui coller, et ce qui reste à vous. Rien ne se lance tant que vous n’utilisez pas un prompt.',
+    'ai.group.ai': 'L’IA peut le faire', 'ai.group.both': 'L’IA prépare, vous finalisez', 'ai.group.you': 'À vous de le faire',
+    'ai.you_do': 'Vous :', 'ai.due': 'échéance {due}', 'ai.copy': 'Copier le prompt', 'ai.copy_all': 'Copier tous les prompts',
+    'ai.copied': 'Le prompt est dans le presse-papiers.', 'ai.copied_all.one': 'Le prompt est dans le presse-papiers.',
+    'ai.copied_all.other': 'Les {n} prompts sont dans le presse-papiers.', 'ai.prompt_label': 'Prompt pour : {title}',
     'email.never_sent': 'Rien n’est envoyé tant que vous ne l’envoyez pas vous-même.',
     'meetings.tab.summary': 'Compte rendu',
     'recap.lead': 'Ce que vous envoyez aux personnes rencontrées, en PDF : les points abordés, les décisions, les prochaines étapes et les actions. Les champs et les sections privées de vos notes n’y figurent jamais.',

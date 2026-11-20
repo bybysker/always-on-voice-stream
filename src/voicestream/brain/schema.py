@@ -82,6 +82,13 @@ class WireField(BaseModel):
     value: str = Field(description="The meeting's answer in a few words (<= 30), names and numbers as said; '' if not discussed.")
 
 
+class WireTodoPlan(BaseModel):
+    item: str = Field(description="The to-do: its id from the items captured live (e.g. 'A2'), or the exact title of one of your missing_items.")
+    who: Literal["ai", "both", "you"]
+    prompt: str = Field(description="For 'ai' and 'both': a self-contained prompt for an AI assistant, in the meeting's language; '' for 'you'.")
+    you_do: str = Field(description="For 'both' and 'you': what only the user can do, one short sentence; '' for 'ai'.")
+
+
 class WireSummary(BaseModel):
     title: str = Field(description="Short descriptive meeting title.")
     tldr: str = Field(description="2-3 sentence summary.")
@@ -108,6 +115,7 @@ class WireSummary(BaseModel):
         "thanks, 2-4 key points/decisions, each person's next steps with dates, a sign-off with the user's name; '' if no subject."
     )
     classification: WireClassification = Field(description="What kind of meeting this was, for the user's CRM.")
+    todo_plans: list[WireTodoPlan] = Field(description="One per open to-do of the user's: what an AI can do of it and what the user does; [] if none.")
     recap_overview: str = Field(
         description="For the summary sent to the participants: 2-3 sentences on what the meeting was for and where "
         "things stand, written for them; '' if nothing was discussed."

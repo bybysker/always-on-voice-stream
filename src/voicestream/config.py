@@ -248,6 +248,9 @@ class BrainConfig(_Section):
     """What you sell and to whom, in a sentence or two. The wrap-up classifies each meeting (client,
     prospect, partner, internal, other): with this, only this business's clients and prospects count as
     such, so a meeting for another of your activities isn't filed in this business's CRM."""
+    todo_prompts: bool = True
+    """At the wrap-up, each of your to-dos gets a plan: what an AI can do of it, with a prompt ready to
+    paste into an AI assistant, and what only you can do. ``false``: no plans (a shorter summary)."""
     notes_template: str = "auto"
     """The shape of the notes (:mod:`voicestream.brain.templates`): ``auto`` = Claude picks, for each
     meeting, the template that fits it (general, sales, interview, one_on_one, project, recruiting, or

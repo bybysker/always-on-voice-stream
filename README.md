@@ -38,6 +38,7 @@ settings. Agent work is extra and has its own budget.
 - [Capturing system audio](#capturing-system-audio-what-the-others-say)
 - [Speech-to-text backends](#speech-to-text-backends)
 - [Sending items to your tools](#sending-items-to-your-tools)
+- [Your to-dos with AI](#your-to-dos-with-ai)
 - [Agents that do the work mid-meeting](#agents-that-do-the-work-mid-meeting)
 - [Notes templates and AI fields](#notes-templates-and-ai-fields)
 - [A summary to send, and the transcript](#a-summary-to-send-and-the-transcript)
@@ -655,6 +656,27 @@ terminal. Examples: research, a competitive analysis, a draft email or proposal,
 a script. The agent runs Claude on your Mac in a private folder and reports back into the notes,
 usually before the meeting ends. See the next section.
 
+## Your to-dos with AI
+
+When a meeting ends, each of **your** to-dos (not the other participants') says what an AI can do of
+it, in the same wrap-up call as the notes:
+
+| Group | Means | What you get |
+|---|---|---|
+| **An AI can do it** | research, a comparison, a draft, a script, an outline | a prompt to paste into your AI assistant; you review the result |
+| **AI prepares, you finish** | it drafts the proposal, you check the price and send it | the prompt, and what is yours ("Check the figures and send it to Julie") |
+| **Yours to do** | a call, a meeting, a decision, a signature, private data | what to do; no prompt |
+
+The meeting page's **With AI** tab lists them, each prompt with **Copy the prompt**, and **Copy all
+the prompts** at once. The prompts are written for an assistant that never heard the meeting: the
+context, the names and figures said, the deliverable, and `[à compléter]` / `[to fill in]` where the
+meeting didn't give something. Nothing runs and nothing is paid for until you use one (or **Run agent**
+on a to-do the live pass already delegated, see below). A to-do sent to your tools carries its plan in
+its description, so the prompt is in your Twenty, HubSpot or Reminders task too.
+
+It adds 250 to 400 output tokens per to-do to the wrap-up: one or two cents for a meeting with five.
+`brain.todo_prompts = false` turns it off.
+
 ## Agents that do the work mid-meeting
 
 When an action item is something an AI could do right now, the extractor marks it as delegable
@@ -969,6 +991,7 @@ mistake in the config file is reported with the file and the setting, e.g.
 | `brain.fields` | `[]` | AI fields every meeting answers at the top of its notes |
 | `brain.templates` | `{}` | Your own notes templates |
 | `brain.business` | `""` | What you sell: only this business's clients and prospects count as client meetings |
+| `brain.todo_prompts` | `true` | Each of your to-dos gets a plan: what an AI can do (with a prompt), what is yours |
 | `dispatch.mode` | `end` | When items are pushed |
 | `agents.mode` | `suggest` | See [Agents](#agents-that-do-the-work-mid-meeting) |
 | `agents.engine` | `agent-sdk` | Full agent, or `api` for a single call |

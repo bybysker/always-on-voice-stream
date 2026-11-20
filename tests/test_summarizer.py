@@ -8,7 +8,7 @@ from helpers import OTHER_MEETING, WEDNESDAY, seg
 from voicestream.brain import summarizer as summarizer_mod
 from voicestream.brain.llm import LLMError, ScriptedLLM
 from voicestream.brain.prompts import SUMMARY_SYSTEM
-from voicestream.brain.schema import WireClassification, WireContact, WireNewItem, WireSummary, WireUpdate
+from voicestream.brain.schema import WireClassification, WireContact, WireNewItem, WireSummary, WireTodoPlan, WireUpdate
 from voicestream.brain.summarizer import full_transcript, keep_yours, rerender, summarize
 from voicestream.brain.tracker import ExtractedItem, ExtractionResult, ItemTracker
 from voicestream.config import Config
@@ -49,7 +49,7 @@ def _summary(**kw: object) -> WireSummary:
     base: dict[str, object] = dict(title="Q4 planning", tldr="We planned Q4.", notes_markdown="## Summary\n- Planned Q4",
                                    updates=[], missing_items=[], participants=[], speakers=[], language="en",
                                    followup_subject="", followup_body="", template="general", fields=[],
-                                   recap_overview="", recap_discussed=[], recap_next_steps=[], classification=OTHER_MEETING)
+                                   recap_overview="", recap_discussed=[], recap_next_steps=[], classification=OTHER_MEETING, todo_plans=[])
     return WireSummary(**{**base, **kw})
 
 
@@ -293,3 +293,60 @@ def test_the_summary_prompt_keeps_private_assessments_out_of_what_participants_g
     assert "recap_discussed" in SUMMARY_SYSTEM and "never addressed to the user" in SUMMARY_SYSTEM
     for private in ("budget guesses", "competitors", "salary", "said only among the user's side"):
         assert private in SUMMARY_SYSTEM
+
+
+def _plan(item: str, who: str, prompt: str = "", you_do: str = "") -> WireTodoPlan:
+    return WireTodoPlan(item=item, who=who, prompt=prompt, you_do=you_do)  # type: ignore[arg-type]
+
+
+async def test_each_of_your_to_dos_gets_a_plan_with_ai(cfg: Config) -> None:
+    m, tracker = _meeting()  # A1 update the roadmap (Sam), A2 send the deck (Alex: you)
+    m.items["A2"].pushed["twenty"] = "twenty:tasks/x"
+    rev = m.items["A2"].revision
+    llm = ScriptedLLM([_summary(
+        missing_items=[_missing("Draft the offsite agenda", owner="Alex")],
+        todo_plans=[
+            _plan("A1", "ai", "Write Sam's roadmap."),  # Sam's: not yours to plan
+            _plan("A2", "both", "  Draft a deck on Q4 pricing for Acme. [to fill in: prices]  ", "Check the figures and  send it."),
+            _plan("draft the offsite AGENDA", "ai", "Draft a one-day offsite agenda.", "ignored for an AI-only to-do"),
+            _plan("D1", "ai", "Decide."),  # a decision is no to-do
+            _plan("Z9", "you", "", "Nothing"),
+        ])])
+    await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
+
+    assert m.items["A1"].ai_plan is None and m.items["D1"].ai_plan is None
+    plan = m.items["A2"].ai_plan
+    assert plan is not None and (plan.who, plan.you_do) == ("both", "Check the figures and send it.")
+    assert plan.prompt == "Draft a deck on Q4 pricing for Acme. [to fill in: prices]"
+    assert m.items["A2"].revision == rev + 1  # already in a tool: its task body is updated with the plan
+    added = next(i for i in m.items.values() if i.title == "Draft the offsite agenda")
+    assert added.ai_plan is not None and (added.ai_plan.who, added.ai_plan.you_do) == ("ai", "")
+    assert "todo_plans" in SUMMARY_SYSTEM and "[à compléter]" in SUMMARY_SYSTEM
+
+    llm = ScriptedLLM([_summary(todo_plans=[_plan("A2", "ai", "  ", "")])])  # an AI part without a prompt is yours
+    await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
+    assert m.items["A2"].ai_plan is not None and m.items["A2"].ai_plan.who == "you"
+
+
+async def test_no_plans_when_you_turn_them_off(cfg: Config) -> None:
+    cfg.brain.todo_prompts = False
+    m, tracker = _meeting()
+    llm = ScriptedLLM([_summary(todo_plans=[_plan("A2", "ai", "Draft the deck.")])])
+    await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
+    assert m.items["A2"].ai_plan is None
+    (call,) = llm.calls
+    assert "To-do plans: not wanted" in call["content"][1]["text"]
+
+
+def test_a_task_body_carries_the_plan() -> None:
+    from voicestream.models import AiPlan, Item, ItemKind
+    from voicestream.sinks.base import item_markdown
+
+    item = Item(id="A1", kind=ItemKind.ACTION, title="Envoyer la proposition", owner="Alex",
+                ai_plan=AiPlan(who="both", prompt="Rédige la proposition ```Identité```.", you_do="Relire et l'envoyer"))
+    body = item_markdown(item, Meeting(language="fr", title="RDV GAIA"))
+    assert "**Avec l'IA : elle prépare, vous finalisez**" in body and "**Vous:** Relire et l'envoyer" in body
+    assert "~~~~text\nRédige la proposition ```Identité```.\n~~~~" in body  # a fence the prompt can't close
+    item.ai_plan = AiPlan(who="you", you_do="Call Julie")
+    body = item_markdown(item, Meeting(language="en"))
+    assert "**With AI: yours to do**" in body and "Prompt" not in body

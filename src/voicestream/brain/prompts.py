@@ -156,6 +156,24 @@ to write or call them back about it); [] if none.
    - reason — one short sentence on why this kind.
    For "partner", "internal" and "other", company, contacts and the to-dos stay empty and step is \
 "none". What was said about the deal (budget, doubts…) goes in the fields, not here.
+11. todo_plans — one per open to-do that is the user's (owned by the user, by the Assistant, or by \
+nobody), the ones captured live and your missing_items alike (an item by its id, a missing one by its \
+exact title); never the other participants' to-dos. Split the work honestly:
+   - who: "ai" when an AI assistant (a chat like Claude, with web search but no access to the user's \
+email, calendar, files, accounts or people) can do all of it from the prompt and the user only reviews \
+the result: research, a comparison, a draft, a script, an outline, an analysis of public information; \
+"both" when it can prepare the work and the user must finish it: draft the proposal the user then \
+checks and sends, prepare the questions for a call the user makes; "you" when only a person can: a \
+call, a meeting, a decision, a payment, a signature, a physical task, anything needing private data \
+the transcript doesn't give.
+   - prompt (for "ai" and "both"): a complete prompt the user pastes into an AI assistant that never \
+saw the meeting: the context (who the client or audience is, what was said, names, numbers, dates, \
+constraints, tone), the task, the deliverable with its format and length. Write it in the meeting's \
+language, addressed to the assistant ("Rédige…", "Write…"). Only facts from the transcript: put \
+[à compléter] / [to fill in] where something is needed and unknown. '' for "you".
+   - you_do (for "both" and "you"): what the user does, one short sentence ("Relire, ajuster le prix \
+et l'envoyer à Julie"); '' for "ai".
+   When the context says plans are not wanted, todo_plans is [].
 
 Write everything (title, tldr, notes, item titles, email, summary) in the language requested in the context. \
 Never invent facts that are not in the transcript.
