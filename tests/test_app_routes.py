@@ -62,6 +62,7 @@ ROUTES = [
     ("GET", "/api/doctor"), ("GET", "/api/devices"), ("GET", "/api/meetings"), ("GET", f"/api/meetings/{PLANNING}"),
     ("POST", f"/api/meetings/{PLANNING}/push"), ("POST", f"/api/meetings/{PLANNING}/review"),
     ("POST", f"/api/meetings/{PLANNING}/summarize"), ("POST", f"/api/meetings/{PLANNING}/items"), ("POST", f"/api/meetings/{PLANNING}/people"),
+    ("POST", f"/api/meetings/{PLANNING}/classification"),
     ("PATCH", f"/api/meetings/{PLANNING}/items/A1"), ("PATCH", f"/api/meetings/{PLANNING}/recap"),
     ("GET", f"/api/meetings/{PLANNING}/export?what=summary"), ("POST", f"/api/meetings/{PLANNING}/save"),
     ("POST", f"/api/meetings/{PLANNING}/items/A1/dismiss"), ("GET", "/api/cost"), ("GET", "/api/models"),
@@ -322,6 +323,33 @@ def test_meeting_routes(client: TestClient, host: AppHost, monkeypatch: pytest.M
     assert client.post(f"/api/meetings/{LIVE_ELSEWHERE}/summarize").status_code == 409
 
 
+def test_a_meeting_is_classified_by_hand(client: TestClient, host: AppHost, monkeypatch: pytest.MonkeyPatch) -> None:
+    from voicestream.sinks.twenty import TwentySink
+
+    host.cfg.sinks["twenty"] = {"enabled": True, "base_url": "https://crm.example.com"}
+    d = client.get(f"/api/meetings/{PLANNING}").json()
+    assert d["meeting"]["classification"] is None
+    assert d["crm"] == [{"sink": "twenty", "files": False, "reason": "the meeting isn't classified yet", "sent": False}]
+
+    r = client.post(f"/api/meetings/{PLANNING}/classification", json={"kind": "prospect", "company": "  GAÏA   SAS "})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["classification"]["kind"] == "prospect" and body["classification"]["company"] == "GAÏA SAS"
+    assert body["classification"]["by_you"] is True and body["crm"][0]["files"] is True
+    saved = load_meeting(host.cfg.data_path / "sessions" / PLANNING)[0]
+    assert saved.classification is not None and saved.classification.company == "GAÏA SAS"
+    notes = (host.cfg.data_path / "sessions" / PLANNING / "notes.md").read_text(encoding="utf-8")
+    assert "**Prospect** · GAÏA SAS" in notes  # the notes say it too
+    assert any(e.type == "meeting.classified" and e.data["folder"] == PLANNING for e in host.bus.history)
+    row = client.get("/api/meetings?q=gaia").json()["meetings"]
+    assert [m["classification"]["company"] for m in row] == ["GAÏA SAS"]
+
+    r = client.post(f"/api/meetings/{PLANNING}/classification", json={"kind": "other", "company": "GAIA"})
+    assert r.json()["classification"]["company"] == "" and r.json()["crm"][0]["files"] is False
+    for bad in ({"kind": "vip"}, {"kind": "client", "company": "x" * 161}, {"kind": "client", "company": "a\nb"}, {}):
+        assert client.post(f"/api/meetings/{PLANNING}/classification", json=bad).status_code == 400, bad
+    assert client.post(f"/api/meetings/{LIVE_ELSEWHERE}/classification", json={"kind": "client"}).status_code == 409
+    assert TwentySink  # the sink the app asked, built from the settings
 def test_downloading_a_meetings_summary_and_transcript(client: TestClient) -> None:
     r = client.get(f"/api/meetings/{PLANNING}/export?what=summary&format=pdf")
     assert r.status_code == 200 and r.headers["content-type"] == "application/pdf" and r.content.startswith(b"%PDF-1.4")

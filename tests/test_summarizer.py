@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from helpers import WEDNESDAY, seg
+from helpers import OTHER_MEETING, WEDNESDAY, seg
 from voicestream.brain import summarizer as summarizer_mod
 from voicestream.brain.llm import LLMError, ScriptedLLM
 from voicestream.brain.prompts import SUMMARY_SYSTEM
-from voicestream.brain.schema import WireNewItem, WireSummary, WireUpdate
-from voicestream.brain.summarizer import full_transcript, rerender, summarize
+from voicestream.brain.schema import WireClassification, WireContact, WireNewItem, WireSummary, WireTodoPlan, WireUpdate
+from voicestream.brain.summarizer import full_transcript, keep_yours, rerender, summarize
 from voicestream.brain.tracker import ExtractedItem, ExtractionResult, ItemTracker
 from voicestream.config import Config
-from voicestream.models import AgentStatus, ItemStatus, Meeting
+from voicestream.models import AgentStatus, Classification, ClientContact, ItemStatus, Meeting
 
 
 def _meeting() -> tuple[Meeting, ItemTracker]:
@@ -49,7 +49,7 @@ def _summary(**kw: object) -> WireSummary:
     base: dict[str, object] = dict(title="Q4 planning", tldr="We planned Q4.", notes_markdown="## Summary\n- Planned Q4",
                                    updates=[], missing_items=[], participants=[], speakers=[], language="en",
                                    followup_subject="", followup_body="", template="general", fields=[],
-                                   recap_overview="", recap_discussed=[], recap_next_steps=[])
+                                   recap_overview="", recap_discussed=[], recap_next_steps=[], classification=OTHER_MEETING, todo_plans=[])
     return WireSummary(**{**base, **kw})
 
 
@@ -204,6 +204,73 @@ def test_summary_prompt_asks_for_headings_in_the_notes_language() -> None:
     assert "Points clés" in SUMMARY_SYSTEM
 
 
+def _classified(**kw: object) -> WireClassification:
+    return OTHER_MEETING.model_copy(update=kw)
+
+
+async def test_the_wrap_up_classifies_a_prospect_meeting(cfg: Config) -> None:
+    cfg.brain.business = "Social Creative Agency: video creation for French SMBs"
+    m, tracker = _meeting()  # A1 update the roadmap (Sam), A2 send the deck (you)
+    llm = ScriptedLLM([_summary(language="fr", classification=_classified(
+        kind="prospect", confidence=0.92, company=" GAIA ", step="discovery", proposal_item="A2",
+        followup_items=["A1", "A2", "Z9", "A1"],
+        contacts=[WireContact(name="Julie  Martin", email="julie@gaia.fr", role="directrice"), WireContact(name=" ", email="", role="")],
+        reason="Julie découvre l'offre Identité."))])
+    notes = await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
+
+    c = m.classification
+    assert c is not None and (c.kind, c.confidence, c.company, c.step) == ("prospect", 0.92, "GAIA", "discovery")
+    assert c.proposal_item == "A2" and c.followup_items == ["A1"]  # real to-dos only, the proposal never a follow-up
+    assert [(x.name, x.email, x.role) for x in c.contacts] == [("Julie Martin", "julie@gaia.fr", "directrice")]
+    assert not c.by_you
+    (call,) = llm.calls
+    assert "The user's business: Social Creative Agency: video creation for French SMBs" in call["content"][1]["text"]
+    lines = notes.splitlines()
+    assert lines[4] == "**Prospect** · GAIA · découverte"  # under the date line
+    assert "classification" in SUMMARY_SYSTEM and '"prospect"' in SUMMARY_SYSTEM and "proposal_item" in SUMMARY_SYSTEM
+
+    llm = ScriptedLLM([_summary(classification=_classified(kind="prospect", confidence=0.9, proposal_item="D1"))])
+    await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
+    assert m.classification is not None and m.classification.proposal_item == ""  # a decision is no to-do
+
+
+async def test_other_kinds_carry_no_company_and_no_notes_line(cfg: Config) -> None:
+    m, tracker = _meeting()
+    llm = ScriptedLLM([_summary(classification=_classified(kind="partner", confidence=0.8, company="Studio Lumen",
+                                                           step="proposal", proposal_item="A2", followup_items=["A1"],
+                                                           contacts=[WireContact(name="Léo", email="", role="")]))])
+    notes = await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
+    c = m.classification
+    assert c is not None and (c.kind, c.company, c.step, c.contacts) == ("partner", "", "none", [])
+    assert (c.proposal_item, c.followup_items) == ("", [])
+    assert "**Partner**" not in notes and "Studio Lumen" not in notes
+
+
+async def test_a_rewritten_summary_keeps_the_kind_and_company_you_set(cfg: Config) -> None:
+    m, tracker = _meeting()
+    m.classification = Classification(kind="client", confidence=1.0, company="Gaïa", by_you=True,
+                                      contacts=[ClientContact(name="Julie Martin")])
+    llm = ScriptedLLM([_summary(classification=_classified(kind="internal", confidence=0.9, reason="Team talk."))])
+    await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
+    c = m.classification
+    assert c is not None and (c.kind, c.company, c.by_you, c.confidence) == ("client", "Gaïa", True, 1.0)
+    assert [x.name for x in c.contacts] == ["Julie Martin"]
+
+    m.classification = Classification(kind="internal", confidence=1.0, by_you=True)
+    llm = ScriptedLLM([_summary(classification=_classified(kind="prospect", confidence=0.9, company="Acme", step="proposal",
+                                                           contacts=[WireContact(name="Bob", email="", role="")]))])
+    await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
+    c = m.classification
+    assert c is not None and (c.kind, c.company, c.step, c.contacts) == ("internal", "", "none", [])
+
+
+def test_keep_yours_keeps_your_contacts_when_claude_names_another_company() -> None:
+    yours = Classification(kind="prospect", company="Gaïa", by_you=True, contacts=[ClientContact(name="Julie")])
+    new = Classification(kind="prospect", company="Acme", confidence=0.8, contacts=[ClientContact(name="Bob")], step="proposal")
+    kept = keep_yours(yours, new)
+    assert (kept.company, [c.name for c in kept.contacts], kept.step) == ("Gaïa", ["Julie"], "proposal")
+    assert keep_yours(None, new) is new
+    assert keep_yours(new, yours) is yours  # Claude's own earlier reading is replaced
 async def test_the_summary_for_the_participants_is_kept_with_the_items_you_left_out() -> None:
     from voicestream.models import Recap
 
@@ -226,3 +293,60 @@ def test_the_summary_prompt_keeps_private_assessments_out_of_what_participants_g
     assert "recap_discussed" in SUMMARY_SYSTEM and "never addressed to the user" in SUMMARY_SYSTEM
     for private in ("budget guesses", "competitors", "salary", "said only among the user's side"):
         assert private in SUMMARY_SYSTEM
+
+
+def _plan(item: str, who: str, prompt: str = "", you_do: str = "") -> WireTodoPlan:
+    return WireTodoPlan(item=item, who=who, prompt=prompt, you_do=you_do)  # type: ignore[arg-type]
+
+
+async def test_each_of_your_to_dos_gets_a_plan_with_ai(cfg: Config) -> None:
+    m, tracker = _meeting()  # A1 update the roadmap (Sam), A2 send the deck (Alex: you)
+    m.items["A2"].pushed["twenty"] = "twenty:tasks/x"
+    rev = m.items["A2"].revision
+    llm = ScriptedLLM([_summary(
+        missing_items=[_missing("Draft the offsite agenda", owner="Alex")],
+        todo_plans=[
+            _plan("A1", "ai", "Write Sam's roadmap."),  # Sam's: not yours to plan
+            _plan("A2", "both", "  Draft a deck on Q4 pricing for Acme. [to fill in: prices]  ", "Check the figures and  send it."),
+            _plan("draft the offsite AGENDA", "ai", "Draft a one-day offsite agenda.", "ignored for an AI-only to-do"),
+            _plan("D1", "ai", "Decide."),  # a decision is no to-do
+            _plan("Z9", "you", "", "Nothing"),
+        ])])
+    await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
+
+    assert m.items["A1"].ai_plan is None and m.items["D1"].ai_plan is None
+    plan = m.items["A2"].ai_plan
+    assert plan is not None and (plan.who, plan.you_do) == ("both", "Check the figures and send it.")
+    assert plan.prompt == "Draft a deck on Q4 pricing for Acme. [to fill in: prices]"
+    assert m.items["A2"].revision == rev + 1  # already in a tool: its task body is updated with the plan
+    added = next(i for i in m.items.values() if i.title == "Draft the offsite agenda")
+    assert added.ai_plan is not None and (added.ai_plan.who, added.ai_plan.you_do) == ("ai", "")
+    assert "todo_plans" in SUMMARY_SYSTEM and "[à compléter]" in SUMMARY_SYSTEM
+
+    llm = ScriptedLLM([_summary(todo_plans=[_plan("A2", "ai", "  ", "")])])  # an AI part without a prompt is yours
+    await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
+    assert m.items["A2"].ai_plan is not None and m.items["A2"].ai_plan.who == "you"
+
+
+async def test_no_plans_when_you_turn_them_off(cfg: Config) -> None:
+    cfg.brain.todo_prompts = False
+    m, tracker = _meeting()
+    llm = ScriptedLLM([_summary(todo_plans=[_plan("A2", "ai", "Draft the deck.")])])
+    await summarize(cfg, m, tracker, llm, today=WEDNESDAY)
+    assert m.items["A2"].ai_plan is None
+    (call,) = llm.calls
+    assert "To-do plans: not wanted" in call["content"][1]["text"]
+
+
+def test_a_task_body_carries_the_plan() -> None:
+    from voicestream.models import AiPlan, Item, ItemKind
+    from voicestream.sinks.base import item_markdown
+
+    item = Item(id="A1", kind=ItemKind.ACTION, title="Envoyer la proposition", owner="Alex",
+                ai_plan=AiPlan(who="both", prompt="Rédige la proposition ```Identité```.", you_do="Relire et l'envoyer"))
+    body = item_markdown(item, Meeting(language="fr", title="RDV GAIA"))
+    assert "**Avec l'IA : elle prépare, vous finalisez**" in body and "**Vous:** Relire et l'envoyer" in body
+    assert "~~~~text\nRédige la proposition ```Identité```.\n~~~~" in body  # a fence the prompt can't close
+    item.ai_plan = AiPlan(who="you", you_do="Call Julie")
+    body = item_markdown(item, Meeting(language="en"))
+    assert "**With AI: yours to do**" in body and "Prompt" not in body

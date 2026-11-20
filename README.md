@@ -38,6 +38,7 @@ settings. Agent work is extra and has its own budget.
 - [Capturing system audio](#capturing-system-audio-what-the-others-say)
 - [Speech-to-text backends](#speech-to-text-backends)
 - [Sending items to your tools](#sending-items-to-your-tools)
+- [Your to-dos with AI](#your-to-dos-with-ai)
 - [Agents that do the work mid-meeting](#agents-that-do-the-work-mid-meeting)
 - [Notes templates and AI fields](#notes-templates-and-ai-fields)
 - [A summary to send, and the transcript](#a-summary-to-send-and-the-transcript)
@@ -283,7 +284,9 @@ The next time someone speaks, a new meeting starts. Pass `--once` for a single m
 7. **Wrap-up.** When the meeting ends, Claude Sonnet 5.5 reads the whole transcript once. It
    merges duplicates, fixes owners and deadlines, catches anything missed, and writes the notes in
    the [template](#notes-templates-and-ai-fields) that fits the meeting, with your AI fields
-   answered at the top. Items and notes are then pushed to your sinks.
+   answered at the top. It also **classifies the meeting**: with a client, a prospect, a partner,
+   your own team, or something else, and for a client or prospect the company, the people and where
+   the deal stands. Items and notes are then pushed to your sinks.
 
 Each meeting gets a folder in `~/.voicestream/sessions/2026-10-14_153000-weekly-sync/` with these
 files:
@@ -380,6 +383,7 @@ minute.
 | `google` | Your tasks become Google Calendar reminders at 09:00 on their due date. Each meeting gets a Google Doc in a "Meeting notes" folder. Gmail sends a recap to you and saves a follow-up **draft** for the attendees; drafts are never sent. | [Google bridge](#google-calendar-docs-and-gmail) |
 | `reminders` | Your tasks go into an Apple Reminders list ("Meetings"), with due date and alert. | `enabled = true`, then allow Automation once. |
 | `hubspot` | The meeting is logged on the contacts and companies that took part in it. Your follow-ups become HubSpot tasks. | [HubSpot key](#hubspot) |
+| `twenty` | Client and prospect meetings file themselves in Twenty CRM: company, contacts, deal moved forward, notes, your tasks. Other meetings never reach it. | [Twenty key](#twenty-crm-client-meetings) |
 | `promethee` | Your to-do list goes to Promethee through its MCP server, **once you validate it** at the end of the meeting. | [Promethee](#promethee-mcp-server) |
 | `shortcuts` | Runs a macOS Shortcut per task or meeting, with the data as JSON. Use it for any app with Shortcuts actions, such as Promethee. | [Apps on your Mac](#promethee-and-other-apps-on-your-mac) |
 | `command` | Runs a command or opens a URL scheme per task, e.g. `open "promethee://add?title={title_url}"`. | [Apps on your Mac](#promethee-and-other-apps-on-your-mac) |
@@ -452,6 +456,77 @@ To update the bridge later, paste the new code (`voicestream google-bridge | pbc
 Participants are matched to HubSpot contacts and companies by name, accents ignored. Only people
 who took part count, not people who were merely talked about. A record is associated only when the
 match is unique, and contacts are never created.
+
+### Twenty CRM (client meetings)
+
+[Twenty](https://twenty.com) (cloud or self-hosted) gets only your **client and prospect meetings**.
+Internal, partner and personal meetings never reach it, because voicestream records all of them.
+
+```
+ meeting ends ─► Claude classifies it ─► client or prospect, and sure? ─┬─ yes ─► company · contacts · deal · note · tasks in Twenty
+                 (kind, company, step)                                  └─ no ──► "Claude isn't sure" on the meeting's page:
+                 + the notes' AI fields ─► the deal's fields                      you fix it in two clicks, then Send to my tools
+```
+
+1. In Twenty, open **Settings** → **APIs & Webhooks** → **Create key**. Its role needs to read and
+   write companies, people, opportunities, notes and tasks. With the **Data model** permission too,
+   voicestream learns your pipeline's stages and custom fields.
+2. In **Settings → Your tools → Twenty CRM**, give your Twenty's address, the key, your Twenty
+   e-mail and what you sell (it helps Claude tell your client meetings apart). Click **Test**: it says
+   which stage each step moves a deal to, which fields it found, and any AI field nothing asks for.
+
+Each meeting page shows its kind under "With" (**Prospect · GAIA · discovery**), and the
+Meetings list puts a chip on client meetings; search finds them by company. **Change** corrects
+the kind or the company: what you set is kept when the notes are rewritten, and goes to Twenty with
+the next **Send to my tools**.
+
+What reaches Twenty for a client or prospect meeting:
+
+| Record | What happens |
+|---|---|
+| Company | Found by name, ignoring case, accents and legal forms (SAS, SARL, Inc…). Not found: created. Two that match: neither is used, nothing is created. |
+| People | Each person from the client's side: by e-mail, else by full name (a first name alone only among the company's people). Not found: created under the company. Phone numbers heard in a meeting stay in the note, never on a record. |
+| Deal | The company's latest open opportunity, or a new one for a prospect, named after the company. It **only moves forward**: first call → Screening, discovery → Meeting, proposal → Proposal, won → Customer, lost → your lost stage. A won or lost deal never moves. The to-do in which you send the proposal (Claude marks it), once you tick it in Voicestream, moves the deal to the proposal stage too. |
+| Fields | `fields` maps a deal field to one of the notes' [AI fields](#notes-templates-and-ai-fields): a text field takes the answer, a select the option the answer names. An unanswered field leaves the deal's alone. |
+| Note | The notes (their **At a glance** holds the fields), the contacts and where it was filed, on the deal, the company and the people. |
+| Tasks | Your to-dos, assigned to you, due at 09:00 on their date, linked to the deal and the company. With `skip_proposal_followups`, the to-dos that only chase an answer on the proposal stay out: for a CRM whose own workflow creates those reminders. |
+
+Tasks wait for the wrap-up, where the meeting is classified, even with `dispatch.mode = "immediate"`
+(unless you classify the meeting yourself while it is recorded). `create_records = false` only uses
+records that exist; `move_stage = false` never moves a deal. The lost stage is `stages.lost`, or a
+stage called Lost or Perdu.
+
+For select fields, ask the AI field to choose among the select's options, in its question. A
+self-hosted pipeline with French stages and four select fields, whose sales template becomes the
+agency's own meeting sheet:
+
+```toml
+[brain]
+business = "Studio de création vidéo pour les PME en France"
+
+[brain.templates.sales]       # replaces the built-in sales template
+name = "Rendez-vous client"
+when = "un appel ou un rendez-vous avec un client ou un prospect de l'agence"
+sections = ["Résumé", "Situation", "Douleur", "Résultat voulu", "Cadre", "Objections", "Prochaine étape"]
+fields = [
+  "Formule: laquelle parmi Visibilité, Formation, Identité",
+  "Version proposée: laquelle parmi Complète, Allégée, Le minimum",
+  "Doute principal: lequel parmi Pas le temps, Quoi publier ensuite, Équipes ne regarderont pas, Aucune piste ne plaira, Trop cher, Autre",
+  "Raison de la perte: s'ils ont dit non, laquelle parmi Prix, Pas le bon moment, Sans réponse, Autre prestataire, Pas de besoin, Autre",
+  "Budget: le budget ou le prix évoqué, avec la devise",
+  "Prochaine étape: la prochaine étape convenue, avec sa date",
+]
+
+[sinks.twenty]
+enabled = true
+base_url = "https://crm.example.com"
+owner_email = "you@example.com"
+create_records = false        # at first: only file on records that exist
+skip_proposal_followups = true
+fields = { formule = "Formule", versionProposee = "Version proposée", doutePrincipal = "Doute principal", raisonPerte = "Raison de la perte" }
+# stages = { lost = "LOST" }  # the stage's value, not its label (found by itself when named Lost or Perdu)
+# min_classification_confidence = 0.7   # below this, the meeting waits for you
+```
 
 ### Promethee (MCP server)
 
@@ -580,6 +655,27 @@ Tasks an AI can do now get a **Run agent** button in the dashboard, or `run A3` 
 terminal. Examples: research, a competitive analysis, a draft email or proposal, a slide outline,
 a script. The agent runs Claude on your Mac in a private folder and reports back into the notes,
 usually before the meeting ends. See the next section.
+
+## Your to-dos with AI
+
+When a meeting ends, each of **your** to-dos (not the other participants') says what an AI can do of
+it, in the same wrap-up call as the notes:
+
+| Group | Means | What you get |
+|---|---|---|
+| **An AI can do it** | research, a comparison, a draft, a script, an outline | a prompt to paste into your AI assistant; you review the result |
+| **AI prepares, you finish** | it drafts the proposal, you check the price and send it | the prompt, and what is yours ("Check the figures and send it to Julie") |
+| **Yours to do** | a call, a meeting, a decision, a signature, private data | what to do; no prompt |
+
+The meeting page's **With AI** tab lists them, each prompt with **Copy the prompt**, and **Copy all
+the prompts** at once. The prompts are written for an assistant that never heard the meeting: the
+context, the names and figures said, the deliverable, and `[à compléter]` / `[to fill in]` where the
+meeting didn't give something. Nothing runs and nothing is paid for until you use one (or **Run agent**
+on a to-do the live pass already delegated, see below). A to-do sent to your tools carries its plan in
+its description, so the prompt is in your Twenty, HubSpot or Reminders task too.
+
+It adds 250 to 400 output tokens per to-do to the wrap-up: one or two cents for a meeting with five.
+`brain.todo_prompts = false` turns it off.
 
 ## Agents that do the work mid-meeting
 
@@ -894,6 +990,8 @@ mistake in the config file is reported with the file and the setting, e.g.
 | `brain.notes_template` | `auto` | The notes' [template](#notes-templates-and-ai-fields), or `auto`: Claude picks per meeting |
 | `brain.fields` | `[]` | AI fields every meeting answers at the top of its notes |
 | `brain.templates` | `{}` | Your own notes templates |
+| `brain.business` | `""` | What you sell: only this business's clients and prospects count as client meetings |
+| `brain.todo_prompts` | `true` | Each of your to-dos gets a plan: what an AI can do (with a prompt), what is yours |
 | `dispatch.mode` | `end` | When items are pushed |
 | `agents.mode` | `suggest` | See [Agents](#agents-that-do-the-work-mid-meeting) |
 | `agents.engine` | `agent-sdk` | Full agent, or `api` for a single call |

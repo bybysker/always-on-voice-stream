@@ -8,11 +8,12 @@ them into the richer internal models in :mod:`voicestream.brain.tracker`.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ..models import ItemKind, ItemStatus
+from ..models import Classification, ClientContact, ItemKind, ItemStatus
 from .tracker import ExtractedItem, ExtractionResult, ItemUpdate
 
 
@@ -61,9 +62,31 @@ class WireSpeaker(BaseModel):
     name: str = Field(description="That person's name as said in the meeting.")
 
 
+class WireContact(BaseModel):
+    name: str = Field(description="Their name as said in the meeting.")
+    email: str = Field(description="Their e-mail address only if it was said or shown in full; else ''.")
+    role: str = Field(description="Their job or role at the organization if said; else ''.")
+
+
+class WireClassification(BaseModel):
+    kind: Literal["client", "prospect", "partner", "internal", "other"]
+    confidence: float = Field(description="0-1: how clearly the transcript shows this kind.")
+    company: str = Field(description="The client's or prospect's organization as named in the meeting; '' if not named or not a client/prospect meeting.")
+    contacts: list[WireContact] = Field(description="People from that organization who took part; [] if none or not a client/prospect meeting.")
+    step: Literal["none", "first_call", "discovery", "proposal", "won", "lost"]
+    proposal_item: str = Field(description="Id of the to-do (e.g. 'A2') that sends the proposal or quote to them; '' if none.")
+    followup_items: list[str] = Field(description="Ids of to-dos that only chase them for an answer on a proposal (a reminder, a follow-up call); [] if none.")
+    reason: str = Field(description="One short sentence saying why this kind, in the notes' language.")
 class WireField(BaseModel):
     name: str = Field(description="A field's name exactly as listed in the context, e.g. 'Budget'.")
     value: str = Field(description="The meeting's answer in a few words (<= 30), names and numbers as said; '' if not discussed.")
+
+
+class WireTodoPlan(BaseModel):
+    item: str = Field(description="The to-do: its id from the items captured live (e.g. 'A2'), or the exact title of one of your missing_items.")
+    who: Literal["ai", "both", "you"]
+    prompt: str = Field(description="For 'ai' and 'both': a self-contained prompt for an AI assistant, in the meeting's language; '' for 'you'.")
+    you_do: str = Field(description="For 'both' and 'you': what only the user can do, one short sentence; '' for 'ai'.")
 
 
 class WireSummary(BaseModel):
@@ -91,6 +114,8 @@ class WireSummary(BaseModel):
         description="Body of that email in Markdown, written in the meeting's language as the user (first person): "
         "thanks, 2-4 key points/decisions, each person's next steps with dates, a sign-off with the user's name; '' if no subject."
     )
+    classification: WireClassification = Field(description="What kind of meeting this was, for the user's CRM.")
+    todo_plans: list[WireTodoPlan] = Field(description="One per open to-do of the user's: what an AI can do of it and what the user does; [] if none.")
     recap_overview: str = Field(
         description="For the summary sent to the participants: 2-3 sentences on what the meeting was for and where "
         "things stand, written for them; '' if nothing was discussed."
@@ -141,6 +166,29 @@ def wire_update_to_update(w: WireUpdate) -> ItemUpdate:
         delegate=None if w.delegate == "unchanged" else (w.delegate == "yes"),
         agent_prompt=_opt(w.agent_prompt),
         segment_refs=list(w.segment_refs),
+    )
+
+
+def wire_to_classification(w: WireClassification, action_ids: Collection[str]) -> Classification:
+    """Claude's answer, held to its rules: only a client or prospect meeting has a company, contacts, a sales
+    step and to-dos of the deal, and those to-dos are action items the meeting has (``action_ids``)."""
+    business = w.kind in ("client", "prospect")
+    ids = set(action_ids) if business else set()
+    contacts = [
+        ClientContact(name=" ".join(c.name.split())[:120], email=c.email.strip()[:160], role=" ".join(c.role.split())[:120])
+        for c in (w.contacts if business else [])
+        if c.name.strip()
+    ]
+    proposal = w.proposal_item.strip()
+    return Classification(
+        kind=w.kind,
+        confidence=min(1.0, max(0.0, w.confidence)),
+        company=" ".join(w.company.split())[:160] if business else "",
+        contacts=contacts,
+        step=w.step if business else "none",
+        proposal_item=proposal if proposal in ids else "",
+        followup_items=[i for i in dict.fromkeys(x.strip() for x in w.followup_items) if i in ids and i != proposal],
+        reason=" ".join((w.reason or "").split())[:300],
     )
 
 
