@@ -4,7 +4,7 @@ name: windows app
 # for speech-to-text on the PC, the test suite, PyInstaller, a self-test launch of the packaged app
 # (page, API, its own whisper-server, a graceful stop), and uploads Voicestream-<version>-windows-x64.zip.
 # For a v* tag, or a manual run given a release tag, it also attaches the zip to that GitHub release
-# (the Mac build, mac-app.yml, attaches the DMG to the same release).
+# (the Mac build, mac-app.yml, attaches the DMG to the same release; the second to finish publishes it).
 # Everything it runs is in packaging/windows/build.sh, so a Windows PC can do the same by hand (Git Bash).
 
 on:
@@ -126,7 +126,9 @@ jobs:
       - name: Release notes
         uses: actions/checkout@v6
         with:
-          sparse-checkout: packaging/mac/release-notes.md
+          sparse-checkout: |
+            packaging/mac/release-notes.md
+            packaging/publish-release.sh
           sparse-checkout-cone-mode: false
 
       - name: Download the zip
@@ -145,11 +147,4 @@ jobs:
           ls -l dist
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$ ]] || { echo "::error::not a release tag: $TAG"; exit 1; }
           [[ "$ZIP" == *"-${TAG#v}-windows-x64.zip" ]] || { echo "::error::$TAG isn't the app's version ($ZIP)"; exit 1; }
-          # the Mac build may create the release first, or after: whichever comes second attaches its file
-          if ! gh release upload "$TAG" "$ZIP" --clobber 2>/dev/null; then
-            verify=(); [[ "$GITHUB_REF" == refs/tags/* ]] && verify=(--verify-tag)
-            pre=(); [[ "$TAG" == *-* ]] && pre=(--prerelease)
-            gh release create "$TAG" "$ZIP" "${verify[@]}" "${pre[@]}" --target "$GITHUB_SHA" --title "Voicestream $TAG" \
-              --notes-file packaging/mac/release-notes.md --generate-notes \
-              || gh release upload "$TAG" "$ZIP" --clobber
-          fi
+          packaging/publish-release.sh "$ZIP"  # a draft until the Mac DMG is there too

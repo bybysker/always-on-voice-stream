@@ -408,15 +408,18 @@ def test_release_job_publishes_tagged_builds_only() -> None:
     assert "if: startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.release, 'v')" in release
     assert "permissions:\n      contents: write" in release
     assert "actions/download-artifact@v8" in release and "name: ${{ needs.app.outputs.dmg }}" in release
-    assert 'gh release create "$TAG" "$DMG" "${verify[@]}" "${pre[@]}" --target "$GITHUB_SHA"' in release
-    assert 'pre=(); [[ "$TAG" == *-* ]] && pre=(--prerelease)' in release  # v0.4.0-beta.1: a pre-release on GitHub too
+    # attached to the release through the script the Windows build shares: a draft until both apps are there
+    assert 'packaging/publish-release.sh "$DMG"' in release and "packaging/publish-release.sh\n" in release
+    publish = (ROOT / "packaging" / "publish-release.sh").read_text(encoding="utf-8")
+    assert 'gh release create "$TAG" "$FILE" --draft "${verify[@]}" "${pre[@]}" --target "$GITHUB_SHA"' in publish
+    assert 'pre=(); [[ "$TAG" == *-* ]] && pre=(--prerelease)' in publish  # v0.4.0-beta.1: a pre-release on GitHub too
     # a manual run's tag reaches the script through the environment, checked, never as ${{ }} in it
     run = release[release.index("run: |"):]
     assert "${{" not in run and "TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.release }}" in release
     assert '-${TAG#v}-arm64.dmg' in run  # the tag must be the app's version
     # the release page says how to install an app Apple hasn't notarized, in English and French
-    assert "--notes-file packaging/mac/release-notes.md --generate-notes" in release
-    assert "sparse-checkout: packaging/mac/release-notes.md" in release
+    assert '--notes-file "$NOTES" --generate-notes' in publish and "packaging/mac/release-notes.md" in publish
+    assert "sparse-checkout: |\n            packaging/mac/release-notes.md\n" in release
     notes = (ROOT / "packaging" / "mac" / "release-notes.md").read_text(encoding="utf-8")
     assert "**Open Anyway**" in notes and "**Ouvrir quand même**" in notes and "Apple Silicon" in notes
     # the last Open Anyway: the versions after this one install from inside the app (voicestream/app/updater.py)

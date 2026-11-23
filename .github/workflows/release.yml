@@ -3,9 +3,11 @@ name: release
 # One click to ship a version to every installed Voicestream: Actions → release → Run workflow, type the
 # version (0.4.0). It checks it first (packaging/release.py: newer than this one as the app compares, not
 # released yet, release notes written for it), writes it in pyproject.toml and voicestream/__init__.py,
-# commits that to main and tags it, then starts the Mac build on the tag (mac-app.yml), which tests the
-# app and publishes the release. The apps offer it within six hours (Settings → General → Updates →
-# Check now: at once), and install it once you say so, never during a meeting.
+# commits that to main and tags it, makes the release as a draft, then starts the Mac and Windows builds
+# on the tag (mac-app.yml, windows-app.yml): each tests its app and attaches it, and the release is published
+# once both are there (packaging/publish-release.sh). A failed build leaves it a draft: run that build again.
+# The apps offer it within six hours (Settings → General → Updates → Check now: at once), and install it
+# once you say so, never during a meeting.
 # A version with a suffix (0.5.0-beta.1) is a pre-release: only apps with pre-releases on are offered it.
 
 on:
@@ -58,6 +60,19 @@ jobs:
           # both or neither: main moved meanwhile, nothing is pushed and the run says so
           git push --atomic origin HEAD:refs/heads/main "refs/tags/$TAG"
 
+      - name: The release, as a draft until both apps are attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.version.outputs.tag }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          # nobody sees a draft, not even the apps' updater; the second build to finish publishes it
+          # (packaging/publish-release.sh), so a release always has the Mac and the Windows app
+          pre=(); [ "$PRERELEASE" = true ] && pre=(--prerelease)
+          gh release create "$TAG" --draft --verify-tag "${pre[@]}" --title "Voicestream $TAG" \
+            --notes-file packaging/mac/release-notes.md --generate-notes
+
       - name: Build, test and publish it on a Mac and on Windows
         env:
           GH_TOKEN: ${{ github.token }}
@@ -69,7 +84,7 @@ jobs:
           gh workflow run windows-app.yml --ref "$TAG" -f release="$TAG"
           {
             echo "### Voicestream $TAG"
-            echo "Tagged on main. The Mac and Windows builds now test it and publish the release:"
+            echo "Tagged on main, and a draft release made. The Mac and Windows builds now test it; the second to finish publishes it:"
             echo "https://github.com/$GH_REPO/actions/workflows/mac-app.yml"
             echo "https://github.com/$GH_REPO/actions/workflows/windows-app.yml"
             if [ "$PRERELEASE" = true ]; then

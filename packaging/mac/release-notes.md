@@ -2,7 +2,7 @@
 <!-- The top of every GitHub release page (mac-app.yml adds the list of changes below it). The line above
      names the version they are for: the release workflow refuses another (packaging/release.py), so update
      both before you release. "New in this version" is what the app's update banner shows (1500 characters). -->
-**Voicestream for Mac** listens to your meetings (your microphone and the meeting's audio),
+**Voicestream for Mac and Windows** listens to your meetings (your microphone and the meeting's audio),
 writes the transcript on your Mac, and turns it into notes and to-dos with Claude: Google
 Calendar, Apple Reminders, Gmail, Google Docs, HubSpot and your own apps. French and English are
 detected as people speak.
@@ -63,6 +63,19 @@ pas une réunion : **⌥⌘R** depuis n'importe quelle app, le bouton flottant, 
 « voicestream », ou la barre des menus. « Appel détecté — prendre des notes ? » vous le propose
 quand un appel commence, sans jamais démarrer seul. Tout se règle dans Réglages → Général →
 Démarrer une réunion.
+
+### Install on Windows
+
+1. Download `Voicestream-…-windows-x64.zip` below, under **Assets** (Windows 10 or 11, 64-bit, a
+   processor with AVX2).
+2. Right-click it → **Extract All…**, keep the `Voicestream` folder whole, and double-click
+   `Voicestream.exe`. Windows SmartScreen warns once (the app isn't signed): **More info → Run anyway**.
+3. The app opens in your browser, with a console window: **Ctrl+C** in it quits (the meeting in
+   progress is saved). To update, download the new zip and replace the folder.
+
+Sur Windows : téléchargez `Voicestream-…-windows-x64.zip`, **Extraire tout…**, puis double-cliquez sur
+`Voicestream.exe` (SmartScreen : **Informations complémentaires → Exécuter quand même**). L'app
+s'ouvre dans votre navigateur ; **Ctrl+C** dans la console la quitte.
 
 ### Cost
 
