@@ -1,4 +1,4 @@
-<!-- release notes for 0.4.0 -->
+<!-- release notes for 0.5.0 -->
 <!-- The top of every GitHub release page (mac-app.yml adds the list of changes below it). The line above
      names the version they are for: the release workflow refuses another (packaging/release.py), so update
      both before you release. "New in this version" is what the app's update banner shows (1500 characters). -->
@@ -12,17 +12,18 @@ For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. You need a C
 
 ### New in this version
 
-- **A summary to send.** A meeting's new **Summary** tab is a PDF for the people you met: what
-  was discussed, the decisions, the next steps and the to-dos, without your private notes. Edit
-  it, leave any to-do out, then **Download PDF**. The **Transcript** tab downloads as PDF or text.
-- **Who said what.** The people on the call are told apart by voice: click a speaker in the
-  transcript to name them, and every line of that voice takes the name.
-- **Mute** your microphone alone: what the others say is still recorded.
-- **Notes that fit the meeting.** A sales call, a one-on-one or a team sync each get their own
-  sections, led by the AI fields you choose ("Budget", "Next step").
-- **Ask your meetings** anything ("What did I promise Acme?"): the answer cites the lines it
-  read. Claude Desktop and Claude Code can read your meetings too (MCP).
-- **Promethee**, and you validate the to-do list at the end of each meeting before it goes there.
+- **Client meetings, sorted.** Each meeting now says what it was: client, prospect, partner,
+  internal or other, and for a client or prospect the company, the people on their side and
+  where the deal stands. It shows on the meeting's page; **Change** corrects it. The
+  Meetings list marks client meetings, and search finds them by company.
+- **Twenty CRM.** Your client and prospect meetings file themselves in Twenty: the company and
+  the people (found by name, else created), the deal moved forward but never back, its
+  fields filled from your AI fields, the notes, and your to-dos as tasks. Other meetings never
+  reach it. Set it up in **Settings → Your tools → Twenty CRM**; **Test** says what it found.
+- **Your to-dos with AI.** At the end of a meeting, each of your to-dos says what an AI can do
+  for it, with a ready prompt to paste into an AI assistant, and what is left to you. See the
+  new **With AI** tab: **Copy the prompt** or **Copy all the prompts**. It costs one or two cents a meeting;
+  `brain.todo_prompts = false` turns it off.
 
 ### Install
 
