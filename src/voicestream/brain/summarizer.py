@@ -9,12 +9,13 @@ from datetime import date, datetime
 
 from .. import known_people
 from ..config import Config
-from ..models import FollowUpEmail, Item, ItemKind, ItemStatus, Meeting, Recap, fmt_ts
+from ..models import AiPlan, Classification, FollowUpEmail, Item, ItemKind, ItemStatus, Meeting, Recap, fmt_ts, utcnow
+from ..models import _name_key as name_key
 from ..transcribe.echo import words
 from .llm import LLM, LLMError, text_block
 from .people import finalize, name_voice, other_side, speaker_label, voice_labels
-from .prompts import SUMMARY_SYSTEM, meeting_context, render_items, render_screen, render_segment
-from .schema import WireSummary, wire_new_to_item, wire_update_to_update
+from .prompts import SUMMARY_SYSTEM, business_context, meeting_context, render_items, render_screen, render_segment
+from .schema import WireSummary, WireTodoPlan, wire_new_to_item, wire_to_classification, wire_update_to_update
 from .templates import GENERAL, choose, fields_for, prompt_block
 from .tracker import ExtractionResult, ItemTracker
 
@@ -61,6 +62,8 @@ async def summarize(
                 text_block(
                     meeting_context(meeting, cfg.user_name, today, cfg.brain.attendees, cfg.brain.language)
                     + named
+                    + (f"\n{business}" if (business := business_context(cfg.brain.business)) else "")
+                    + ("" if cfg.brain.todo_prompts else "\nTo-do plans: not wanted (todo_plans is []).")
                     + f"\n\n{prompt_block(template, templates, cfg.brain)}"
                     + f"\n\nItems captured live:\n{render_items([i for i in meeting.items.values() if not i.dismissed])}"
                 ),
@@ -70,7 +73,7 @@ async def summarize(
                 system=SUMMARY_SYSTEM,
                 content=content,
                 schema=WireSummary,
-                max_tokens=8000,
+                max_tokens=12000,  # notes, the summary to send and a prompt per to-do of yours
                 effort=cfg.brain.summary_effort,
             )
             tracker.apply(
@@ -115,6 +118,11 @@ async def summarize(
                 next_steps=recap_points(wire.recap_next_steps),
                 hidden=meeting.recap.hidden if meeting.recap else [],
             )
+            actions = [i.id for i in meeting.items_of(ItemKind.ACTION)]
+            meeting.classification = keep_yours(meeting.classification,
+                                                wire_to_classification(wire.classification, actions))
+            if cfg.brain.todo_prompts:
+                apply_plans(meeting, wire.todo_plans, cfg.user_name)
         except LLMError as exc:
             log.warning("summary failed (%s); writing basic notes", exc)
     if not meeting.language:  # no model summary (offline, over budget, failed): still French notes for a French meeting
@@ -122,6 +130,48 @@ async def summarize(
     return rerender(meeting, cfg.user_name)
 
 
+MAX_PROMPT_CHARS = 4000
+
+
+def is_yours(item: Item, user_name: str) -> bool:
+    """A to-do the user does or hands to an AI: theirs, the Assistant's, or nobody's (not another participant's)."""
+    return not (item.owner or "").strip() or item.is_mine(user_name) or name_key(item.owner or "") == "assistant"
+
+
+def apply_plans(meeting: Meeting, plans: list[WireTodoPlan], user_name: str) -> None:
+    """Each open to-do of yours that Claude planned gets its :class:`AiPlan` (found by id, or by title for one
+    it added at the wrap-up). A to-do already in your tools is updated there too: its task carries the plan."""
+    titles = {name_key(i.title): i for i in meeting.items_of(ItemKind.ACTION)}
+    for w in plans:
+        item = meeting.items.get(w.item.strip()) or titles.get(name_key(w.item))
+        if item is None or item.kind != ItemKind.ACTION or item.dismissed or item.status != ItemStatus.OPEN:
+            continue
+        if not is_yours(item, user_name):
+            continue
+        prompt = w.prompt.strip()[:MAX_PROMPT_CHARS] if w.who != "you" else ""
+        who = w.who if prompt else "you"  # an AI part with no prompt to give it is no AI part
+        plan = AiPlan(who=who, prompt=prompt, you_do=" ".join(w.you_do.split())[:400] if who != "ai" else "")
+        if item.ai_plan != plan:
+            item.ai_plan = plan
+            if item.pushed:  # synced like any edit: the task's body changes
+                item.revision += 1
+                item.updated_at = utcnow()
+
+
+def keep_yours(previous: Classification | None, new: Classification) -> Classification:
+    """A summary written again keeps the kind and company you set in the app (and your contacts when it
+    found none); the sales step and the deal's to-dos are the new reading's."""
+    if previous is None or not previous.by_you:
+        return new
+    contacts = new.contacts if new.contacts else previous.contacts
+    if previous.company and new.company and name_key(new.company) != name_key(previous.company):
+        contacts = previous.contacts  # the people Claude found work somewhere else than where you said
+    business = previous.kind in ("client", "prospect")
+    return new.model_copy(update={
+        "kind": previous.kind, "company": previous.company, "confidence": 1.0, "by_you": True,
+        "contacts": contacts if business else [],
+        **({} if business else {"step": "none", "proposal_item": "", "followup_items": []}),
+    })
 MAX_RECAP_POINTS = 30
 
 
@@ -230,6 +280,8 @@ def render_notes(meeting: Meeting, tldr: str, body: str, user_name: str) -> str:
     if meeting.participants:
         meta += f" · {t['with']} {', '.join(meeting.participants)}"
     lines += [meta, ""]
+    if (line := classification_line(meeting)) is not None:
+        lines += [line, ""]
     if tldr:
         lines += [f"> {tldr}", ""]
     answered = [(name, value) for name, value in meeting.fields.items() if value.strip()]
@@ -266,6 +318,30 @@ def render_notes(meeting: Meeting, tldr: str, body: str, user_name: str) -> str:
                 lines += [f"- `{f}`" for f in it.agent.result_files]
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+KIND_LABELS = {
+    "en": {"client": "Client meeting", "prospect": "Prospect", "partner": "Partner", "internal": "Internal",
+           "other": "Other"},
+    "fr": {"client": "Rendez-vous client", "prospect": "Prospect", "partner": "Partenaire", "internal": "Interne",
+           "other": "Autre"},
+}  # fmt: skip
+STEP_LABELS = {
+    "en": {"first_call": "first call", "discovery": "discovery", "proposal": "proposal", "won": "won", "lost": "lost"},
+    "fr": {"first_call": "premier appel", "discovery": "découverte", "proposal": "proposition", "won": "gagné",
+           "lost": "perdu"},
+}  # fmt: skip
+
+
+def classification_line(meeting: Meeting) -> str | None:
+    """``**Prospect** · GAIA · discovery`` under the notes' title: only for a client or prospect meeting (the
+    others aren't worth a line in every tool)."""
+    c = meeting.classification
+    if c is None or not c.is_business:
+        return None
+    lang = _lang(meeting)
+    bits = [f"**{KIND_LABELS[lang][c.kind]}**", c.company, STEP_LABELS[lang].get(c.step, "")]
+    return " · ".join(b for b in bits if b)
 
 
 def _action_line(it: Item, t: dict[str, str] = _LABELS["en"]) -> str:

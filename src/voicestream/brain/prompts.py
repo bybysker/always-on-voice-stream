@@ -131,10 +131,58 @@ happens next as agreed — milestones, the next meeting, decisions still to make
 the individual to-dos. Leave out anything the user would not show them: the user's own assessments (how \
 interested they seem, objections or risks the user is noting, budget guesses, competitors, salary or \
 negotiation positions) and anything said only among the user's side. Empty when the meeting gave nothing.
+10. classification — what kind of meeting this was, for the user's CRM:
+   - kind: "client" (an existing client of the user's business: their project, a delivery, a review, \
+a renewal), "prospect" (a sales conversation with someone who may buy: a call-back to qualify, a \
+discovery meeting, a proposal, a negotiation), "partner" (an outside organization that buys nothing: \
+a supplier, a freelancer, a partner, an investor), "internal" (only the user's own team), "other" \
+(personal, another activity, a talk or video playing, or too little to tell). When the context \
+describes the user's business, "client" and "prospect" are only for that business: a client of \
+another activity is "other".
+   - confidence — how clearly the transcript shows it (who the people are, what they buy or would \
+buy); not from the topic alone.
+   - company — the client's or prospect's organization exactly as named (a self-employed person's \
+trade name counts). '' if nobody named it: never guess one.
+   - contacts — the people from that organization who took part (never the user or their team), \
+with an e-mail only if it was said or shown in full, and their role if said.
+   - step — where the deal stood after this meeting: "first_call" (a short call to qualify and set \
+a meeting), "discovery" (a meeting to understand the need), "proposal" (an offer and price presented \
+or negotiated), "won" (they said yes or signed), "lost" (they said no), "none" (no sales step: a \
+client's project meeting, a follow-up).
+   - proposal_item — the id of the to-do captured live (e.g. "A2") in which the user sends them the \
+proposal or quote; '' if there is none.
+   - followup_items — the ids of to-dos that only chase them for an answer on a proposal (a reminder \
+to write or call them back about it); [] if none.
+   - reason — one short sentence on why this kind.
+   For "partner", "internal" and "other", company, contacts and the to-dos stay empty and step is \
+"none". What was said about the deal (budget, doubts…) goes in the fields, not here.
+11. todo_plans — one per open to-do that is the user's (owned by the user, by the Assistant, or by \
+nobody), the ones captured live and your missing_items alike (an item by its id, a missing one by its \
+exact title); never the other participants' to-dos. Split the work honestly:
+   - who: "ai" when an AI assistant (a chat like Claude, with web search but no access to the user's \
+email, calendar, files, accounts or people) can do all of it from the prompt and the user only reviews \
+the result: research, a comparison, a draft, a script, an outline, an analysis of public information; \
+"both" when it can prepare the work and the user must finish it: draft the proposal the user then \
+checks and sends, prepare the questions for a call the user makes; "you" when only a person can: a \
+call, a meeting, a decision, a payment, a signature, a physical task, anything needing private data \
+the transcript doesn't give.
+   - prompt (for "ai" and "both"): a complete prompt the user pastes into an AI assistant that never \
+saw the meeting: the context (who the client or audience is, what was said, names, numbers, dates, \
+constraints, tone), the task, the deliverable with its format and length. Write it in the meeting's \
+language, addressed to the assistant ("Rédige…", "Write…"). Only facts from the transcript: put \
+[à compléter] / [to fill in] where something is needed and unknown. '' for "you".
+   - you_do (for "both" and "you"): what the user does, one short sentence ("Relire, ajuster le prix \
+et l'envoyer à Julie"); '' for "ai".
+   When the context says plans are not wanted, todo_plans is [].
 
 Write everything (title, tldr, notes, item titles, email, summary) in the language requested in the context. \
 Never invent facts that are not in the transcript.
 """
+
+
+def business_context(business: str) -> str:
+    """What the classification needs to know about the user's business (``brain.business``)."""
+    return f"The user's business: {' '.join(business.split())}" if business.strip() else ""
 
 
 SCREEN_SYSTEM = """\

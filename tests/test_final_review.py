@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 import pytest
 import websockets
-from helpers import bursts, noise, seg, speechlike
+from helpers import OTHER_MEETING, bursts, noise, seg, speechlike
 from test_extractor import Rig
 from test_import_cli import VTT, _write_cfg
 from test_safety import _cmd, _setup
@@ -1019,7 +1019,8 @@ async def test_s3_summary_participants_replace_the_live_list(cfg: Config) -> Non
     cfg.brain.provider = "anthropic"
     llm = ScriptedLLM([WireSummary(title="Internal sync", tldr="", notes_markdown="", updates=[], missing_items=[],
                                    participants=["Sam", "Alex"], speakers=[], language="en", followup_subject="", followup_body="",
-                                   template="general", fields=[], recap_overview="", recap_discussed=[], recap_next_steps=[])])
+                                   template="general", fields=[], recap_overview="", recap_discussed=[], recap_next_steps=[],
+                                   classification=OTHER_MEETING, todo_plans=[])])
     await summarize(cfg, m, tracker, llm)
     assert m.participants == ["Sam"]
 

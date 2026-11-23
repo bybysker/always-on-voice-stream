@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from starlette.testclient import TestClient
 from test_app_host import _factory, _write_config
+from helpers import OTHER_MEETING
 from test_app_meetings import WED, _save
 
 from voicestream import mcp_server
@@ -42,7 +43,8 @@ def _summary(**kw: Any) -> dict[str, Any]:
     return {"title": "Acme discovery", "tldr": "Acme wants fewer no-shows.", "notes_markdown": "## Summary\n\n- Acme call.",
             "updates": [], "missing_items": [], "participants": ["Léa"], "speakers": [], "language": "en",
             "followup_subject": "", "followup_body": "", "template": "general", "fields": [],
-            "recap_overview": "", "recap_discussed": [], "recap_next_steps": [], **kw}
+            "recap_overview": "", "recap_discussed": [], "recap_next_steps": [],
+            "classification": OTHER_MEETING.model_dump(), "todo_plans": [], **kw}
 
 
 # ------------------------------------------------------------------ templates
