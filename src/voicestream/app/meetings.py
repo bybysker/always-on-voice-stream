@@ -306,14 +306,22 @@ class _Held:
     users: int = 0
 
 
+def _file_key(path: Path) -> tuple[int, int, int]:
+    """What tells a changed meeting.json from the one read before: its time, but also its size and the
+    file itself. Windows' file clock is coarse (about 15 ms): a file rewritten within the same tick keeps
+    its time, but atomic_write puts a new file in place, which has a new identity (``st_ino``)."""
+    st = path.stat()
+    return st.st_mtime_ns, st.st_size, st.st_ino
+
+
 class Meetings:
     """The Meetings screen's operations, sharing the host's bus, cost meter and (while listening)
     the running assistant's sinks and in-memory meetings."""
 
     def __init__(self, host: MeetingsHost) -> None:
         self.host = host
-        self._cache: dict[str, tuple[int, dict[str, Any], str]] = {}
-        """folder name -> (meeting.json mtime, summary, search text): parsing every meeting.json
+        self._cache: dict[str, tuple[tuple[int, int, int], dict[str, Any], str]] = {}
+        """folder name -> (meeting.json's :func:`_file_key`, summary, search text): parsing every meeting.json
         (each holds its whole transcript) on every list would be slow after a few months."""
         self._held: dict[str, _Held] = {}
         """folder name -> the copy of a past meeting that has work in flight."""
@@ -364,11 +372,11 @@ class Meetings:
 
     def _summary(self, d: Path) -> tuple[dict[str, Any], str] | None:
         try:
-            mtime = (d / "meeting.json").stat().st_mtime_ns
+            key = _file_key(d / "meeting.json")
         except OSError:
             return None
         hit = self._cache.get(d.name)
-        if hit is not None and hit[0] == mtime:
+        if hit is not None and hit[0] == key:
             return hit[1], hit[2]
         try:
             meeting, _ = load_meeting(d)
@@ -377,7 +385,7 @@ class Meetings:
             return None
         row = summary(meeting, d, self.cfg.user_name)
         text = _search_text(meeting, d)
-        self._cache[d.name] = (mtime, row, text)
+        self._cache[d.name] = (key, row, text)
         return row, text
 
     # --------------------------------------------------------------------- read
