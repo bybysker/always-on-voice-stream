@@ -2,7 +2,7 @@ name: windows app
 
 # Builds the Windows app (dist/Voicestream/Voicestream.exe, x64) on a Windows runner: whisper-server.exe
 # for speech-to-text on the PC, the test suite, PyInstaller, a self-test launch of the packaged app
-# (page, API, its own whisper-server, a graceful stop), and uploads Voicestream-<version>-windows-x64.zip.
+# (its icon next to the clock and its menu, page, API, its own whisper-server, a graceful stop through Quit), and uploads Voicestream-<version>-windows-x64.zip.
 # For a v* tag, or a manual run given a release tag, it also attaches the zip to that GitHub release
 # (the Mac build, mac-app.yml, attaches the DMG to the same release; the second to finish publishes it).
 # Everything it runs is in packaging/windows/build.sh, so a Windows PC can do the same by hand (Git Bash).
@@ -73,7 +73,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[audio,dashboard,agents,app,dev]" pyinstaller==6.22.3
+          python -m pip install -e ".[audio,dashboard,agents,app,windows,dev]" pyinstaller==6.22.3
           python -m pip list
 
       - name: Check whisper-server (Windows' own DLLs only, runs)

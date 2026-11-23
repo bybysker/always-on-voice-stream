@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the Windows app and its zip on a Windows x64 PC (what .github/workflows/windows-app.yml runs).
 # Runs in Git Bash, with Visual Studio's C++ tools (or Build Tools), CMake, git and a Python 3.12:
-#   pip install -e '.[audio,dashboard,agents,app,dev]' pyinstaller==6.22.3
+#   pip install -e '.[audio,dashboard,agents,app,windows,dev]' pyinstaller==6.22.3
 #
 #   packaging/windows/build.sh [step ...]     default: whisper check-whisper icon app selftest zip
 #
@@ -10,7 +10,8 @@
 #   check-whisper  fail unless whisper-server.exe needs only Windows' own DLLs, and runs
 #   icon           draw the icon (packaging/windows/build/Voicestream.ico)
 #   app            PyInstaller -> dist/Voicestream/Voicestream.exe (whisper-server.exe in _internal/bin)
-#   selftest       start the packaged app with --selftest (no browser, no listening), check its JSON report
+#   selftest       start the packaged app with --selftest: its icon next to the clock, no browser, no listening;
+#                  quit through the icon's menu, check the JSON report
 #   zip            dist/Voicestream-<version>-windows-x64.zip (the Voicestream folder)
 set -euo pipefail
 
@@ -80,7 +81,8 @@ step_selftest() {
   rm -rf "$SELFTEST_DIR"; mkdir -p "$SELFTEST_DIR"
   local status=0
   # without the build tree's whisper-server: the app must find its own
-  env -u VOICESTREAM_WHISPER_SERVER "$APP/Voicestream.exe" --no-open \
+  # a windowed app: no console output, everything is in the report (and the app's log under ~/.voicestream)
+  env -u VOICESTREAM_WHISPER_SERVER "$APP/Voicestream.exe" \
     --selftest "$SELFTEST_SECONDS" --selftest-report "$SELFTEST_DIR/selftest.json" \
     >"$SELFTEST_DIR/selftest.log" 2>&1 || status=$?
   echo "exit status: $status"

@@ -82,10 +82,11 @@ def test_spec(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     hidden = a.kwargs["hiddenimports"]
     assert "voicestream.sinks.notion" in hidden and "voicestream.__main__" not in hidden
     assert "keyring.backends.Windows" in hidden  # the keys in the Credential Manager
+    assert "pystray._win32" in hidden  # the icon next to the clock: pystray imports its backend by name
     assert any(src.startswith("/site/soundcard/") for src, _ in a.kwargs["datas"])  # WASAPI loopback's .h files
     assert {"webview", "objc", "catap"} <= set(a.kwargs["excludes"])
     exe = made["EXE"].kwargs
-    assert exe["name"] == "Voicestream" and exe["console"] is True and exe["exclude_binaries"] is True
+    assert exe["name"] == "Voicestream" and exe["console"] is False and exe["exclude_binaries"] is True
     assert made["COLLECT"].kwargs["name"] == "Voicestream"
     assert "BUNDLE" not in made
 
@@ -117,14 +118,16 @@ def test_dll_check() -> None:
 def test_selftest_check(tmp_path: Path) -> None:
     check = _load("check_selftest")
     good = {
-        "ok": True, "frozen": True, "errors": [], "quit": {"graceful": True},
-        "checks": {"app_page": True, "api_app": True, "whisper_server_bundled": True},
+        "ok": True, "mode": "tray", "frozen": True, "errors": [], "quit": {"graceful": True},
+        "checks": {"app_page": True, "api_app": True, "whisper_server_bundled": True, "tray_icon": True,
+                   "tray_menu": True},
     }
     assert check.problems(good) == []
     bad = {**good, "ok": False, "checks": {**good["checks"], "whisper_server_bundled": False}, "quit": {}}
     assert check.problems(bad) == [
         "check failed: whisper_server_bundled", "the report is not ok", "the app did not stop the graceful way",
     ]
+    assert check.problems({**good, "mode": "headless"})[0].startswith("the app ran in 'headless' mode")
     report = tmp_path / "selftest.json"
     report.write_text(json.dumps(good), encoding="utf-8")
     assert check.main([str(report)]) == 0

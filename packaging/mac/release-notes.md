@@ -70,12 +70,14 @@ Démarrer une réunion.
    processor with AVX2).
 2. Right-click it → **Extract All…**, keep the `Voicestream` folder whole, and double-click
    `Voicestream.exe`. Windows SmartScreen warns once (the app isn't signed): **More info → Run anyway**.
-3. The app opens in your browser, with a console window: **Ctrl+C** in it quits (the meeting in
-   progress is saved). To update, download the new zip and replace the folder.
+3. The app opens in your browser, and its icon sits next to the clock: right-click it to start or stop
+   a meeting, or to quit (the meeting in progress is saved). To update, download the new zip and
+   replace the folder.
 
 Sur Windows : téléchargez `Voicestream-…-windows-x64.zip`, **Extraire tout…**, puis double-cliquez sur
 `Voicestream.exe` (SmartScreen : **Informations complémentaires → Exécuter quand même**). L'app
-s'ouvre dans votre navigateur ; **Ctrl+C** dans la console la quitte.
+s'ouvre dans votre navigateur ; son icône à côté de l'horloge (clic droit) démarre ou arrête une
+réunion, et quitte l'app.
 
 ### Cost
 

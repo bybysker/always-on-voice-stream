@@ -223,17 +223,24 @@ No Python, no terminal commands.
    (for example `Documents`). Keep the folder whole: `Voicestream.exe` needs the `_internal` folder next to it.
 3. Double-click `Voicestream.exe`. The app is not signed, so Windows SmartScreen says "Windows protected
    your PC": click **More info**, then **Run anyway**. This happens once.
-4. A black console window opens and the app opens in your default browser. Follow the setup there
+4. The app opens in your default browser, and its icon appears in the taskbar's notification area,
+   next to the clock. Follow the setup in the browser
    (name, languages, speech-to-text "On this computer" or a cloud service, your Claude key).
    Windows asks for the microphone the first time: allow it. The other participants' audio is captured
    from your speakers or headset (WASAPI loopback): no extra permission.
 
-To quit, click in the console window and press **Ctrl+C**: a meeting in progress is wrapped up and saved.
-Closing the console window with **X** stops the app at once, without the wrap-up notes (the transcript
-is already on disk). Your keys go into the Windows Credential Manager; your meetings into
+The icon next to the clock is the app's handle:
+
+- **click** it: the app opens in the browser (if you closed its tab);
+- **right-click** it: what Voicestream is doing, **Start Meeting** / **Stop Meeting**, **Open Voicestream**
+  and **Quit Voicestream** (a meeting in progress is wrapped up and saved first);
+- a **red dot** on it: a meeting is being recorded; point at it to see for how long.
+
+Windows 11 may put a new icon under the **^** arrow. To keep it in view, drag it onto the taskbar, or turn
+**Voicestream** on in **Settings → Personalization → Taskbar → Other system tray icons**. Your keys go into the Windows Credential Manager; your meetings into
 `%USERPROFILE%\.voicestream`.
 
-What the Windows app does not have (yet): its own window, a tray icon, the floating button, the keyboard
+What the Windows app does not have (yet): its own window, the floating button, the keyboard
 shortcut, `voicestream://` links, launch at login and updates from inside the app (download the new zip
 and replace the folder). Apple Reminders and Shortcuts exist only on a Mac.
 
@@ -247,11 +254,15 @@ Pour un PC 64 bits sous Windows 10 ou 11, avec un processeur AVX2 (Intel depuis 
    Gardez le dossier entier : `Voicestream.exe` a besoin du dossier `_internal` à côté de lui.
 3. Double-cliquez sur `Voicestream.exe`. L'app n'est pas signée : Windows SmartScreen affiche « Windows a
    protégé votre ordinateur ». Cliquez sur **Informations complémentaires**, puis **Exécuter quand même**.
-4. Une fenêtre de console s'ouvre, et l'app s'ouvre dans votre navigateur. Suivez la configuration.
-   Autorisez le micro quand Windows le demande.
+4. L'app s'ouvre dans votre navigateur, et son icône apparaît dans la barre des tâches, à côté de
+   l'horloge. Suivez la configuration. Autorisez le micro quand Windows le demande.
 
-Pour quitter : cliquez dans la console et appuyez sur **Ctrl+C** (la réunion en cours est terminée et
-enregistrée). Fermer la console avec **X** arrête l'app tout de suite, sans les notes de fin de réunion.
+L'icône à côté de l'horloge : un **clic** ouvre l'app dans le navigateur ; un **clic droit** affiche ce que
+fait Voicestream, **Démarrer une réunion** / **Arrêter la réunion**, **Ouvrir Voicestream** et **Quitter
+Voicestream** (la réunion en cours est d'abord terminée et enregistrée) ; un **point rouge** : une réunion
+est enregistrée. Windows 11 peut la ranger sous la flèche **^** : faites-la glisser sur la barre des
+tâches, ou activez **Voicestream** dans **Paramètres → Personnalisation → Barre des tâches → Autres icônes
+de la barre d'état système**.
 
 ## Quick start
 

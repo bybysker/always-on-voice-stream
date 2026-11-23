@@ -269,6 +269,7 @@ def test_macos_launch_arguments_are_dropped_or_ignored(monkeypatch: pytest.Monke
 )
 def test_choose_mode(monkeypatch: pytest.MonkeyPatch, argv: list[str], platform: str, native_ok: bool, mode: str) -> None:
     monkeypatch.setattr(launcher, "native_available", lambda: native_ok)
+    monkeypatch.setattr(launcher, "tray_available", lambda: False)  # Windows with its icon: test_app_tray.py
     assert launcher.choose_mode(launcher.build_parser().parse_args(argv), platform) == mode
 
 

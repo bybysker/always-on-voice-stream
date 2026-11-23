@@ -4,6 +4,7 @@ The host (:class:`~voicestream.app.host.AppHost`) runs the dashboard server and 
 an asyncio loop in a background thread. This module only decides how you see it:
 
 * **native** (macOS with pywebview + PyObjC): a window and a menu-bar icon (:mod:`.native`);
+* **tray** (Windows with pystray): the default browser, and an icon in the notification area (:mod:`.tray`);
 * **browser** (``--browser``, and wherever pywebview isn't available): the default browser;
 * **headless** (``--no-open``): serve only and print the URL (also how the UI is tested on Linux).
 
@@ -95,7 +96,8 @@ def add_arguments(p: argparse.ArgumentParser, *, standalone: bool = True) -> Non
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="voicestream app",
-        description="Open Voicestream: a window and a menu-bar icon on a Mac, your browser elsewhere.",
+        description="Open Voicestream: a window and a menu-bar icon on a Mac, your browser elsewhere "
+        "(with an icon next to the clock on Windows).",
     )
     add_arguments(p)
     return p
@@ -150,18 +152,36 @@ def run(args: argparse.Namespace) -> int:
             mode, fallback = "browser", f"no native window ({exc}): fell back to the browser"
         else:
             return native.run(host, selftest=args.selftest, report_path=report)
+    if mode == "tray":
+        try:
+            from . import tray
+        except ImportError as exc:  # pystray half-installed: still usable in the browser
+            log.warning("no notification-area icon (%s): opening the app in the browser", exc)
+            mode, fallback = "browser", f"no notification-area icon ({exc}): fell back to the browser"
+        else:
+            return tray.run(host, selftest=args.selftest, report_path=report)
     return serve(host, mode=mode, selftest=args.selftest, report_path=report, fallback=fallback)
 
 
 def choose_mode(args: argparse.Namespace, platform_name: str | None = None) -> str:
-    """``"native"``, ``"browser"`` or ``"headless"``."""
+    """``"native"``, ``"tray"``, ``"browser"`` or ``"headless"``."""
     if getattr(args, "no_open", False):
         return "headless"
     if getattr(args, "browser", False):
         return "browser"
     if (platform_name or sys.platform) == "darwin" and native_available():
         return "native"
+    if (platform_name or sys.platform) == "win32" and tray_available():
+        return "tray"
     return "browser"
+
+
+def tray_available() -> bool:
+    """pystray and Pillow are installed (the Windows app's notification-area icon, :mod:`.tray`)."""
+    try:
+        return all(find_spec(name) is not None for name in ("pystray", "PIL"))
+    except (ImportError, ValueError):
+        return False
 
 
 def native_available() -> bool:

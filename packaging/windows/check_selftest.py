@@ -9,11 +9,13 @@ import json
 import sys
 from pathlib import Path
 
-REQUIRED = ("app_page", "api_app", "whisper_server_bundled")
+REQUIRED = ("app_page", "api_app", "whisper_server_bundled", "tray_icon", "tray_menu")
 
 
 def problems(report: dict) -> list[str]:
     out = []
+    if report.get("mode") != "tray":
+        out.append(f"the app ran in {report.get('mode')!r} mode, not with its icon next to the clock (tray)")
     if not report.get("frozen"):
         out.append("the report doesn't come from the packaged app")
     checks = report.get("checks") or {}

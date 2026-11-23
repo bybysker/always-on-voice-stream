@@ -4,9 +4,9 @@
 #   VOICESTREAM_WHISPER_SERVER=C:/path/to/whisper-server.exe \
 #     python -m PyInstaller --noconfirm --distpath dist --workpath build/pyinstaller packaging/windows/voicestream.spec
 #
-# The app opens its UI in the default browser (launcher.py "browser" mode: the Mac window and menu-bar
-# icon are Cocoa only). It keeps a console window: it shows the app's address, and Ctrl+C in it stops
-# the app the graceful way (a meeting in progress is wrapped up and saved).
+# The app opens its UI in the default browser and lives in an icon next to the clock (launcher.py "tray"
+# mode, voicestream/app/tray.py; the Mac window and menu-bar icon are Cocoa only). No console window: the
+# icon's Quit stops the app the graceful way (a meeting in progress is wrapped up and saved).
 # Pinned with the build: PyInstaller 6.22.3, Python 3.12. Not code-signed: Windows SmartScreen warns once.
 
 import sys
@@ -37,6 +37,9 @@ hiddenimports = [
     "keyring.backends.Windows",  # API keys in the Windows Credential Manager
     *collect_submodules("win32ctypes"),
     "soundcard.mediafoundation",
+    "pystray._win32",  # pystray picks its backend by name at import: invisible to analysis
+    "PIL.Image",
+    "PIL.ImageDraw",
     "onnxruntime",  # voices.py imports it when it tells the people on the meeting audio apart
 ]
 
@@ -83,7 +86,7 @@ exe = EXE(  # noqa: F821
     debug=False,
     strip=False,
     upx=False,
-    console=True,
+    console=False,  # the icon next to the clock is the app's handle (and its Quit)
     icon=str(icon) if icon.is_file() else None,
 )
 
