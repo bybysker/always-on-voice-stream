@@ -11,7 +11,8 @@
 #   icon           draw the icon (packaging/windows/build/Voicestream.ico)
 #   app            PyInstaller -> dist/Voicestream/Voicestream.exe (whisper-server.exe in _internal/bin)
 #   selftest       start the packaged app with --selftest: its icon next to the clock, no browser, no listening;
-#                  quit through the icon's menu, check the JSON report
+#                  a second copy started meanwhile must find the first and end; quit through the icon's menu,
+#                  check both JSON reports
 #   zip            dist/Voicestream-<version>-windows-x64.zip (the Voicestream folder)
 set -euo pipefail
 
@@ -76,18 +77,40 @@ step_app() {
   du -sh "$APP"
 }
 
+wait_phase() {  # wait_phase <phase> <seconds>: the self-test writes how far it got to <report>.phase
+  local phase="$1" limit="$2" file="$SELFTEST_DIR/selftest.json.phase" waited=0
+  while (( waited < limit * 2 )); do
+    [[ -f "$file" ]] && grep -qx "$phase" "$file" && return 0
+    [[ -f "$file" ]] && grep -qx 'done' "$file" && return 1
+    sleep 0.5; waited=$((waited + 1))
+  done
+  return 1
+}
+
 step_selftest() {
   say_step "self-test of the packaged app (${SELFTEST_SECONDS} s)"
   rm -rf "$SELFTEST_DIR"; mkdir -p "$SELFTEST_DIR"
-  local status=0
-  # without the build tree's whisper-server: the app must find its own
-  # a windowed app: no console output, everything is in the report (and the app's log under ~/.voicestream)
+  local status=0 second=0 pid
+  # without the build tree's whisper-server: the app must find its own.
+  # A windowed app: no console output, everything is in the report (and the app's log under ~/.voicestream)
   env -u VOICESTREAM_WHISPER_SERVER "$APP/Voicestream.exe" \
     --selftest "$SELFTEST_SECONDS" --selftest-report "$SELFTEST_DIR/selftest.json" \
-    >"$SELFTEST_DIR/selftest.log" 2>&1 || status=$?
+    >"$SELFTEST_DIR/selftest.log" 2>&1 &
+  pid=$!
+  # one copy at a time: a second one, started while the first runs, must find it and end at once
+  if wait_phase ready 90; then
+    timeout 60 "$APP/Voicestream.exe" --selftest 5 --selftest-report "$SELFTEST_DIR/second-copy.json" \
+      >"$SELFTEST_DIR/second-copy.log" 2>&1 || second=$?
+    echo "second copy: exit status $second"
+    cat "$SELFTEST_DIR/second-copy.json" 2>/dev/null || echo "(no report from the second copy)"
+  else
+    echo "the first copy never got ready"; second=1
+  fi
+  wait "$pid" || status=$?
   echo "exit status: $status"
   cat "$SELFTEST_DIR/selftest.log" || true
-  "$PYTHON" packaging/windows/check_selftest.py "$SELFTEST_DIR/selftest.json"
+  "$PYTHON" packaging/windows/check_selftest.py "$SELFTEST_DIR/selftest.json" "$SELFTEST_DIR/second-copy.json"
+  (( second == 0 )) || fail "the second copy did not end cleanly (exit $second)"
   return "$status"
 }
 

@@ -235,6 +235,8 @@ The icon next to the clock is the app's handle:
 - **right-click** it: what Voicestream is doing, **Start Meeting** / **Stop Meeting**, **Open Voicestream**
   and **Quit Voicestream** (a meeting in progress is wrapped up and saved first);
 - a **red dot** on it: a meeting is being recorded; point at it to see for how long.
+- start `Voicestream.exe` again while it runs: no second copy starts, the running one opens in the
+  browser (two copies would record the same meeting twice).
 
 Windows 11 may put a new icon under the **^** arrow. To keep it in view, drag it onto the taskbar, or turn
 **Voicestream** on in **Settings → Personalization → Taskbar → Other system tray icons**. Your keys go into the Windows Credential Manager; your meetings into
@@ -260,7 +262,8 @@ Pour un PC 64 bits sous Windows 10 ou 11, avec un processeur AVX2 (Intel depuis 
 L'icône à côté de l'horloge : un **clic** ouvre l'app dans le navigateur ; un **clic droit** affiche ce que
 fait Voicestream, **Démarrer une réunion** / **Arrêter la réunion**, **Ouvrir Voicestream** et **Quitter
 Voicestream** (la réunion en cours est d'abord terminée et enregistrée) ; un **point rouge** : une réunion
-est enregistrée. Windows 11 peut la ranger sous la flèche **^** : faites-la glisser sur la barre des
+est enregistrée. Relancer `Voicestream.exe` pendant qu'il tourne ne démarre pas une deuxième copie : la
+copie déjà lancée s'ouvre dans le navigateur. Windows 11 peut la ranger sous la flèche **^** : faites-la glisser sur la barre des
 tâches, ou activez **Voicestream** dans **Paramètres → Personnalisation → Barre des tâches → Autres icônes
 de la barre d'état système**.
 

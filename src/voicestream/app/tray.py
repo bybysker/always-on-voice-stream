@@ -32,7 +32,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import launcher
+from . import launcher, single
 from .floating import meeting_started
 from .native import STRINGS, is_manual, pick_language, state_line
 
@@ -250,9 +250,42 @@ class Tray:
             self.refresh()
 
 
+def already_running(instance: single.Instance, *, selftest: float | None, report_path: Path | None,
+                    open_url: Callable[[str], Any]) -> int:
+    """Another copy holds the lock: show it (its address in the browser) and end this one."""
+    url = instance.running_url()
+    if url is None:
+        log.warning("Voicestream is already running, but did not say where")
+    elif selftest is None:
+        open_url(url)
+    if selftest is not None:  # the Windows CI starts a second copy next to the first one's self-test
+        launcher.write_report(report_path, {"ok": url is not None, "mode": "already-running", "found_first": url is not None,
+                                            "errors": [] if url else ["the first copy's address was not found"]})
+    return 0 if url is not None or selftest is None else 1
+
+
 def run(host: launcher.Host, *, selftest: float | None = None, report_path: Path | None = None,
-        pystray: Any = None, open_url: Callable[[str], Any] = webbrowser.open) -> int:
-    """Start the host, show the icon (and the app in the browser), run until Quit."""
+        pystray: Any = None, open_url: Callable[[str], Any] = webbrowser.open,
+        instance: single.Instance | None = None) -> int:
+    """Start the host, show the icon (and the app in the browser), run until Quit. A second copy
+    shows the first one and ends (:mod:`.single`)."""
+    instance = instance or single.Instance()
+    try:
+        first = instance.acquire()
+    except OSError as exc:  # the folder can't be written: run anyway, as before the lock existed
+        log.warning("could not check for another Voicestream (%s): starting anyway", exc)
+        first = True
+    if not first:
+        return already_running(instance, selftest=selftest, report_path=report_path, open_url=open_url)
+    try:
+        return _run(host, selftest=selftest, report_path=report_path, pystray=pystray, open_url=open_url,
+                    instance=instance)
+    finally:
+        instance.release()
+
+
+def _run(host: launcher.Host, *, selftest: float | None, report_path: Path | None, pystray: Any,
+         open_url: Callable[[str], Any], instance: single.Instance) -> int:
     if pystray is None:
         import pystray  # noqa: PLW0621 - the real one, here only: it picks its backend at import
     started = time.monotonic()
@@ -263,6 +296,9 @@ def run(host: launcher.Host, *, selftest: float | None = None, report_path: Path
         if selftest is not None:
             launcher.write_report(report_path, {"ok": False, "mode": "tray", "errors": [f"start: {exc}"]})
         return 2
+    if instance.held:
+        with contextlib.suppress(OSError):
+            instance.publish(url)
     tray = Tray(host, url, pystray, open_url=open_url)
     host.add_state_listener(tray.refresh)
     report: dict[str, Any] | None = None

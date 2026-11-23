@@ -1,6 +1,7 @@
-"""Check the Windows app's self-test report (packaging/windows/build.sh selftest).
+"""Check the Windows app's self-test reports (packaging/windows/build.sh selftest): the app's own, and
+the one of a second copy started meanwhile, which must have found the first and ended.
 
-    python packaging/windows/check_selftest.py build/selftest-windows/selftest.json
+    python packaging/windows/check_selftest.py build/selftest-windows/selftest.json [second-copy.json]
 """
 
 from __future__ import annotations
@@ -29,6 +30,14 @@ def problems(report: dict) -> list[str]:
     return out
 
 
+def second_copy_problems(report: dict) -> list[str]:
+    if report.get("mode") != "already-running":
+        return [f"the second copy ran as {report.get('mode')!r}: it should have found the first and ended"]
+    if not report.get("found_first"):
+        return ["the second copy did not find the first one's address"]
+    return []
+
+
 def main(argv: list[str]) -> int:
     path = Path(argv[0] if argv else "build/selftest-windows/selftest.json")
     if not path.is_file():
@@ -37,6 +46,12 @@ def main(argv: list[str]) -> int:
     report = json.loads(path.read_text(encoding="utf-8"))
     print(json.dumps({k: report.get(k) for k in ("ok", "mode", "version", "platform", "checks", "quit")}, indent=2))
     found = problems(report)
+    if len(argv) > 1:
+        second = Path(argv[1])
+        if not second.is_file():
+            found.append(f"no report from the second copy at {second}")
+        else:
+            found += second_copy_problems(json.loads(second.read_text(encoding="utf-8")))
     for p in found:
         print(p, file=sys.stderr)
     return 1 if found else 0

@@ -132,6 +132,12 @@ def test_selftest_check(tmp_path: Path) -> None:
     report.write_text(json.dumps(good), encoding="utf-8")
     assert check.main([str(report)]) == 0
     assert check.main([str(tmp_path / "missing.json")]) == 1
+    second = tmp_path / "second.json"
+    second.write_text(json.dumps({"ok": True, "mode": "already-running", "found_first": True}), encoding="utf-8")
+    assert check.main([str(report), str(second)]) == 0
+    second.write_text(json.dumps({**good}), encoding="utf-8")  # a second copy that started a second app
+    assert check.main([str(report), str(second)]) == 1
+    assert check.main([str(report), str(tmp_path / "none.json")]) == 1
 
 
 def test_find_binary_tries_exe_on_windows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

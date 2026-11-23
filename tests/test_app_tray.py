@@ -8,6 +8,7 @@ in a thread and returns once ``stop()`` is called; the menu is a callable asked 
 from __future__ import annotations
 
 import json
+import os
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from voicestream.app import launcher, tray
+from voicestream.app import launcher, single, tray
 
 from test_mac_app import FakeHost
 
@@ -144,7 +145,10 @@ def test_selftest_quits_through_the_menu(tmp_path: Path) -> None:
     host = FakeHost()
     report = tmp_path / "selftest.json"
     opened: list[str] = []
-    assert tray.run(host, selftest=0.5, report_path=report, pystray=FakePystray, open_url=opened.append) == 0
+    inst = single.Instance(tmp_path / "home")
+    assert tray.run(host, selftest=0.5, report_path=report, pystray=FakePystray, open_url=opened.append,
+                    instance=inst) == 0
+    assert not inst.held and not inst.info_path.exists()  # the lock and the address go with the app
     data = json.loads(report.read_text())
     assert data["ok"] and data["mode"] == "tray"
     assert data["checks"]["tray_icon"] and data["checks"]["tray_menu"] and data["checks"]["app_page"]
@@ -157,7 +161,9 @@ def test_selftest_quits_through_the_menu(tmp_path: Path) -> None:
 def test_start_failure_is_reported(tmp_path: Path) -> None:
     host = FakeHost(fail=RuntimeError("port in use"))
     report = tmp_path / "r.json"
-    assert tray.run(host, selftest=1, report_path=report, pystray=FakePystray) == 2
+    inst = single.Instance(tmp_path / "home")
+    assert tray.run(host, selftest=1, report_path=report, pystray=FakePystray, instance=inst) == 2
+    assert not inst.held
     assert json.loads(report.read_text())["errors"] == ["start: port in use"]
 
 
@@ -169,3 +175,50 @@ def test_windows_opens_with_the_icon(monkeypatch: pytest.MonkeyPatch, platform: 
     monkeypatch.setattr(launcher, "native_available", lambda: False)
     assert launcher.choose_mode(launcher.build_parser().parse_args([]), platform) == mode
     assert launcher.choose_mode(launcher.build_parser().parse_args(["--browser"]), platform) == "browser"
+
+
+# ------------------------------------------------------------------ one copy at a time (single.py)
+
+
+def test_one_copy_at_a_time(tmp_path: Path) -> None:
+    first, second = single.Instance(tmp_path), single.Instance(tmp_path)
+    assert first.acquire() and not second.acquire()
+    assert second.running_url(wait=0) is None  # the first copy hasn't said where it is yet
+    first.publish("http://127.0.0.1:5123/app?token=k")
+    assert second.running_url(wait=0) == "http://127.0.0.1:5123/app?token=k"
+    if os.name == "posix":
+        assert first.info_path.stat().st_mode & 0o077 == 0  # it holds the app's key: yours only
+    first.release()
+    assert not first.info_path.exists() and second.acquire()  # once it quits, the next copy starts
+    second.release()
+
+
+def test_a_crashed_copys_address_is_never_followed(tmp_path: Path) -> None:
+    (tmp_path / single.INFO_NAME).write_text(json.dumps({"url": "http://127.0.0.1:1/app"}))
+    inst = single.Instance(tmp_path)
+    assert inst.acquire() and not inst.info_path.exists()
+    inst.release()
+
+
+def test_only_a_local_address_is_opened(tmp_path: Path) -> None:
+    first, second = single.Instance(tmp_path), single.Instance(tmp_path)
+    assert first.acquire()
+    first.info_path.write_text(json.dumps({"url": "https://example.com/phish"}))
+    assert second.running_url(wait=0) is None
+    first.release()
+
+
+def test_a_second_copy_shows_the_first_and_ends(tmp_path: Path) -> None:
+    first = single.Instance(tmp_path)
+    assert first.acquire()
+    first.publish("http://127.0.0.1:5123/app?token=k")
+    host = FakeHost()
+    opened: list[str] = []
+    assert tray.run(host, pystray=FakePystray, open_url=opened.append, instance=single.Instance(tmp_path)) == 0
+    assert opened == ["http://127.0.0.1:5123/app?token=k"]
+    assert host.auto_listen is None  # it never started its own host: no second microphone, no second transcript
+    report = tmp_path / "second.json"
+    assert tray.run(FakeHost(), selftest=1, report_path=report, pystray=FakePystray, open_url=opened.append,
+                    instance=single.Instance(tmp_path)) == 0
+    assert json.loads(report.read_text())["mode"] == "already-running" and len(opened) == 1  # a self-test opens nothing
+    first.release()
