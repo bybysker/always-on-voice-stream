@@ -1,0 +1,155 @@
+name: windows app
+
+# Builds the Windows app (dist/Voicestream/Voicestream.exe, x64) on a Windows runner: whisper-server.exe
+# for speech-to-text on the PC, the test suite, PyInstaller, a self-test launch of the packaged app
+# (page, API, its own whisper-server, a graceful stop), and uploads Voicestream-<version>-windows-x64.zip.
+# For a v* tag, or a manual run given a release tag, it also attaches the zip to that GitHub release
+# (the Mac build, mac-app.yml, attaches the DMG to the same release).
+# Everything it runs is in packaging/windows/build.sh, so a Windows PC can do the same by hand (Git Bash).
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "packaging/windows/**"
+      - "packaging/mac/bundle_info.py"
+      - "packaging/mac/make_icon.py"
+      - ".github/workflows/windows-app.yml"
+      - "pyproject.toml"
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Also attach this build to a release, tagging this commit (e.g. v0.2.0). Empty: just build."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-app-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WHISPER_CPP_VERSION: v1.9.5
+  PYTHONUNBUFFERED: "1"
+  PYTHONUTF8: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  app:
+    name: build, test and package (Windows, x64)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      zip: ${{ steps.zip.outputs.name }}
+    env:
+      VOICESTREAM_WHISPER_SERVER: ${{ github.workspace }}/build/whisper/bin/whisper-server.exe
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Cache whisper-server
+        id: whisper-cache
+        uses: actions/cache@v5
+        with:
+          path: build/whisper/bin/whisper-server.exe
+          key: whisper-server-${{ env.WHISPER_CPP_VERSION }}-windows-x64-${{ hashFiles('packaging/windows/build.sh') }}
+
+      - name: Build whisper-server
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        run: packaging/windows/build.sh whisper
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[audio,dashboard,agents,app,dev]" pyinstaller==6.22.3
+          python -m pip list
+
+      - name: Check whisper-server (Windows' own DLLs only, runs)
+        run: packaging/windows/build.sh check-whisper
+
+      - name: Test suite
+        run: python -m pytest -q -o addopts="" --ignore=tests/js -rs -k "not real_whisper_server"
+
+      - name: Icon
+        run: packaging/windows/build.sh icon
+
+      - name: Build Voicestream.exe
+        run: packaging/windows/build.sh app
+
+      - name: Self-test launch of the packaged app
+        run: packaging/windows/build.sh selftest
+
+      - name: Zip
+        id: zip
+        run: |
+          packaging/windows/build.sh zip
+          zip="$(ls dist/Voicestream-*-windows-x64.zip)"
+          echo "path=$zip" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$zip")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the zip
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.zip.outputs.path }}
+          archive: false  # the zip itself, not a zip of it
+          if-no-files-found: error
+
+      - name: Upload the self-test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: selftest-windows
+          path: build/selftest-windows/
+          if-no-files-found: warn
+
+  release:
+    name: attach to the release (v* tags, or a manual run given one)
+    needs: app
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.release, 'v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Release notes
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: packaging/mac/release-notes.md
+          sparse-checkout-cone-mode: false
+
+      - name: Download the zip
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.app.outputs.zip }}
+          path: dist
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ZIP: dist/${{ needs.app.outputs.zip }}
+          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.release }}
+        run: |
+          ls -l dist
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$ ]] || { echo "::error::not a release tag: $TAG"; exit 1; }
+          [[ "$ZIP" == *"-${TAG#v}-windows-x64.zip" ]] || { echo "::error::$TAG isn't the app's version ($ZIP)"; exit 1; }
+          # the Mac build may create the release first, or after: whichever comes second attaches its file
+          if ! gh release upload "$TAG" "$ZIP" --clobber 2>/dev/null; then
+            verify=(); [[ "$GITHUB_REF" == refs/tags/* ]] && verify=(--verify-tag)
+            pre=(); [[ "$TAG" == *-* ]] && pre=(--prerelease)
+            gh release create "$TAG" "$ZIP" "${verify[@]}" "${pre[@]}" --target "$GITHUB_SHA" --title "Voicestream $TAG" \
+              --notes-file packaging/mac/release-notes.md --generate-notes \
+              || gh release upload "$TAG" "$ZIP" --clobber
+          fi

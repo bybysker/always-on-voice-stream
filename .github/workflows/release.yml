@@ -58,7 +58,7 @@ jobs:
           # both or neither: main moved meanwhile, nothing is pushed and the run says so
           git push --atomic origin HEAD:refs/heads/main "refs/tags/$TAG"
 
-      - name: Build, test and publish it on a Mac
+      - name: Build, test and publish it on a Mac and on Windows
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -66,10 +66,12 @@ jobs:
           PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
           gh workflow run mac-app.yml --ref "$TAG" -f release="$TAG"
+          gh workflow run windows-app.yml --ref "$TAG" -f release="$TAG"
           {
             echo "### Voicestream $TAG"
-            echo "Tagged on main. The Mac build now tests it and publishes the release:"
+            echo "Tagged on main. The Mac and Windows builds now test it and publish the release:"
             echo "https://github.com/$GH_REPO/actions/workflows/mac-app.yml"
+            echo "https://github.com/$GH_REPO/actions/workflows/windows-app.yml"
             if [ "$PRERELEASE" = true ]; then
               echo "A pre-release: only apps with *Settings → General → Updates → pre-releases* on are offered it."
             else
