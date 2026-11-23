@@ -411,7 +411,7 @@ def test_release_job_publishes_tagged_builds_only() -> None:
     # attached to the release through the script the Windows build shares: a draft until both apps are there
     assert 'packaging/publish-release.sh "$DMG"' in release and "packaging/publish-release.sh\n" in release
     publish = (ROOT / "packaging" / "publish-release.sh").read_text(encoding="utf-8")
-    assert 'gh release create "$TAG" "$FILE" --draft "${verify[@]}" "${pre[@]}" --target "$GITHUB_SHA"' in publish
+    assert 'gh release create "$TAG" "$FILE" --draft ${verify[@]+"${verify[@]}"} ${pre[@]+"${pre[@]}"} --target "$GITHUB_SHA"' in publish
     assert 'pre=(); [[ "$TAG" == *-* ]] && pre=(--prerelease)' in publish  # v0.4.0-beta.1: a pre-release on GitHub too
     # a manual run's tag reaches the script through the environment, checked, never as ${{ }} in it
     run = release[release.index("run: |"):]

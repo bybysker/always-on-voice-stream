@@ -135,7 +135,7 @@ case "$1 $2" in
     elif [[ "$*" == *assets* ]]; then tail -n +2 "$state"; fi ;;
   "release create") echo draft > "$state"; [[ "$4" == --* ]] || basename "$4" >> "$state" ;;
   "release upload") basename "$4" >> "$state" ;;
-  "release edit") sed -i '1s/.*/published/' "$state" ;;
+  "release edit") { echo published; tail -n +2 "$state"; } > "$state.new" && mv "$state.new" "$state" ;;
 esac
 '''
 

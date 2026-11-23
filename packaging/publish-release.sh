@@ -23,7 +23,8 @@ else
   verify=(); [[ "${GITHUB_REF:-}" == refs/tags/* ]] && verify=(--verify-tag)
   # a tag with a suffix (v0.4.0-beta.1) is a pre-release: only apps that asked for those see it
   pre=(); [[ "$TAG" == *-* ]] && pre=(--prerelease)
-  gh release create "$TAG" "$FILE" --draft "${verify[@]}" "${pre[@]}" --target "$GITHUB_SHA" \
+  # ${a[@]+"${a[@]}"}: an empty array under set -u, also in macOS's bash 3.2
+  gh release create "$TAG" "$FILE" --draft ${verify[@]+"${verify[@]}"} ${pre[@]+"${pre[@]}"} --target "$GITHUB_SHA" \
     --title "Voicestream $TAG" --notes-file "$NOTES" --generate-notes
 fi
 
