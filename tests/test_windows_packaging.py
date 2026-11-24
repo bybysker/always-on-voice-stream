@@ -153,3 +153,16 @@ def test_find_binary_tries_exe_on_windows(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert whisper_cpp.find_binary(cfg) is None
     monkeypatch.setattr(sys, "platform", "win32")
     assert whisper_cpp.find_binary(cfg) == exe
+
+
+def test_the_release_job_packs_the_zip_again() -> None:
+    """download-artifact unpacks an artifact that is itself a zip: the release job must zip the folder again
+    before it attaches it (the 0.6.0 release failed on it: "no matches found for dist/…-windows-x64.zip")."""
+    wf = (ROOT / ".github" / "workflows" / "windows-app.yml").read_text(encoding="utf-8")
+    release = wf[wf.index("\n  release:"):]
+    assert (release.index("actions/download-artifact@v8") < release.index("zip -qry")
+            < release.index('packaging/publish-release.sh "$ZIP"'))
+    packed = release[release.index("The zip, packed again"):release.index("Attach it to the release")]
+    # Info-ZIP's zip reads its default options from $ZIP: that step must not set it
+    assert "          ZIP:" not in packed and '"$ZIP"' not in packed
+    assert 'grep -q " Voicestream/Voicestream.exe$"' in release

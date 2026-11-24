@@ -137,6 +137,20 @@ jobs:
           name: ${{ needs.app.outputs.zip }}
           path: dist
 
+      - name: The zip, packed again
+        env:
+          # not ZIP: Info-ZIP's zip reads its default options from $ZIP
+          PACKED: dist/${{ needs.app.outputs.zip }}
+        run: |
+          # an artifact that is itself a zip comes back unpacked (dist/Voicestream/): pack the folder again,
+          # as build.sh zip does (the Voicestream folder at the top), keeping its links as links
+          if [ ! -f "$PACKED" ]; then
+            [ -d dist/Voicestream ] || { echo "::error::neither $PACKED nor dist/Voicestream"; ls -lR dist | head -50; exit 1; }
+            (cd dist && zip -qry "$(basename "$PACKED")" Voicestream)
+          fi
+          unzip -l "$PACKED" | tail -n 3
+          unzip -l "$PACKED" | grep -q " Voicestream/Voicestream.exe$" || { echo "::error::no Voicestream/Voicestream.exe in $PACKED"; exit 1; }
+
       - name: Attach it to the release
         env:
           GH_TOKEN: ${{ github.token }}
