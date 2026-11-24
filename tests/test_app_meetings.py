@@ -131,6 +131,19 @@ def test_list_is_cached_until_the_file_changes(cfg: Config, saved: dict[str, Pat
     assert loads == [saved["old"]]
 
 
+def test_a_rewrite_within_the_same_clock_tick_is_seen(cfg: Config, saved: dict[str, Path]) -> None:
+    """Windows' file clock is coarse (about 15 ms): a meeting.json rewritten within the same tick keeps its
+    time. The list must still show the new content (it was red on the Windows CI)."""
+    m = Meetings(StubHost(cfg))
+    m.list()
+    meeting, folder = meetings_mod.load_meeting(saved["old"])
+    before = (folder / "meeting.json").stat()
+    meeting.title = "Same tick"
+    atomic_write(folder / "meeting.json", meeting.model_dump_json())
+    os.utime(folder / "meeting.json", ns=(before.st_atime_ns, before.st_mtime_ns))  # the clock did not move
+    assert "Same tick" in [r["title"] for r in m.list()["meetings"]]
+
+
 @pytest.mark.parametrize("name", ["..", "../..", "../data", "/etc", "sessions", "2026-10-14_110000", "", "a/../2026-10-14_110000-planning"])
 def test_folder_names_are_matched_never_joined(cfg: Config, saved: dict[str, Path], name: str) -> None:
     with pytest.raises(MeetingNotFound):

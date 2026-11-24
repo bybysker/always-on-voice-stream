@@ -1,29 +1,26 @@
-<!-- release notes for 0.5.0 -->
+<!-- release notes for 0.6.0 -->
 <!-- The top of every GitHub release page (mac-app.yml adds the list of changes below it). The line above
      names the version they are for: the release workflow refuses another (packaging/release.py), so update
      both before you release. "New in this version" is what the app's update banner shows (1500 characters). -->
-**Voicestream for Mac** listens to your meetings (your microphone and the meeting's audio),
-writes the transcript on your Mac, and turns it into notes and to-dos with Claude: Google
+**Voicestream for Mac and Windows** listens to your meetings (your microphone and the meeting's audio),
+writes the transcript on your computer, and turns it into notes and to-dos with Claude: Google
 Calendar, Apple Reminders, Gmail, Google Docs, HubSpot and your own apps. French and English are
 detected as people speak.
 
-For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later. You need a Claude API key
+For a Mac with Apple Silicon (M1 or later) and macOS 14.2 or later, or a 64-bit PC with Windows 10
+or 11. You need a Claude API key
 ([console.anthropic.com](https://console.anthropic.com/settings/keys)).
 
 ### New in this version
 
-- **Client meetings, sorted.** Each meeting now says what it was: client, prospect, partner,
-  internal or other, and for a client or prospect the company, the people on their side and
-  where the deal stands. It shows on the meeting's page; **Change** corrects it. The
-  Meetings list marks client meetings, and search finds them by company.
-- **Twenty CRM.** Your client and prospect meetings file themselves in Twenty: the company and
-  the people (found by name, else created), the deal moved forward but never back, its
-  fields filled from your AI fields, the notes, and your to-dos as tasks. Other meetings never
-  reach it. Set it up in **Settings → Your tools → Twenty CRM**; **Test** says what it found.
-- **Your to-dos with AI.** At the end of a meeting, each of your to-dos says what an AI can do
-  for it, with a ready prompt to paste into an AI assistant, and what is left to you. See the
-  new **With AI** tab: **Copy the prompt** or **Copy all the prompts**. It costs one or two cents a meeting;
-  `brain.todo_prompts = false` turns it off.
+- **Voicestream for Windows.** The app now exists for Windows 10 and 11 too:
+  `Voicestream-…-windows-x64.zip` below. It hears your microphone and the meeting's audio,
+  transcribes on your PC or in the cloud, and opens in your browser. Its icon next to the clock
+  starts and stops a meeting, shows a red dot while it records, and quits (the meeting is saved
+  first). Start it a second time: the running app opens, no second copy records.
+- **Every release has both apps.** A version comes out only when the Mac and the Windows app are
+  both ready.
+- **Meetings list.** On Windows, a meeting you renamed could keep its old title in the list: fixed.
 
 ### Install
 
@@ -64,6 +61,21 @@ pas une réunion : **⌥⌘R** depuis n'importe quelle app, le bouton flottant, 
 « voicestream », ou la barre des menus. « Appel détecté — prendre des notes ? » vous le propose
 quand un appel commence, sans jamais démarrer seul. Tout se règle dans Réglages → Général →
 Démarrer une réunion.
+
+### Install on Windows
+
+1. Download `Voicestream-…-windows-x64.zip` below, under **Assets** (Windows 10 or 11, 64-bit, a
+   processor with AVX2).
+2. Right-click it → **Extract All…**, keep the `Voicestream` folder whole, and double-click
+   `Voicestream.exe`. Windows SmartScreen warns once (the app isn't signed): **More info → Run anyway**.
+3. The app opens in your browser, and its icon sits next to the clock: right-click it to start or stop
+   a meeting, or to quit (the meeting in progress is saved). To update, download the new zip and
+   replace the folder.
+
+Sur Windows : téléchargez `Voicestream-…-windows-x64.zip`, **Extraire tout…**, puis double-cliquez sur
+`Voicestream.exe` (SmartScreen : **Informations complémentaires → Exécuter quand même**). L'app
+s'ouvre dans votre navigateur ; son icône à côté de l'horloge (clic droit) démarre ou arrête une
+réunion, et quitte l'app.
 
 ### Cost
 

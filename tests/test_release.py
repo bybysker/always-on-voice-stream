@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import shutil
+import subprocess
 import re
 import sys
 from pathlib import Path
@@ -108,6 +111,9 @@ def test_the_release_workflow_tags_main_and_starts_the_mac_build() -> None:
     assert 'git push --atomic origin HEAD:refs/heads/main "refs/tags/$TAG"' in wf
     # a tag pushed with the job's token starts no workflow: the Mac build is started on it explicitly
     assert 'gh workflow run mac-app.yml --ref "$TAG" -f release="$TAG"' in wf
+    assert 'gh workflow run windows-app.yml --ref "$TAG" -f release="$TAG"' in wf
+    # the release is a draft before either build starts: nobody sees it until both apps are attached
+    assert wf.index('gh release create "$TAG" --draft --verify-tag') < wf.index("gh workflow run mac-app.yml")
     # what was typed reaches the scripts through the environment only, never as ${{ }} inside them
     for line in wf.splitlines():
         if "${{" in line:
@@ -115,3 +121,55 @@ def test_the_release_workflow_tags_main_and_starts_the_mac_build() -> None:
     # the release job publishes what this accepts, and nothing else
     mac = (ROOT / ".github" / "workflows" / "mac-app.yml").read_text(encoding="utf-8")
     assert release.TAG.pattern in mac and "startsWith(github.ref, 'refs/tags/v')" in mac
+
+
+# ------------------------------------------------- publish-release.sh (a fake gh records what it is asked)
+
+FAKE_GH = r'''#!/usr/bin/env bash
+# a release kept in $GH_STATE: "draft" or "published" on its first line, then one asset name per line
+state="$GH_STATE"; echo "$*" >> "$GH_STATE.log"
+case "$1 $2" in
+  "release view")
+    [[ -f "$state" ]] || exit 1
+    if [[ "$*" == *isDraft* ]]; then [[ "$(head -n1 "$state")" == draft ]] && echo true || echo false
+    elif [[ "$*" == *assets* ]]; then tail -n +2 "$state"; fi ;;
+  "release create") echo draft > "$state"; [[ "$4" == --* ]] || basename "$4" >> "$state" ;;
+  "release upload") basename "$4" >> "$state" ;;
+  "release edit") { echo published; tail -n +2 "$state"; } > "$state.new" && mv "$state.new" "$state" ;;
+esac
+'''
+
+
+def _publish(tmp_path: Path, file: str) -> str:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    gh = bin_dir / "gh"
+    gh.write_text(FAKE_GH)
+    gh.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "GH_STATE": str(tmp_path / "release"),
+           "TAG": "v0.5.0", "GITHUB_SHA": "abc", "GITHUB_REF": "refs/heads/main"}
+    out = subprocess.run(["bash", str(ROOT / "packaging" / "publish-release.sh"), file], env=env, cwd=ROOT,
+                         capture_output=True, text=True, check=True)
+    return out.stdout
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or os.name != "posix", reason="bash script")
+@pytest.mark.parametrize("first, second", [
+    ("dist/Voicestream-0.5.0-arm64.dmg", "dist/Voicestream-0.5.0-windows-x64.zip"),
+    ("dist/Voicestream-0.5.0-windows-x64.zip", "dist/Voicestream-0.5.0-arm64.dmg"),
+])
+def test_a_release_is_published_only_with_both_apps(tmp_path: Path, first: str, second: str) -> None:
+    state = tmp_path / "release"
+    state.write_text("draft\n")  # what release.yml makes before starting the builds
+    assert "stays a draft" in _publish(tmp_path, first)
+    assert state.read_text().splitlines()[0] == "draft"
+    assert "published v0.5.0" in _publish(tmp_path, second)
+    assert state.read_text().splitlines() == ["published", Path(first).name, Path(second).name]
+    assert "already published" in _publish(tmp_path, second)  # a re-run replaces its file, nothing more
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or os.name != "posix", reason="bash script")
+def test_a_tag_pushed_by_hand_gets_its_draft_from_the_first_build(tmp_path: Path) -> None:
+    assert "stays a draft" in _publish(tmp_path, "dist/Voicestream-0.5.0-arm64.dmg")
+    log = (tmp_path / "release.log").read_text()
+    assert "release create v0.5.0 dist/Voicestream-0.5.0-arm64.dmg --draft" in log

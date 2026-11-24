@@ -86,7 +86,8 @@ def stop_all() -> None:
 
 
 def find_binary(cfg: WhisperCppConfig) -> Path | None:
-    """``whisper-server``: the configured path, the copy bundled in the app, PATH, then Homebrew."""
+    """``whisper-server``: the configured path, the copy bundled in the app (``.exe`` on Windows),
+    PATH, then Homebrew."""
     candidates: list[str | None] = [cfg.binary, os.environ.get(BINARY_ENV)]
     if getattr(sys, "frozen", False):  # inside the packaged app (PyInstaller)
         exe = Path(sys.executable).resolve()
@@ -102,10 +103,18 @@ def find_binary(cfg: WhisperCppConfig) -> Path | None:
     for c in candidates:
         if not c:
             continue
-        p = Path(c).expanduser()
-        if p.is_file() and (os.access(p, os.X_OK) or p.suffix == ".py"):
-            return p
+        for p in _with_exe(Path(c).expanduser()):
+            if p.is_file() and (os.access(p, os.X_OK) or p.suffix == ".py"):
+                return p
     return None
+
+
+def _with_exe(path: Path) -> list[Path]:
+    """On Windows ``whisper-server`` is ``whisper-server.exe`` (the Windows app bundles it in
+    ``_internal/bin``): a name without a suffix is tried with ``.exe`` too."""
+    if sys.platform == "win32" and not path.suffix:
+        return [path, path.with_name(path.name + ".exe")]
+    return [path]
 
 
 def default_threads() -> int:

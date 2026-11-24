@@ -51,10 +51,16 @@ mac = [
   "pyobjc-framework-CoreAudio==12.2.2; sys_platform == 'darwin'",
   "keyring>=25.7; sys_platform == 'darwin'",
 ]
+# The Windows app's icon in the notification area (`voicestream app`, voicestream/app/tray.py).
+# Installs nothing on other systems.
+windows = [
+  "pystray==0.19.5; sys_platform == 'win32'",
+  "pillow>=10.0; sys_platform == 'win32'",
+]
 # The app's backend (`voicestream app`): settings written from the UI with your comments kept
 # (tomlkit), API keys in the macOS Keychain (keyring; elsewhere ~/.voicestream/.env).
 app = ["voicestream[dashboard,voices]", "tomlkit>=0.13.2", "keyring>=25.5"]
-all = ["voicestream[audio,local,screen,dashboard,voices,agents,mac,app]"]
+all = ["voicestream[audio,local,screen,dashboard,voices,agents,mac,windows,app]"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "starlette>=0.37", "uvicorn>=0.29", "pillow>=10.0", "tomlkit>=0.13.2", "keyring>=25.5"]
 
 [project.scripts]

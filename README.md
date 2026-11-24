@@ -33,6 +33,7 @@ settings. Agent work is extra and has its own budget.
 ## Contents
 
 - [Install the app (Mac)](#install-the-app-mac) · [Installer l'application](#installer-lapplication-mac)
+- [Install the app (Windows)](#install-the-app-windows) · [Installer l'application (Windows)](#installer-lapplication-windows)
 - [Quick start](#quick-start)
 - [What happens during a meeting](#what-happens-during-a-meeting)
 - [Capturing system audio](#capturing-system-audio-what-the-others-say)
@@ -207,6 +208,64 @@ sécurité → Micro** et **Confidentialité et sécurité → Enregistrement de
 système**, retirez Voicestream avec le bouton **−** (ou désactivez-le puis réactivez-le), rouvrez
 Voicestream et autorisez-le quand il le demande. Le trousseau peut aussi demander une fois si la
 nouvelle version peut lire vos clés enregistrées : cliquez sur **Toujours autoriser**.
+
+## Install the app (Windows)
+
+For a 64-bit PC with Windows 10 or 11 and a processor with AVX2 (Intel since 2013, AMD since 2015).
+No Python, no terminal commands.
+
+1. Download `Voicestream-<version>-windows-x64.zip`: from the
+   [Releases page](https://github.com/bybysker/always-on-voice-stream/releases), under **Assets**, or the
+   latest build from the
+   [windows app workflow](https://github.com/bybysker/always-on-voice-stream/actions/workflows/windows-app.yml?query=is%3Asuccess)
+   (newest green run → **Artifacts**; GitHub account needed).
+2. Right-click the zip → **Extract All…**, and put the `Voicestream` folder where you want to keep it
+   (for example `Documents`). Keep the folder whole: `Voicestream.exe` needs the `_internal` folder next to it.
+3. Double-click `Voicestream.exe`. The app is not signed, so Windows SmartScreen says "Windows protected
+   your PC": click **More info**, then **Run anyway**. This happens once.
+4. The app opens in your default browser, and its icon appears in the taskbar's notification area,
+   next to the clock. Follow the setup in the browser
+   (name, languages, speech-to-text "On this computer" or a cloud service, your Claude key).
+   Windows asks for the microphone the first time: allow it. The other participants' audio is captured
+   from your speakers or headset (WASAPI loopback): no extra permission.
+
+The icon next to the clock is the app's handle:
+
+- **click** it: the app opens in the browser (if you closed its tab);
+- **right-click** it: what Voicestream is doing, **Start Meeting** / **Stop Meeting**, **Open Voicestream**
+  and **Quit Voicestream** (a meeting in progress is wrapped up and saved first);
+- a **red dot** on it: a meeting is being recorded; point at it to see for how long.
+- start `Voicestream.exe` again while it runs: no second copy starts, the running one opens in the
+  browser (two copies would record the same meeting twice).
+
+Windows 11 may put a new icon under the **^** arrow. To keep it in view, drag it onto the taskbar, or turn
+**Voicestream** on in **Settings → Personalization → Taskbar → Other system tray icons**. Your keys go into the Windows Credential Manager; your meetings into
+`%USERPROFILE%\.voicestream`.
+
+What the Windows app does not have (yet): its own window, the floating button, the keyboard
+shortcut, `voicestream://` links, launch at login and updates from inside the app (download the new zip
+and replace the folder). Apple Reminders and Shortcuts exist only on a Mac.
+
+### Installer l'application (Windows)
+
+Pour un PC 64 bits sous Windows 10 ou 11, avec un processeur AVX2 (Intel depuis 2013, AMD depuis 2015).
+
+1. Téléchargez `Voicestream-<version>-windows-x64.zip` depuis la
+   [page des publications](https://github.com/bybysker/always-on-voice-stream/releases) (**Assets**).
+2. Clic droit sur le zip → **Extraire tout…**, puis rangez le dossier `Voicestream` où vous voulez.
+   Gardez le dossier entier : `Voicestream.exe` a besoin du dossier `_internal` à côté de lui.
+3. Double-cliquez sur `Voicestream.exe`. L'app n'est pas signée : Windows SmartScreen affiche « Windows a
+   protégé votre ordinateur ». Cliquez sur **Informations complémentaires**, puis **Exécuter quand même**.
+4. L'app s'ouvre dans votre navigateur, et son icône apparaît dans la barre des tâches, à côté de
+   l'horloge. Suivez la configuration. Autorisez le micro quand Windows le demande.
+
+L'icône à côté de l'horloge : un **clic** ouvre l'app dans le navigateur ; un **clic droit** affiche ce que
+fait Voicestream, **Démarrer une réunion** / **Arrêter la réunion**, **Ouvrir Voicestream** et **Quitter
+Voicestream** (la réunion en cours est d'abord terminée et enregistrée) ; un **point rouge** : une réunion
+est enregistrée. Relancer `Voicestream.exe` pendant qu'il tourne ne démarre pas une deuxième copie : la
+copie déjà lancée s'ouvre dans le navigateur. Windows 11 peut la ranger sous la flèche **^** : faites-la glisser sur la barre des
+tâches, ou activez **Voicestream** dans **Paramètres → Personnalisation → Barre des tâches → Autres icônes
+de la barre d'état système**.
 
 ## Quick start
 

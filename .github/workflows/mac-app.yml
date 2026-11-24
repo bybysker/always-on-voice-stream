@@ -5,7 +5,8 @@ name: mac app
 # self-test mode (window, page, menu-bar icon, hide/reopen, keyboard shortcut, floating button,
 # voicestream:// links, Spotlight launcher, microphone probe, quit) and uploads the DMG. For a v*
 # tag, or a manual run (Actions → mac app → Run workflow) given a release tag, it also publishes
-# the DMG as a GitHub release (the README's download link for people without a GitHub account).
+# the DMG to that GitHub release (the README's download link for people without a GitHub account); the
+# release is published once the Windows build (windows-app.yml) has attached its zip too.
 # Everything it runs is in packaging/mac/build.sh, so a Mac can do the same by hand.
 
 on:
@@ -191,7 +192,9 @@ jobs:
       - name: Release notes
         uses: actions/checkout@v6
         with:
-          sparse-checkout: packaging/mac/release-notes.md
+          sparse-checkout: |
+            packaging/mac/release-notes.md
+            packaging/publish-release.sh
           sparse-checkout-cone-mode: false
 
       - name: Download the DMG
@@ -211,15 +214,4 @@ jobs:
           ls -l dist
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$ ]] || { echo "::error::not a release tag: $TAG"; exit 1; }
           [[ "$DMG" == *"-${TAG#v}-arm64.dmg" ]] || { echo "::error::$TAG isn't the app's version ($DMG)"; exit 1; }
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$DMG" --clobber  # a re-run: replace the file
-          else
-            # a pushed tag must be there already; a manual run tags the commit it built
-            verify=(); [[ "$GITHUB_REF" == refs/tags/* ]] && verify=(--verify-tag)
-            # how to install it on top, then GitHub's list of what changed
-            # a tag with a suffix (v0.4.0-beta.1) is a pre-release: only apps that asked for those see it,
-            # and the README's "latest release" link keeps pointing at the last stable one
-            pre=(); [[ "$TAG" == *-* ]] && pre=(--prerelease)
-            gh release create "$TAG" "$DMG" "${verify[@]}" "${pre[@]}" --target "$GITHUB_SHA" --title "Voicestream $TAG" \
-              --notes-file packaging/mac/release-notes.md --generate-notes
-          fi
+          packaging/publish-release.sh "$DMG"  # a draft until the Windows zip is there too
